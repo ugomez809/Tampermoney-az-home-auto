@@ -5,7 +5,7 @@ across three tabs:
 
 1. **AgencyZoom (AZ)** — `app.agencyzoom.com` — opportunity pipeline, lead intake.
 2. **Salesforce Lightning (APEX)** — `farmersagent.lightning.force.com` — account
-   modals and LEX-side flow handlers.
+   modals and APEX-side flow handlers.
 3. **Guidewire PolicyCenter (GWPC)** — `policycenter[-2|-3].farmersinsurance.com` —
    submission, rating, quote data capture, webhook delivery.
 
@@ -106,19 +106,18 @@ webhook (Pabbly) for downstream processing.
 - **PII dumps (`*.storage.json`, `*.options.json`) are gitignored** — Tampermonkey
   export files contain real customer data and must never be committed. See
   `.gitignore`.
-- **Data source is a webhook (Pabbly intake, planned).** The pipeline used to
-  read from a Google Sheet via a Sheet Reader script; that path is retired.
-  APEX Quote New Account V3.9 is kept dormant so the form-fill slot is ready
-  when the webhook-to-APEX adapter is built.
+- **Data source is a webhook (Pabbly intake, in development).** APEX Quote New
+  Account V3.9 is kept dormant so the form-fill slot is ready when the
+  webhook-to-APEX adapter is built.
 
 ## Operator install notes
 
-When an APEX-renamed or V1.4 script updates, Tampermonkey treats changes to
-`@name` or `@namespace` as new scripts. If you had the older LEX-named or V1.3
-versions installed, either:
+Tampermonkey treats changes to `@name` or `@namespace` as new scripts. After
+pulling a renamed or version-bumped script, either:
 
-- Remove the old entries and install the new files, or
+- Remove the old entry in Tampermonkey and install the new file, or
 - Manually edit the installed script's header to match.
 
-Old `tm_lex_*` localStorage values from previous installs will be orphaned;
-run the Storage Tools clear once (it sweeps `tm_*` prefix) to wipe them.
+Orphaned localStorage values from previous installs will not be read by the
+renamed scripts. Run the Storage Tools clear once (it sweeps `tm_*`, `hb_*`,
+and `aqb_*` prefixes) to wipe them.
