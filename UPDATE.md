@@ -46,7 +46,8 @@ different `@name` / `@namespace` and will not overwrite the old ones.
 | Home Bot: Dwelling Water Rule V3.0 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Dwelling%20Water%20Rule%20V3.0.user.js) |
 | 04 GWPC Home Coverages Quote + Risk Analysis V1.0.9 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/04%20GWPC%20Home%20Coverages%20Quote%20%2B%20Risk%20Analysis%20V1.0.9.user.js) |
 | Home Bot: Home Quote Grabber V1.8 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Home%20Quote%20Grabber%20V1.8.user.js) |
-| AZ TO GWPC Home Bot: Auto Quote Grabber V2.4 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Auto%20Quote%20Grabber%20V2.4.user.js) |
+| GWPC Popup Blocker V1.0 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/GWPC%20Popup%20Blocker%20V1.0.user.js) |
+| Home Bot: Auto Quote Grabber V2.2 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Auto%20Quote%20Grabber%20V2.2.user.js) |
 | AZ TO GWPC Home Bot: Webhook Submission V1.9 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Webhook%20Submission%20V1.9.user.js) |
 | Home Bot: GWPC Discard Unsaved Change Clicker V1.0 | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20GWPC%20Discard%20Unsaved%20Change%20Clicker%20V1.0.user.js) |
 

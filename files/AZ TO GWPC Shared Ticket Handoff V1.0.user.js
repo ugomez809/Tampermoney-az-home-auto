@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff V1.0
 // @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
-// @version      1.0
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address and writes tm_pc_current_job_v1. APEX ignored.
+// @version      1.1
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.0';
+  const VERSION = '1.1';
 
   const GM_KEYS = {
     HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1'
@@ -165,16 +165,15 @@
       return;
     }
 
-    const homePayload = safeJsonParse(localStorage.getItem('tm_pc_home_quote_grab_payload_v1'), null);
-    if (!homePayload || typeof homePayload !== 'object' || !homePayload.row) {
-      setIdle('gw-no-home', 'GWPC waiting for tm_pc_home_quote_grab_payload_v1');
+    const gwpcIdentity = getGwpcIdentity();
+    if (!gwpcIdentity) {
+      setIdle('gw-no-gwpc-identity', 'GWPC waiting for current job / auto payload / home payload / bundle');
       return;
     }
 
-    const row = homePayload.row || {};
-    const gwName = clean(row['Name'] || row.name || '');
-    const gwAddress = clean(row['Mailing Address'] || row.mailingAddress || '');
-    const submissionNumber = clean(row['Submission Number'] || row.submissionNumber || '');
+    const gwName = clean(gwpcIdentity.name || '');
+    const gwAddress = clean(gwpcIdentity.mailingAddress || '');
+    const submissionNumber = clean(gwpcIdentity.submissionNumber || '');
 
     if (!gwName || !gwAddress) {
       setIdle('gw-home-incomplete', 'GWPC payload missing Name / Mailing Address');
@@ -238,6 +237,49 @@
     log(`GWPC Address: ${nextJob['Mailing Address']}`);
     log(`GWPC Submission: ${nextJob['SubmissionNumber'] || '(blank)'}`);
     setStatus(`GWPC linked ${nextJob['AZ ID']}`);
+  }
+
+  function getGwpcIdentity() {
+    const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
+    const homePayload = safeJsonParse(localStorage.getItem('tm_pc_home_quote_grab_payload_v1'), null);
+    const autoPayload = safeJsonParse(localStorage.getItem('tm_pc_auto_quote_grab_payload_v1'), null);
+    const bundle = safeJsonParse(localStorage.getItem('tm_pc_webhook_bundle_v1'), null);
+
+    const candidates = [
+      {
+        name: currentJob?.['Name'] || currentJob?.name || '',
+        mailingAddress: currentJob?.['Mailing Address'] || currentJob?.mailingAddress || '',
+        submissionNumber: currentJob?.['SubmissionNumber'] || currentJob?.submissionNumber || ''
+      },
+      {
+        name: homePayload?.row?.['Name'] || homePayload?.row?.name || '',
+        mailingAddress: homePayload?.row?.['Mailing Address'] || homePayload?.row?.mailingAddress || '',
+        submissionNumber: homePayload?.row?.['Submission Number'] || homePayload?.row?.submissionNumber || ''
+      },
+      {
+        name: autoPayload?.currentJob?.['Name'] || autoPayload?.row?.['Name'] || autoPayload?.summary?.primaryInsuredName || '',
+        mailingAddress: autoPayload?.currentJob?.['Mailing Address'] || autoPayload?.row?.['Mailing Address'] || '',
+        submissionNumber: autoPayload?.currentJob?.['SubmissionNumber'] || autoPayload?.row?.['Submission Number (Auto)'] || autoPayload?.summary?.submissionNumber || ''
+      },
+      {
+        name: bundle?.['Name'] || bundle?.auto?.data?.currentJob?.['Name'] || bundle?.home?.data?.row?.['Name'] || '',
+        mailingAddress: bundle?.['Mailing Address'] || bundle?.auto?.data?.currentJob?.['Mailing Address'] || bundle?.home?.data?.row?.['Mailing Address'] || '',
+        submissionNumber: bundle?.['SubmissionNumber'] || bundle?.auto?.data?.currentJob?.['SubmissionNumber'] || bundle?.auto?.data?.summary?.submissionNumber || bundle?.home?.data?.row?.['Submission Number'] || ''
+      }
+    ];
+
+    for (const candidate of candidates) {
+      const name = clean(candidate.name);
+      const mailingAddress = clean(candidate.mailingAddress);
+      if (!name || !mailingAddress) continue;
+      return {
+        name,
+        mailingAddress,
+        submissionNumber: clean(candidate.submissionNumber)
+      };
+    }
+
+    return null;
   }
 
   function buildAzMailingAddress(az) {

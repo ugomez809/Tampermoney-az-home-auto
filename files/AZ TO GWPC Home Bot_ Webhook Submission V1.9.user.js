@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
 // @namespace    az.to.gwpc.webhook.submission
-// @version      1.9
-// @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload. No reload needed.
+// @version      1.10
+// @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.9';
+  const VERSION = '1.10';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -534,27 +534,6 @@
     try { el.click(); return true; } catch { return false; }
   }
 
-  async function clickAutoInfoBar() {
-    const startedAt = Date.now();
-    while ((Date.now() - startedAt) < 7000) {
-      for (const doc of getAllDocs()) {
-        try {
-          const host = doc.getElementById('SubmissionWizard-JobWizardInfoBar-ViewAuto');
-          if (host) {
-            const target = host.querySelector('div.gw-action--inner') || host.querySelector('.gw-label') || host;
-            if (target && isVisible(target) && strongClick(target)) {
-              log('Clicked Auto info-bar item');
-              return true;
-            }
-          }
-        } catch {}
-      }
-      await sleep(300);
-    }
-    log('Auto info-bar item not found');
-    return false;
-  }
-
   function validateCurrentJobAndBundle(job, bundle) {
     if (!job['AZ ID']) return { ok: false, reason: 'Waiting for tm_pc_current_job_v1 / AZ ID' };
     if (!job['Name'] || !job['Mailing Address']) return { ok: false, reason: 'Waiting for full tm_pc_current_job_v1 identity' };
@@ -604,63 +583,16 @@
     });
   }
 
-  function payloadMatchesCurrentJob(payload, job) {
-    if (!isPlainObject(payload)) return false;
-
-    const payloadAzId = normalizeText(payload['AZ ID'] || payload?.currentJob?.['AZ ID'] || payload?.data?.['AZ ID'] || '');
-    if (payloadAzId && payloadAzId === job['AZ ID']) return true;
-
-    const row = payload.row || payload.data || payload.home?.data || {};
-    const name = normalizeText(row['Name'] || row.name || payload.primaryInsuredName || payload.summary?.primaryInsuredName || '');
-    const address = normalizeText(row['Mailing Address'] || row.mailingAddress || payload.identity?.['Mailing Address'] || payload.homeRow?.row?.['Mailing Address'] || '');
-
-    if (name && address) {
-      return namesLikelySame(name, job['Name']) && addressesLikelySame(address, job['Mailing Address']);
-    }
-
-    return false;
-  }
-
-  function clearMatchingPayloads(job, bundle) {
-    const homePayload = readHomePayload();
-    if (payloadMatchesCurrentJob(homePayload, job)) {
-      try { localStorage.removeItem(HOME_KEY); } catch {}
-      log(`Cleared payload: ${HOME_KEY}`);
-    }
-
-    const autoPayload = readAutoPayload();
-    if (payloadMatchesCurrentJob(autoPayload, job)) {
-      try { localStorage.removeItem(AUTO_KEY); } catch {}
-      log(`Cleared payload: ${AUTO_KEY}`);
-    }
-
-    const rawBundle = readBundleRaw();
-    if (isPlainObject(rawBundle) && normalizeText(rawBundle['AZ ID']) === job['AZ ID']) {
-      try { localStorage.removeItem(BUNDLE_KEY); } catch {}
-      log(`Cleared bundle: ${BUNDLE_KEY}`);
-    } else if (bundle?.meta?.synthetic) {
-      log('Synthetic bundle used, no stored bundle to clear');
-    }
-  }
-
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async function afterSuccess(job, bundle) {
-    clearMatchingPayloads(job, bundle);
+  async function afterSuccess(_job, _bundle) {
     state.running = false;
     sessionStorage.setItem(CFG.stoppedKey, '1');
     renderButtons();
-
-    const shouldClickAuto = hasMeaningfulHome(bundle) && !hasMeaningfulAuto(bundle) && !hasPendingTimeout(bundle);
-    if (shouldClickAuto) {
-      const clicked = await clickAutoInfoBar();
-      setStatus(clicked ? 'Sent | Auto clicked | Stopped' : 'Sent | Auto not found | Stopped');
-      return;
-    }
-
-    setStatus('Sent | Stopped');
+    log('Stored payloads retained after send');
+    setStatus('Sent | Payload retained | Stopped');
   }
 
   async function sendTestWebhook() {

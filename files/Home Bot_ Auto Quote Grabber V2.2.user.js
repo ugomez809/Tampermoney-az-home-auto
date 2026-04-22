@@ -1,16 +1,16 @@
 // ==UserScript==
-// @name         AZ TO GWPC Home Bot: Auto Quote Grabber V2.4
+// @name         Home Bot: Auto Quote Grabber V2.2
 // @namespace    home.bot.auto.quote.grabber
-// @version      2.4
-// @description  Webhook-ready payload build. Chunk 5 build + sender fix. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves sender-ready AUTO payload to localStorage.
+// @version      2.3
+// @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Auto%20Quote%20Grabber%20V2.4.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Auto%20Quote%20Grabber%20V2.4.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Auto%20Quote%20Grabber%20V2.2.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Auto%20Quote%20Grabber%20V2.2.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,8 +18,8 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Auto Quote Grabber';
-  const VERSION = '2.4';
+  const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber V2.2';
+  const VERSION = '2.3';
 
   const KEYS = {
     payload: 'tm_pc_auto_quote_grab_payload_v1',
@@ -77,9 +77,12 @@
   }
 
   function readCurrentJob() {
-    let raw = null;
-    try { raw = GM_getValue(CURRENT_JOB_KEY, null); } catch {}
+    let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
     let job = normalizeCurrentJob(raw);
+    if (job['AZ ID']) return job;
+
+    try { raw = GM_getValue(CURRENT_JOB_KEY, null); } catch {}
+    job = normalizeCurrentJob(raw);
     if (job['AZ ID']) return job;
 
     try { raw = GM_getValue(LEGACY_SHARED_JOB_KEY, null); } catch {}
@@ -90,6 +93,7 @@
   function writeCurrentJob(job) {
     const next = normalizeCurrentJob(job);
     next.updatedAt = next.updatedAt || new Date().toISOString();
+    try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
     try { GM_setValue(CURRENT_JOB_KEY, next); } catch {}
     return next;
   }
@@ -274,7 +278,7 @@
   function init() {
     buildUI();
     log('Script started');
-    log('Chunk 5 build + sender payload fix');
+    log('Shared payload gatherer loaded');
     log('Tabs enabled: Policy Info -> Auto Data Prefill -> Drivers -> Vehicles -> PA Coverages -> Quote');
     setStatus('Waiting for trigger');
     setInterval(tick, CFG.tickMs);

@@ -45,7 +45,7 @@ webhook (Pabbly) for downstream processing.
 └─────────────────────────┘
 ```
 
-## Scripts (22 total)
+## Scripts (23 total)
 
 ### AgencyZoom
 
@@ -76,7 +76,8 @@ webhook (Pabbly) for downstream processing.
 | **Home Bot: Dwelling Water Rule V3.0** | Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure. |
 | **04 GWPC Home Coverages Quote + Risk Analysis V1.0.9** | Edit All → apply coverage changes → Quote → Risk Analysis. |
 | **Home Bot: Home Quote Grabber V1.8** | After Submission (Quoted), scrapes home quote fields from Dwelling/Coverages/Quote and saves `tm_pc_home_quote_grab_payload_v1`. |
-| **AZ TO GWPC Home Bot: Auto Quote Grabber V2.4** | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves webhook-ready payload and bundle. |
+| **GWPC Popup Blocker V1.0** | Utility support script that suppresses alert/confirm/prompt and beforeunload blockers across all 3 PolicyCenter hosts. |
+| **Home Bot: Auto Quote Grabber V2.2** | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves shared AUTO payload and bundle data only. |
 | **AZ TO GWPC Home Bot: Webhook Submission V1.9** | Waits for handoff + payloads, POSTs one consolidated bundle to the configured webhook URL (Pabbly). Blocks infinite retry loops. |
 | **Home Bot: GWPC Discard Unsaved Change Clicker V1.0** | Auto-dismisses the "Discard Unsaved Change" dialog whenever it appears. |
 
