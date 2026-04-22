@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff V1.0
 // @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
-// @version      1.3
+// @version      1.4
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.3';
+  const VERSION = '1.4';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
@@ -274,8 +274,14 @@
     const homePayload = safeJsonParse(localStorage.getItem('tm_pc_home_quote_grab_payload_v1'), null);
     const autoPayload = safeJsonParse(localStorage.getItem('tm_pc_auto_quote_grab_payload_v1'), null);
     const bundle = safeJsonParse(localStorage.getItem('tm_pc_webhook_bundle_v1'), null);
+    const pageIdentity = getGwpcPageIdentity();
 
     const candidates = [
+      {
+        name: pageIdentity?.name || '',
+        mailingAddress: pageIdentity?.mailingAddress || '',
+        submissionNumber: pageIdentity?.submissionNumber || ''
+      },
       {
         name: currentJob?.['Name'] || currentJob?.name || '',
         mailingAddress: currentJob?.['Mailing Address'] || currentJob?.mailingAddress || '',
@@ -310,6 +316,83 @@
     }
 
     return null;
+  }
+
+  function getGwpcPageIdentity() {
+    const accountName = clean(firstVisibleTextBySelectors([
+      '#SubmissionWizard-JobWizardInfoBar-AccountName .gw-infoValue',
+      '#SubmissionWizard-JobWizardInfoBar-AccountName .gw-label.gw-infoValue',
+      '#SubmissionWizard-JobWizardInfoBar-AccountName'
+    ]));
+
+    const mailingAddress = clean(firstVisibleTextBySelectors([
+      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-infoValue',
+      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-label.gw-infoValue',
+      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress'
+    ]));
+
+    const submissionNumber = clean(extractSubmissionNumberFromPage());
+
+    if (!accountName || !mailingAddress) return null;
+    return { name: accountName, mailingAddress, submissionNumber };
+  }
+
+  function firstVisibleTextBySelectors(selectors) {
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      for (const selector of selectors) {
+        let el = null;
+        try { el = doc.querySelector(selector); } catch {}
+        if (!el || !isVisible(el)) continue;
+        const text = clean(el.textContent || '');
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
+  function extractSubmissionNumberFromPage() {
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      let nodes = [];
+      try { nodes = Array.from(doc.querySelectorAll('.gw-Wizard--Title, .gw-TitleBar--title, .gw-TitleBar--Title, [role="heading"], h1, h2')); } catch {}
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const text = clean(el.textContent || '');
+        const match = text.match(/Submission\s+(\d{6,})/i);
+        if (match) return match[1];
+      }
+    }
+    return '';
+  }
+
+  function getAccessibleDocs() {
+    const docs = [];
+    const seen = new Set();
+
+    function walk(win) {
+      try {
+        if (!win || seen.has(win)) return;
+        seen.add(win);
+        if (win.document) docs.push(win.document);
+        for (let i = 0; i < win.frames.length; i++) walk(win.frames[i]);
+      } catch {}
+    }
+
+    walk(window.top);
+    return docs;
+  }
+
+  function isVisible(el) {
+    try {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    } catch {
+      return false;
+    }
   }
 
   function buildAzMailingAddress(az) {

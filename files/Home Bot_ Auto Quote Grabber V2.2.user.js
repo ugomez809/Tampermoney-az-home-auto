@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber V2.2
 // @namespace    home.bot.auto.quote.grabber
-// @version      2.4
+// @version      2.5
 // @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber V2.2';
-  const VERSION = '2.4';
+  const VERSION = '2.5';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const KEYS = {
@@ -328,6 +328,8 @@
       .catch((err) => {
         log(`Failed: ${err?.message || err}`);
         setStatus('Failed');
+        state.running = false;
+        log('Stopped after fatal AUTO grab failure. Press START to retry.');
       })
       .finally(() => {
         state.busy = false;
@@ -622,7 +624,8 @@
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.policyInfoTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('Policy Info'),
-        () => findTabActionByExactText('Policy Info')
+        () => findTabActionByExactText('Policy Info'),
+        () => findActionByText('Policy Info')
       ],
       () => !!findByIdInDocs(IDS.policyInfoNameWrap) || !!findByIdInDocs(IDS.secondaryWrap)
     );
@@ -633,7 +636,8 @@
       'Auto Data Prefill',
       [
         () => findTabActionByVisibleLabel('Auto Data Prefill'),
-        () => findTabActionByExactText('Auto Data Prefill')
+        () => findTabActionByExactText('Auto Data Prefill'),
+        () => findActionByText('Auto Data Prefill')
       ],
       () => isTitleStartsWith('Auto Data Prefill')
     );
@@ -644,7 +648,8 @@
       'Drivers',
       [
         () => findTabActionByVisibleLabel('Drivers'),
-        () => findTabActionByExactText('Drivers')
+        () => findTabActionByExactText('Drivers'),
+        () => findActionByText('Drivers')
       ],
       () => !!findByIdInDocs(IDS.driversRoot)
     );
@@ -655,7 +660,8 @@
       'Vehicles',
       [
         () => findTabActionByVisibleLabel('Vehicles'),
-        () => findTabActionByExactText('Vehicles')
+        () => findTabActionByExactText('Vehicles'),
+        () => findActionByText('Vehicles')
       ],
       () => !!findByIdInDocs(IDS.vehiclesRoot)
     );
@@ -666,7 +672,8 @@
       'PA Coverages',
       [
         () => findTabActionByVisibleLabel('PA Coverages'),
-        () => findTabActionByExactText('PA Coverages')
+        () => findTabActionByExactText('PA Coverages'),
+        () => findActionByText('PA Coverages')
       ],
       () => !!findByIdStartsWithInDocs(IDS.paCoveragesRootPrefix)
     );
@@ -678,7 +685,8 @@
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('Quote'),
-        () => findTabActionByExactText('Quote')
+        () => findTabActionByExactText('Quote'),
+        () => findActionByText('Quote')
       ],
       () => isQuoteReady()
     );
@@ -1047,6 +1055,20 @@
 
         const buttonish = label.closest('[role="button"], [role="tab"], [role="menuitem"], a, button, [tabindex]');
         if (buttonish && isVisible(buttonish)) return buttonish;
+      }
+
+      return null;
+    });
+  }
+
+  function findActionByText(text) {
+    return findInDocs((doc) => {
+      const wanted = normalizeText(text);
+      const candidates = doc.querySelectorAll('div.gw-action--inner, div[role="tab"], div[role="menuitem"], div[role="button"]');
+
+      for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        if (normalizeText(el.textContent || '').includes(wanted)) return el;
       }
 
       return null;

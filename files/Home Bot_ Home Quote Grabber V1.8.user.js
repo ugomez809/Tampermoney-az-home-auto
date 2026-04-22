@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber V1.8
 // @namespace    home.bot.home.quote.grabber
-// @version      1.8
+// @version      1.9
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber V1.8';
-  const VERSION = '1.8';
+  const VERSION = '1.9';
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
@@ -84,6 +84,12 @@
 
   function tick() {
     if (!state.running || state.busy || state.doneThisLoad) return;
+
+    if (hasVisibleExactLabel('Personal Auto')) {
+      state.triggerSince = 0;
+      setWaiting('Blocked: Personal Auto present');
+      return;
+    }
 
     const quotedEl = findQuotedTriggerElement();
 
