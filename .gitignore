@@ -1,0 +1,9 @@
+# Tampermonkey storage dumps (may contain real customer PII — never commit)
+*.storage.json
+
+# Tampermonkey per-user options exports (UUIDs, enabled flags, @match overrides)
+*.options.json
+
+# Ad-hoc exports
+*.txt
+!README*.txt
