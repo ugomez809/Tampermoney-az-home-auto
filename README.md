@@ -108,3 +108,34 @@ GM_xmlhttpRequest@connect * wildcardno @noframes
 1.4
 997
  
+AZ Stage Runner + AZ Payload Grabber V1.9
+Opens tickets one at a time, checks the 13 required AgencyZoom fields, clicks the Home or Auto link, then waits until the lead gets the Bot Quoted tag before moving to the next one.
+Salesforce LEX
+2. Sheet Reader V1.6
+Pulls fresh data from Google Sheets, skips rows already used, saves the next lead’s info for the next script, and pauses itself while AgencyZoom is open.
+LEX Quote New Account V3.9
+Takes that saved lead info and fills the whole Quote New Account form, then stops after clicking Save.
+3a. LEX Duplicates Continue V1.8
+If the Duplicates Found popup appears, it picks the first option and clicks Continue.
+LEX Continue New Quote V1.8
+Handles the Personal Lines Quote popup, chooses Home, picks Residence Address, and clicks Continue New Quote once.
+Guidewire PolicyCenter
+5. 01 GWPC Start Auto Quote V1.6
+Waits for the main screen, reloads once, starts a new submission, and picks Personal Auto only.
+Guidewire Policy Info V1.9
+Fills the Policy Info page. If gender causes the non-binary/flex error, it switches to Male. Retries Next if the page gets stuck.
+Guidewire Disclosure Qualification V1.9
+Clicks Yes on all disclosure questions, including the extra Personal Auto ones, then retries Next if needed. Stops if the quote is already done.
+Dwelling Water Rule V3.0
+Handles the Dwelling page, optional valuation, plumbing replaced, water-device rule, and garage type fix after the first quote failure.
+04 GWPC Home Coverages + Risk Analysis V1.0.9
+Opens Edit All, applies coverage changes, clicks Quote, then goes to Risk Analysis.
+Auto prefill chain
+10. AQB Drivers Only V1.6
+Fills driver info, then sets a flag saying drivers are done.
+AQB Vehicles Only V1.3
+Waits for the drivers flag, cleans bad vehicle rows, sets the main driver, then sets the next flags.
+03 AQB Specialty Product V1.5
+Waits for the specialty flag. If no specialty product is selected, it quotes directly. If there is one, it removes rows and retries quoting up to 3 times.
+Webhook Submission V1.4
+Waits for the Quote page, reads the home quote payload, sends it to Zapier/Pabbly/custom webhook, then clicks Auto after success. Also prevents endless fail loops.
