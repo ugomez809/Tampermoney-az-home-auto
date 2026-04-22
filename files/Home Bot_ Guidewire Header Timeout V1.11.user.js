@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.17
+// @version      1.18
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.17';
+  const VERSION = '1.18';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
@@ -622,7 +622,11 @@
       '.gw-TitleBar--title',
       '.gw-WizardScreen-title',
       '.gw-Wizard--Title',
-      '[role="heading"][aria-level="1"]'
+      '[role="heading"][aria-level="1"]',
+      '#iv360-valuationContainer .iv360-page-title-container .iv360-page-header',
+      '#iv360-valuationContainer .iv360-page-title-container h1',
+      '.iv360-page-title-container .iv360-page-header',
+      '.iv360-page-title-container h1'
     ]);
   }
 
@@ -820,15 +824,13 @@
 
   function onSelectorMove(event) {
     const el = event.target instanceof Element ? event.target : null;
-    const target = getUsableSelectorTarget(el);
-    if (!target || (state.panel && state.panel.contains(target))) return;
-    setHoveredElement(target);
+    if (!el || (state.panel && state.panel.contains(el))) return;
+    setHoveredElement(el);
   }
 
   function onSelectorClick(event) {
     const el = event.target instanceof Element ? event.target : null;
-    const target = getUsableSelectorTarget(el);
-    if (!target || (state.panel && state.panel.contains(target))) return;
+    if (!el || (state.panel && state.panel.contains(el))) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -836,12 +838,12 @@
 
     state.selectorMode = false;
     state.selectorDialogOpen = true;
-    state.selectorTargetEl = target;
+    state.selectorTargetEl = el;
     clearHoveredHighlight();
     document.removeEventListener('mousemove', onSelectorMove, true);
     document.removeEventListener('click', onSelectorClick, true);
     document.removeEventListener('keydown', onSelectorKeydown, true);
-    openSelectorDialog(target, detectProduct() || state.lastProduct || 'home');
+    openSelectorDialog(el, getUsableSelectorTarget(el), detectProduct() || state.lastProduct || 'home');
   }
 
   function onSelectorKeydown(event) {
@@ -884,6 +886,7 @@
       selector,
       textSample,
       errorName,
+      targetMode: 'clicked',
       ruleKind: 'error',
       postMode: 'visible_text',
       customMessage: '',
@@ -1004,10 +1007,12 @@
     return strict ? null : el;
   }
 
-  function openSelectorDialog(el, product) {
+  function openSelectorDialog(clickedEl, upgradedEl, product) {
     removeSelectorDialog();
 
-    const baseRule = buildSelectorRule(el, product);
+    const clickedRule = buildSelectorRule(clickedEl, product);
+    const upgradedRule = upgradedEl && upgradedEl !== clickedEl ? buildSelectorRule(upgradedEl, product) : null;
+    const baseRule = upgradedRule || clickedRule;
     const overlay = document.createElement('div');
     overlay.id = 'tm-pc-header-timeout-selector-dialog';
     Object.assign(overlay.style, {
@@ -1032,6 +1037,11 @@
           <option value="error">Error</option>
           <option value="blocker">Blocker / stop condition</option>
         </select>
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Selection target</label>
+        <select id="tm-pc-rule-target" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
+          <option value="clicked">Exact clicked element</option>
+          ${upgradedRule ? '<option value="upgraded" selected>Upgraded inner/native target</option>' : ''}
+        </select>
         <label style="display:block;font-size:12px;margin-bottom:4px;">What to post</label>
         <select id="tm-pc-rule-post-mode" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
           <option value="visible_text">Visible text</option>
@@ -1051,6 +1061,7 @@
     document.documentElement.appendChild(overlay);
 
     const nameEl = $('#tm-pc-rule-name', overlay);
+    const targetEl = $('#tm-pc-rule-target', overlay);
     const postModeEl = $('#tm-pc-rule-post-mode', overlay);
     const customEl = $('#tm-pc-rule-custom', overlay);
     const cancelEl = $('#tm-pc-rule-cancel', overlay);
@@ -1077,9 +1088,12 @@
     });
     saveEl?.addEventListener('click', () => {
       const kindEl = $('#tm-pc-rule-kind', overlay);
+      const selectedMode = normalizeText(targetEl?.value || (upgradedRule ? 'upgraded' : 'clicked'));
+      const selectedBase = selectedMode === 'clicked' || !upgradedRule ? clickedRule : upgradedRule;
       const rule = {
-        ...baseRule,
-        errorName: normalizeText(nameEl?.value || baseRule.errorName || 'Selected rule'),
+        ...selectedBase,
+        targetMode: selectedMode,
+        errorName: normalizeText(nameEl?.value || selectedBase.errorName || 'Selected rule'),
         ruleKind: normalizeText(kindEl?.value || 'error'),
         postMode: normalizeText(postModeEl?.value || 'visible_text'),
         customMessage: normalizeText(customEl?.value || '')
