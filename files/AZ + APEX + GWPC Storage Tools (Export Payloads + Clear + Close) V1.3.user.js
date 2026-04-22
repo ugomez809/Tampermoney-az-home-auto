@@ -35,9 +35,9 @@
       'tm_az_current_job_v1',
       'tm_pc_current_job_v1'
     ],
-    apexPayload: 'tm_apex_home_bot_sheet_reader_payload_v1',
-    apexReady: 'tm_apex_home_bot_sheet_reader_ready_v1',
-    apexActiveRow: 'tm_apex_home_bot_sheet_reader_active_row_v1',
+    apexPayload: 'tm_apex_home_bot_payload_v1',
+    apexReady: 'tm_apex_home_bot_ready_v1',
+    apexActiveRow: 'tm_apex_home_bot_active_row_v1',
     gwpcHomePayload: 'tm_pc_home_quote_grab_payload_v1',
     gwpcAutoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     sharedCurrentJob: 'tm_pc_current_job_v1'
@@ -45,9 +45,9 @@
 
   const CACHE_KEYS = {
     azPayload: 'tm_shared_cache_az_payload_v1',
-    apexPayload: 'tm_shared_cache_apex_sheet_reader_payload_v1',
-    apexReady: 'tm_shared_cache_apex_sheet_reader_ready_v1',
-    apexActiveRow: 'tm_shared_cache_apex_sheet_reader_active_row_v1',
+    apexPayload: 'tm_shared_cache_apex_payload_v1',
+    apexReady: 'tm_shared_cache_apex_ready_v1',
+    apexActiveRow: 'tm_shared_cache_apex_active_row_v1',
     gwpcHomePayload: 'tm_shared_cache_gwpc_home_quote_payload_v1',
     gwpcAutoPayload: 'tm_shared_cache_gwpc_auto_quote_payload_v1'
   };

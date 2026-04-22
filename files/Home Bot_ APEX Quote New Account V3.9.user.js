@@ -38,9 +38,9 @@
   };
 
   const KEYS = {
-    PAYLOAD: 'tm_apex_home_bot_sheet_reader_payload_v1',
-    READY: 'tm_apex_home_bot_sheet_reader_ready_v1',
-    ACTIVE_ROW: 'tm_apex_home_bot_sheet_reader_active_row_v1',
+    PAYLOAD: 'tm_apex_home_bot_payload_v1',
+    READY: 'tm_apex_home_bot_ready_v1',
+    ACTIVE_ROW: 'tm_apex_home_bot_active_row_v1',
     DONE: 'tm_apex_quote_new_account_done_v1',
     STATUS: 'tm_apex_quote_new_account_status_v1',
     ENABLED: 'tm_apex_quote_new_account_enabled_v1'
