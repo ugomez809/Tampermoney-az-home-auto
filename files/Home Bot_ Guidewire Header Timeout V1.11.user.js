@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.21
+// @version      1.22
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.21';
+  const VERSION = '1.22';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -110,13 +110,13 @@
     const submission = normalizeText(getSubmissionNumber());
     const product = detectProduct();
     const header = normalizeText(getGuidewireHeader());
-    const headerChanged = header !== state.lastHeader;
+    const headerChanged = !!header && header !== state.lastHeader;
 
     if (headerChanged) {
       state.lastHeader = header;
       state.lastHeaderAt = Date.now();
       state.autoVehiclesIssueSince = 0;
-      if (header) log(`Header change: ${header}`);
+      log(`Header change: ${header}`);
     }
 
     if (!submission) {
@@ -856,14 +856,18 @@
   }
 
   function onSelectorMove(event) {
-    const el = event.target instanceof Element ? event.target : null;
-    if (!el || (state.panel && state.panel.contains(el))) return;
-    setHoveredElement(el);
+    const rawEl = event.target instanceof Element ? event.target : null;
+    if (!rawEl || (state.panel && state.panel.contains(rawEl))) return;
+    const usableEl = getUsableSelectorTarget(rawEl) || rawEl;
+    if (state.panel && state.panel.contains(usableEl)) return;
+    setHoveredElement(usableEl);
   }
 
   function onSelectorClick(event) {
-    const el = event.target instanceof Element ? event.target : null;
-    if (!el || (state.panel && state.panel.contains(el))) return;
+    const rawEl = event.target instanceof Element ? event.target : null;
+    if (!rawEl || (state.panel && state.panel.contains(rawEl))) return;
+    const usableEl = getUsableSelectorTarget(rawEl) || rawEl;
+    if (state.panel && state.panel.contains(usableEl)) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -871,12 +875,12 @@
 
     state.selectorMode = false;
     state.selectorDialogOpen = true;
-    state.selectorTargetEl = el;
+    state.selectorTargetEl = usableEl;
     clearHoveredHighlight();
     document.removeEventListener('mousemove', onSelectorMove, true);
     document.removeEventListener('click', onSelectorClick, true);
     document.removeEventListener('keydown', onSelectorKeydown, true);
-    openSelectorDialog(el, getUsableSelectorTarget(el), detectProduct() || state.lastProduct || 'home');
+    openSelectorDialog(rawEl, usableEl, detectProduct() || state.lastProduct || 'home');
   }
 
   function onSelectorKeydown(event) {
@@ -930,11 +934,11 @@
   function getUsableSelectorTarget(el) {
     if (!(el instanceof Element)) return null;
 
-    const wrapperUpgraded = upgradeFrameworkWrapperTarget(el);
-    if (wrapperUpgraded) return wrapperUpgraded;
-
     const direct = normalizeInteractiveTarget(el, true);
     if (direct) return direct;
+
+    const wrapperUpgraded = upgradeFrameworkWrapperTarget(el);
+    if (wrapperUpgraded) return wrapperUpgraded;
 
     const wrapper = findTargetWrapper(el) || el;
     const upgraded = findPreferredTargetIn(wrapper);
@@ -953,6 +957,7 @@
       'select',
       'button',
       'a[href]',
+      'a[role="link"]',
       'label[for]',
       'label',
       '[role="button"]',
@@ -964,12 +969,17 @@
       if (match) return normalizeInteractiveTarget(match, false);
     }
 
+    const clickableWrapper = findClickableIv360Container(wrapper);
+    if (clickableWrapper) return clickableWrapper;
+
     let current = wrapper;
     for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
       for (const selector of preferred) {
         const siblingMatch = $$(selector, current).find((node) => isVisible(node) && (node === wrapper || node.contains(wrapper) || wrapper.contains(node) || node.closest?.('mat-radio-button, mat-radio-group, iv360-question-row, iv360-widget-integer, iv360-page-link, iv360-quality-section, iv360-page-area, iv360-quality-no-slider') === wrapper));
         if (siblingMatch) return normalizeInteractiveTarget(siblingMatch, false);
       }
+      const clickableParent = findClickableIv360Container(current);
+      if (clickableParent) return clickableParent;
     }
 
     return null;
@@ -996,6 +1006,7 @@
       'select',
       'button',
       'a[href]',
+      'a[role="link"]',
       'label[for]',
       'label',
       '[role="button"]',
@@ -1010,6 +1021,9 @@
     const labelled = root.closest?.('label[for]');
     if (labelled) return normalizeInteractiveTarget(labelled, false);
 
+    const clickableWrapper = findClickableIv360Container(root);
+    if (clickableWrapper) return clickableWrapper;
+
     return null;
   }
 
@@ -1022,11 +1036,19 @@
       return linked && isVisible(linked) ? linked : el;
     }
 
-    if (el.matches?.('input:not([type="hidden"]), textarea, select, button, a[href], [role="button"], [role="link"], label')) {
+    if (el.matches?.('mat-radio-button')) {
+      const radio = el.querySelector('input[type="radio"]');
+      if (radio && isVisible(radio)) return radio;
+    }
+
+    if (el.matches?.('input:not([type="hidden"]), textarea, select, button, a[href], a[role="link"], [role="button"], [role="link"], label')) {
       return el;
     }
 
-    const inner = el.querySelector?.('input[type="radio"], input[type="checkbox"], input:not([type="hidden"]), textarea, select, button, a[href], [role="button"], [role="link"], label[for], label');
+    const clickableWrapper = findClickableIv360Container(el);
+    if (clickableWrapper) return clickableWrapper;
+
+    const inner = el.querySelector?.('input[type="radio"], input[type="checkbox"], input:not([type="hidden"]), textarea, select, button, a[href], a[role="link"], [role="button"], [role="link"], label[for], label');
     if (inner instanceof Element && isVisible(inner)) {
       return normalizeInteractiveTarget(inner, false);
     }
@@ -1038,6 +1060,39 @@
     }
 
     return strict ? null : el;
+  }
+
+  function findClickableIv360Container(el) {
+    let current = el instanceof Element ? el : null;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      if (!isVisible(current)) continue;
+      const tag = String(current.tagName || '').toLowerCase();
+      const classText = Array.from(current.classList || []).join(' ');
+      const ariaExpanded = current.getAttribute?.('aria-expanded');
+      const role = normalizeText(current.getAttribute?.('role') || '');
+      const cursor = getElementCursor(current);
+      const looksIv360Clickable = /iv360-(page-link|quality-section-title-container|quality-section-controls|section-heading|pageArea|page-area)/i.test(classText) ||
+        /iv360-quality-section-title/i.test(classText) ||
+        /iv360-link-text/i.test(classText) ||
+        /iv360-.*quality-section/i.test(current.id || '');
+
+      if (tag === 'div' && (
+        role === 'button' ||
+        role === 'link' ||
+        ariaExpanded === 'true' ||
+        ariaExpanded === 'false' ||
+        cursor === 'pointer' ||
+        looksIv360Clickable
+      )) {
+        return current;
+      }
+    }
+    return null;
+  }
+
+  function getElementCursor(el) {
+    try { return String(window.getComputedStyle(el).cursor || '').toLowerCase(); }
+    catch { return ''; }
   }
 
   function openSelectorDialog(clickedEl, upgradedEl, product) {
@@ -1160,18 +1215,53 @@
   function buildStableSelector(el) {
     if (el.id) return `#${cssEscape(el.id)}`;
 
+    if (el.matches?.('label[for]')) {
+      const forId = normalizeText(el.getAttribute('for') || '');
+      if (forId) {
+        const selector = `label[for="${cssEscapeAttr(forId)}"]`;
+        if (isUniqueSelector(selector, el.ownerDocument)) return selector;
+      }
+    }
+
+    if (el.matches?.('input, textarea, select, button') && el.id) {
+      return `#${cssEscape(el.id)}`;
+    }
+
+    const labelledBy = normalizeText(el.getAttribute?.('aria-labelledby') || '');
+    if (labelledBy) {
+      const selector = `${el.tagName.toLowerCase()}[aria-labelledby="${cssEscapeAttr(labelledBy)}"]`;
+      if (isUniqueSelector(selector, el.ownerDocument)) return selector;
+    }
+
     const aria = normalizeText(el.getAttribute('aria-label') || '');
     if (aria) {
       const attrSelector = `${el.tagName.toLowerCase()}[aria-label="${cssEscapeAttr(aria)}"]`;
       if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
     }
 
-    const dataAttrs = ['data-gw-id', 'data-testid', 'name', 'role'];
+    const dataAttrs = ['data-gw-id', 'data-testid', 'name', 'role', 'type', 'value'];
     for (const attr of dataAttrs) {
       const value = normalizeText(el.getAttribute(attr) || '');
       if (!value) continue;
       const attrSelector = `${el.tagName.toLowerCase()}[${attr}="${cssEscapeAttr(value)}"]`;
       if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
+    }
+
+    const radioWrapper = el.closest?.('mat-radio-button');
+    if (radioWrapper?.id) {
+      const input = radioWrapper.querySelector('input[type="radio"]');
+      if (input?.id) return `#${cssEscape(input.id)}`;
+      return `#${cssEscape(radioWrapper.id)}`;
+    }
+
+    let current = el;
+    while (current && current.nodeType === 1 && current !== document.body) {
+      if (current.id) {
+        const withinId = buildScopedSelectorFromAncestor(current, el);
+        if (withinId) return withinId;
+        break;
+      }
+      current = current.parentElement;
     }
 
     const parts = [];
@@ -1184,13 +1274,15 @@
         break;
       }
 
-      const classes = Array.from(current.classList || []).filter(Boolean).slice(0, 2);
-      if (classes.length) part += `.${classes.map(cssEscape).join('.')}`;
+      const stableClasses = Array.from(current.classList || [])
+        .filter((name) => /^iv360-|^mat-|^mdc-|^gw-/.test(name))
+        .slice(0, 2);
+      if (stableClasses.length) part += `.${stableClasses.map(cssEscape).join('.')}`;
 
       const siblings = current.parentElement
         ? Array.from(current.parentElement.children).filter((node) => node.tagName === current.tagName)
         : [];
-      if (siblings.length > 1) {
+      if (siblings.length > 1 && !stableClasses.length) {
         const idx = siblings.indexOf(current) + 1;
         part += `:nth-of-type(${idx})`;
       }
@@ -1202,6 +1294,52 @@
     }
 
     return parts.join(' > ');
+  }
+
+  function buildScopedSelectorFromAncestor(ancestor, target) {
+    if (!(ancestor instanceof Element) || !(target instanceof Element) || !ancestor.id) return '';
+    if (ancestor === target) return `#${cssEscape(ancestor.id)}`;
+
+    const steps = [];
+    let current = target;
+    while (current && current !== ancestor && current.nodeType === 1 && steps.length < 4) {
+      let step = current.tagName.toLowerCase();
+
+      if (current.id) {
+        steps.unshift(`#${cssEscape(current.id)}`);
+        break;
+      }
+
+      const forId = normalizeText(current.getAttribute?.('for') || '');
+      if (forId && current.matches?.('label')) {
+        step += `[for="${cssEscapeAttr(forId)}"]`;
+        steps.unshift(step);
+        current = current.parentElement;
+        continue;
+      }
+
+      const aria = normalizeText(current.getAttribute?.('aria-label') || '');
+      if (aria) {
+        step += `[aria-label="${cssEscapeAttr(aria)}"]`;
+        steps.unshift(step);
+        current = current.parentElement;
+        continue;
+      }
+
+      const stableClasses = Array.from(current.classList || [])
+        .filter((name) => /^iv360-|^mat-|^mdc-|^gw-/.test(name))
+        .slice(0, 2);
+      if (stableClasses.length) {
+        step += `.${stableClasses.map(cssEscape).join('.')}`;
+      }
+
+      steps.unshift(step);
+      current = current.parentElement;
+    }
+
+    if (current !== ancestor) return '';
+    const selector = `#${cssEscape(ancestor.id)} > ${steps.join(' > ')}`;
+    return isUniqueSelector(selector, target.ownerDocument) ? selector : '';
   }
 
   function isUniqueSelector(selector, doc) {
@@ -1312,10 +1450,10 @@
     const displayHeader = header || state.lastHeader || '-';
     if (state.els.submission) state.els.submission.textContent = submission || '-';
     if (state.els.header) state.els.header.textContent = displayHeader;
-    if (state.els.age) state.els.age.textContent = state.lastHeaderAt ? `${Math.max(0, Math.floor(ageMs / 1000))}s elapsed` : '-';
+    if (state.els.age) state.els.age.textContent = state.lastHeaderAt ? `${Math.max(0, Math.floor(ageMs / 1000))}s` : '-';
     if (state.els.deadline) {
       const remainingMs = state.lastHeaderAt ? Math.max(0, CFG.timeoutMs - ageMs) : 0;
-      state.els.deadline.textContent = state.lastHeaderAt ? `${Math.ceil(remainingMs / 1000)}s until timeout action` : '-';
+      state.els.deadline.textContent = state.lastHeaderAt ? `${Math.ceil(remainingMs / 1000)}s` : '-';
     }
   }
 
