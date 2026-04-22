@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.14
+// @version      1.16
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.14';
+  const VERSION = '1.16';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
@@ -105,49 +105,51 @@
     const submission = normalizeText(getSubmissionNumber());
     const product = detectProduct();
     const header = normalizeText(getGuidewireHeader());
+    const headerChanged = header !== state.lastHeader;
+
+    if (headerChanged) {
+      state.lastHeader = header;
+      state.lastHeaderAt = Date.now();
+      state.autoVehiclesIssueSince = 0;
+      if (header) log(`Header change: ${header}`);
+    }
 
     if (!submission) {
-      resetSubmissionState('', product, header);
-      setUiValues('', header, 0);
+      state.lastSubmission = '';
+      state.lastProduct = product || state.lastProduct || '';
+      setUiValues('', header, getHeaderElapsedMs());
       return;
     }
 
     updateIdentityCache(submission);
 
     if (submission !== state.lastSubmission) {
-      resetSubmissionState(submission, product, header);
-      setUiValues(submission, header, 0);
-      if (header) log(`Header change: ${header}`);
+      state.lastSubmission = submission;
+      state.savedEventIds = Object.create(null);
+      setUiValues(submission, header, getHeaderElapsedMs());
       return;
     }
 
     if (product !== state.lastProduct) {
       state.lastProduct = product;
-      state.lastHeader = header;
-      state.lastHeaderAt = header ? Date.now() : 0;
       state.autoVehiclesIssueSince = 0;
-      setUiValues(submission, header, 0);
-      if (header) log(`Header change: ${header}`);
+      setUiValues(submission, header, getHeaderElapsedMs());
       return;
     }
 
     if (!header) {
-      setUiValues(submission, '', 0);
+      setUiValues(submission, '', getHeaderElapsedMs());
       detectSavedSelectorErrors(product, submission);
       return;
     }
 
-    if (header !== state.lastHeader) {
-      state.lastHeader = header;
-      state.lastHeaderAt = Date.now();
-      state.autoVehiclesIssueSince = 0;
-      setUiValues(submission, header, 0);
-      log(`Header change: ${header}`);
+    if (headerChanged) {
+      setUiValues(submission, header, getHeaderElapsedMs());
       detectSavedSelectorErrors(product, submission);
       return;
     }
 
-    const ageMs = Date.now() - state.lastHeaderAt;
+    const ageMs = getHeaderElapsedMs();
     setUiValues(submission, header, ageMs);
     detectSavedSelectorErrors(product, submission);
 
@@ -455,6 +457,10 @@
     state.lastHeaderAt = header ? Date.now() : 0;
     state.autoVehiclesIssueSince = 0;
     state.savedEventIds = Object.create(null);
+  }
+
+  function getHeaderElapsedMs() {
+    return state.lastHeaderAt ? Math.max(0, Date.now() - state.lastHeaderAt) : 0;
   }
 
   function getAutoVehiclesState() {
@@ -803,13 +809,15 @@
 
   function onSelectorMove(event) {
     const el = event.target instanceof Element ? event.target : null;
-    if (!el || (state.panel && state.panel.contains(el))) return;
-    setHoveredElement(el);
+    const target = getUsableSelectorTarget(el);
+    if (!target || (state.panel && state.panel.contains(target))) return;
+    setHoveredElement(target);
   }
 
   function onSelectorClick(event) {
     const el = event.target instanceof Element ? event.target : null;
-    if (!el || (state.panel && state.panel.contains(el))) return;
+    const target = getUsableSelectorTarget(el);
+    if (!target || (state.panel && state.panel.contains(target))) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -817,12 +825,12 @@
 
     state.selectorMode = false;
     state.selectorDialogOpen = true;
-    state.selectorTargetEl = el;
+    state.selectorTargetEl = target;
     clearHoveredHighlight();
     document.removeEventListener('mousemove', onSelectorMove, true);
     document.removeEventListener('click', onSelectorClick, true);
     document.removeEventListener('keydown', onSelectorKeydown, true);
-    openSelectorDialog(el, detectProduct() || state.lastProduct || 'home');
+    openSelectorDialog(target, detectProduct() || state.lastProduct || 'home');
   }
 
   function onSelectorKeydown(event) {
@@ -870,6 +878,82 @@
       customMessage: '',
       createdAt: nowIso()
     };
+  }
+
+  function getUsableSelectorTarget(el) {
+    if (!(el instanceof Element)) return null;
+
+    const direct = normalizeInteractiveTarget(el, true);
+    if (direct) return direct;
+
+    const wrapper = findTargetWrapper(el) || el;
+    const upgraded = findPreferredTargetIn(wrapper);
+    return normalizeInteractiveTarget(upgraded || wrapper || el, false) || upgraded || wrapper || el;
+  }
+
+  function findTargetWrapper(el) {
+    let current = el;
+    while (current && current.nodeType === 1) {
+      const tag = String(current.tagName || '').toLowerCase();
+      if (tag.startsWith('iv360-') || tag.startsWith('mat-')) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function findPreferredTargetIn(root) {
+    if (!(root instanceof Element)) return null;
+
+    const selectors = [
+      'input[type="radio"]',
+      'input[type="checkbox"]',
+      'input:not([type="hidden"])',
+      'textarea',
+      'select',
+      'button',
+      'a[href]',
+      'label[for]',
+      'label',
+      '[role="button"]',
+      '[role="link"]'
+    ];
+
+    for (const selector of selectors) {
+      const match = $$(selector, root).find(isVisible);
+      if (match) return normalizeInteractiveTarget(match, false);
+    }
+
+    const labelled = root.closest?.('label[for]');
+    if (labelled) return normalizeInteractiveTarget(labelled, false);
+
+    return null;
+  }
+
+  function normalizeInteractiveTarget(el, strict = false) {
+    if (!(el instanceof Element)) return null;
+
+    if (el.matches?.('label[for]')) {
+      const forId = normalizeText(el.getAttribute('for') || '');
+      const linked = forId ? el.ownerDocument.getElementById(forId) : null;
+      return linked && isVisible(linked) ? linked : el;
+    }
+
+    if (el.matches?.('input:not([type="hidden"]), textarea, select, button, a[href], [role="button"], [role="link"], label')) {
+      return el;
+    }
+
+    const inner = el.querySelector?.('input[type="radio"], input[type="checkbox"], input:not([type="hidden"]), textarea, select, button, a[href], [role="button"], [role="link"], label[for], label');
+    if (inner instanceof Element && isVisible(inner)) {
+      return normalizeInteractiveTarget(inner, false);
+    }
+
+    const radioWrapper = el.closest?.('mat-radio-button');
+    if (radioWrapper) {
+      const radio = radioWrapper.querySelector('input[type="radio"]');
+      if (radio && isVisible(radio)) return radio;
+    }
+
+    return strict ? null : el;
   }
 
   function openSelectorDialog(el, product) {
@@ -1130,12 +1214,13 @@
   }
 
   function setUiValues(submission, header, ageMs) {
+    const displayHeader = header || state.lastHeader || '-';
     if (state.els.submission) state.els.submission.textContent = submission || '-';
-    if (state.els.header) state.els.header.textContent = header || '-';
-    if (state.els.age) state.els.age.textContent = header ? `${Math.max(0, Math.floor(ageMs / 1000))}s / 120s` : '-';
+    if (state.els.header) state.els.header.textContent = displayHeader;
+    if (state.els.age) state.els.age.textContent = state.lastHeaderAt ? `${Math.max(0, Math.floor(ageMs / 1000))}s elapsed` : '-';
     if (state.els.deadline) {
-      const remainingMs = header ? Math.max(0, CFG.timeoutMs - ageMs) : 0;
-      state.els.deadline.textContent = header ? `${Math.ceil(remainingMs / 1000)}s until timeout action` : '-';
+      const remainingMs = state.lastHeaderAt ? Math.max(0, CFG.timeoutMs - ageMs) : 0;
+      state.els.deadline.textContent = state.lastHeaderAt ? `${Math.ceil(remainingMs / 1000)}s until timeout action` : '-';
     }
   }
 
