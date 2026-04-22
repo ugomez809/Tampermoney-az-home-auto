@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
 // @namespace    az.to.gwpc.webhook.submission
-// @version      1.11
+// @version      1.12
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,8 +22,9 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.11';
+  const VERSION = '1.12';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -488,6 +489,33 @@
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
 
+  function readForceSendRequest() {
+    return safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+  }
+
+  function hasForceSendRequest() {
+    const request = readForceSendRequest();
+    return !!(request && typeof request === 'object' && request.requestedAt);
+  }
+
+  function requestForceSend(reason = 'manual-send') {
+    const request = {
+      requestedAt: nowIso(),
+      reason: normalizeText(reason || 'manual-send'),
+      source: SCRIPT_NAME
+    };
+    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
+    log(`Force send requested: ${request.reason}`);
+    setStatus('Force send requested');
+    state.quoteSeenAt = 0;
+    return request;
+  }
+
+  function clearForceSendRequest() {
+    try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
+  }
+
   function isSameBundleAlreadySent(job, bundle) {
     const meta = getSentMeta();
     if (!meta || !meta.signature) return false;
@@ -595,6 +623,7 @@
   async function afterSuccess(_job, _bundle) {
     state.running = false;
     sessionStorage.setItem(CFG.stoppedKey, '1');
+    clearForceSendRequest();
     renderButtons();
     log('Stored payloads retained after send');
     setStatus('Sent | Payload retained | Stopped');
@@ -689,7 +718,7 @@
       log('Send skipped: already busy');
       return;
     }
-    if (isGloballyPaused()) {
+    if (isGloballyPaused() && !force) {
       setStatus('Paused by shared selector');
       return;
     }
@@ -772,11 +801,12 @@
 
   function tick() {
     if (state.destroyed || state.busy) return;
-    if (isGloballyPaused()) {
+    const forceSend = hasForceSendRequest();
+    if (isGloballyPaused() && !forceSend) {
       setStatus('Paused by shared selector');
       return;
     }
-    if (!state.running) {
+    if (!state.running && !forceSend) {
       setStatus('Stopped');
       return;
     }
@@ -787,26 +817,32 @@
 
     if (!job['AZ ID']) {
       state.quoteSeenAt = 0;
-      setStatus('Waiting for current job handoff');
-      logWait('wait-job', 'Waiting for tm_pc_current_job_v1 / AZ ID');
+      setStatus(forceSend ? 'Force send waiting for current job handoff' : 'Waiting for current job handoff');
+      logWait(forceSend ? 'force-wait-job' : 'wait-job', 'Waiting for tm_pc_current_job_v1 / AZ ID');
       return;
     }
 
     if (!job['Name'] || !job['Mailing Address']) {
       state.quoteSeenAt = 0;
-      setStatus('Waiting for full current job');
-      logWait('wait-job-identity', 'Waiting for tm_pc_current_job_v1 identity');
+      setStatus(forceSend ? 'Force send waiting for full current job' : 'Waiting for full current job');
+      logWait(forceSend ? 'force-wait-job-identity' : 'wait-job-identity', 'Waiting for tm_pc_current_job_v1 identity');
       return;
     }
 
     if (!bundle) {
       state.quoteSeenAt = 0;
-      setStatus('Waiting for home payload / bundle');
-      logWait('wait-payload', 'Waiting for tm_pc_home_quote_grab_payload_v1 or tm_pc_webhook_bundle_v1');
+      setStatus(forceSend ? 'Force send waiting for payload / bundle' : 'Waiting for home payload / bundle');
+      logWait(forceSend ? 'force-wait-payload' : 'wait-payload', 'Waiting for tm_pc_home_quote_grab_payload_v1 or tm_pc_webhook_bundle_v1');
       return;
     }
 
     clearWaitLog();
+
+    if (forceSend) {
+      setStatus('Force send ready');
+      sendBundle(true);
+      return;
+    }
 
     if (hasPendingTimeout(bundle)) {
       setStatus('Timeout bundle ready');
@@ -984,7 +1020,13 @@
       state.quoteSeenAt = 0;
     });
 
-    state.sendBtn.addEventListener('click', () => { sendBundle(true); });
+    state.sendBtn.addEventListener('click', () => {
+      requestForceSend('manual-send');
+      state.running = true;
+      sessionStorage.removeItem(CFG.stoppedKey);
+      renderButtons();
+      tick();
+    });
     state.testBtn.addEventListener('click', sendTestWebhook);
 
     state.webhookUrlEl.addEventListener('input', () => { persistWebhookFromUi(false); });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff V1.0
 // @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
-// @version      1.2
+// @version      1.3
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,8 +22,9 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.2';
+  const VERSION = '1.3';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
   const GM_KEYS = {
     HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1'
@@ -69,7 +70,7 @@
 
   function tick() {
     if (!state.running || state.busy) return;
-    if (isGloballyPaused()) {
+    if (isGloballyPaused() && !hasForceSendRequest()) {
       setStatus('Paused by shared selector');
       return;
     }
@@ -101,6 +102,11 @@
 
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
+
+  function hasForceSendRequest() {
+    const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    return !!(request && typeof request === 'object' && request.requestedAt);
   }
 
   function runAzCapture() {
@@ -162,14 +168,29 @@
   }
 
   function runGwpcApply() {
+    const forceSend = hasForceSendRequest();
     const handoff = gmGetJson(GM_KEYS.HANDOFF, null);
     if (!handoff || typeof handoff !== 'object') {
+      if (forceSend) {
+        const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
+        if (currentJob?.['AZ ID']) {
+          setIdle('gw-force-existing-job', `Force send using existing current job ${currentJob['AZ ID']}`);
+          return;
+        }
+      }
       setIdle('gw-no-handoff', 'GWPC waiting for AZ handoff');
       return;
     }
 
     const ageMs = Date.now() - toMs(handoff.savedAt);
     if (!Number.isFinite(ageMs) || ageMs > CFG.handoffMaxAgeMs) {
+      if (forceSend) {
+        const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
+        if (currentJob?.['AZ ID']) {
+          setIdle('gw-force-stale-handoff', `Force send using existing current job ${currentJob['AZ ID']}`);
+          return;
+        }
+      }
       setIdle('gw-stale-handoff', 'GWPC waiting for fresh AZ handoff');
       return;
     }

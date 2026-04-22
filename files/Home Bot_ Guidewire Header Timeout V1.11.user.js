@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.20
+// @version      1.21
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,8 +19,9 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.20';
+  const VERSION = '1.21';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -252,6 +253,7 @@
       saveErrorToPayload(context.productPayloadKey, context.product, context.job, event);
       saveErrorToBundle(context.product, context.job, event);
       markSavedEvent(event.id);
+      requestForceSend(details.actionKey || 'header-timeout-error');
       log(`Saved ${details.product.toUpperCase()} error: ${event.errorName}`);
       setStatusText(`Saved ${details.product.toUpperCase()} error`);
     } catch (err) {
@@ -471,6 +473,18 @@
 
   function markSavedEvent(id) {
     state.savedEventIds[id] = true;
+  }
+
+  function requestForceSend(reason) {
+    const request = {
+      requestedAt: nowIso(),
+      reason: normalizeText(reason || 'header-timeout-error'),
+      source: SCRIPT_NAME
+    };
+
+    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
+    log(`Force send requested: ${request.reason}`);
   }
 
   function resetSubmissionState(submission, product, header) {
