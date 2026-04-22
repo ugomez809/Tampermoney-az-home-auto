@@ -397,7 +397,7 @@
   }
 
   function buildHomeOnlySyntheticBundle(job, homePayload) {
-    const row = isPlainObject(homePayload?.sheetRow) ? homePayload.sheetRow : null;
+    const row = isPlainObject(homePayload?.row) ? homePayload.row : null;
     if (!row) return null;
 
     const name = normalizeText(row['Name'] || row.name || '');
@@ -608,9 +608,9 @@
     const payloadAzId = normalizeText(payload['AZ ID'] || payload?.currentJob?.['AZ ID'] || payload?.data?.['AZ ID'] || '');
     if (payloadAzId && payloadAzId === job['AZ ID']) return true;
 
-    const row = payload.sheetRow || payload.data || payload.home?.data || {};
+    const row = payload.row || payload.data || payload.home?.data || {};
     const name = normalizeText(row['Name'] || row.name || payload.primaryInsuredName || payload.summary?.primaryInsuredName || '');
-    const address = normalizeText(row['Mailing Address'] || row.mailingAddress || payload.identity?.['Mailing Address'] || payload.homeRow?.sheetRow?.['Mailing Address'] || '');
+    const address = normalizeText(row['Mailing Address'] || row.mailingAddress || payload.identity?.['Mailing Address'] || payload.homeRow?.row?.['Mailing Address'] || '');
 
     if (name && address) {
       return namesLikelySame(name, job['Name']) && addressesLikelySame(address, job['Mailing Address']);

@@ -152,7 +152,7 @@
     const quoteData = extractQuoteFields();
     log(`Quote fields read: ${JSON.stringify(quoteData)}`);
 
-    const sheetRow = {
+    const row = {
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
@@ -172,17 +172,17 @@
       'Result': ''
     };
 
-    const missing = Object.entries(sheetRow)
+    const missing = Object.entries(row)
       .filter(([key, value]) => !value && key !== 'Done?' && key !== 'Result')
       .map(([key]) => key);
 
     if (missing.length) {
-      sheetRow['Done?'] = 'No';
-      sheetRow['Result'] = `Missing: ${missing.join(', ')}`;
+      row['Done?'] = 'No';
+      row['Result'] = `Missing: ${missing.join(', ')}`;
       log(`Missing fields: ${missing.join(', ')}`);
     } else {
-      sheetRow['Done?'] = 'Yes';
-      sheetRow['Result'] = 'Grabbed to localStorage';
+      row['Done?'] = 'Yes';
+      row['Result'] = 'Grabbed to localStorage';
       log('All fields grabbed successfully');
     }
 
@@ -202,7 +202,7 @@
         quote: true,
         cfpDefaultedToNo: true
       },
-      sheetRow
+      row
     };
 
     localStorage.setItem(KEYS.payload, JSON.stringify(payload, null, 2));

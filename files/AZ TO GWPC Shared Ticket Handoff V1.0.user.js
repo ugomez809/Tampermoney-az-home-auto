@@ -164,12 +164,12 @@
     }
 
     const homePayload = safeJsonParse(localStorage.getItem('tm_pc_home_quote_grab_payload_v1'), null);
-    if (!homePayload || typeof homePayload !== 'object' || !homePayload.sheetRow) {
+    if (!homePayload || typeof homePayload !== 'object' || !homePayload.row) {
       setIdle('gw-no-home', 'GWPC waiting for tm_pc_home_quote_grab_payload_v1');
       return;
     }
 
-    const row = homePayload.sheetRow || {};
+    const row = homePayload.row || {};
     const gwName = clean(row['Name'] || row.name || '');
     const gwAddress = clean(row['Mailing Address'] || row.mailingAddress || '');
     const submissionNumber = clean(row['Submission Number'] || row.submissionNumber || '');

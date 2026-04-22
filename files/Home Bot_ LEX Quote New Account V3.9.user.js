@@ -735,12 +735,12 @@
     let payload = payloadRaw;
     let flat = null;
     let lexFill = {};
-    let sheetRow = {};
+    let row = {};
     let source = {};
 
-    if (payload && typeof payload === 'object' && (payload.lexFill || payload.sheetRow || payload.source)) {
+    if (payload && typeof payload === 'object' && (payload.lexFill || payload.row || payload.source)) {
       lexFill = payload.lexFill || {};
-      sheetRow = payload.sheetRow || {};
+      row = payload.row || {};
       source = payload.source || {};
     } else if (payload && typeof payload === 'object') {
       flat = payload;
@@ -758,13 +758,13 @@
     const firstName = firstNonEmpty(
       flat?.firstName,
       lexFill.firstName,
-      sheetRow.first
+      row.first
     );
 
     const lastName = firstNonEmpty(
       flat?.lastName,
       lexFill.lastName,
-      sheetRow.last
+      row.last
     );
 
     const street = firstNonEmpty(
@@ -772,19 +772,19 @@
       lexFill.street,
       lexFill.address,
       lexFill.searchAddress,
-      sheetRow.address
+      row.address
     );
 
     const city = firstNonEmpty(
       flat?.city,
       lexFill.city,
-      sheetRow.city
+      row.city
     );
 
     const state = firstNonEmpty(
       flat?.state,
       lexFill.state,
-      sheetRow.state
+      row.state
     );
 
     const zip = firstNonEmpty(
@@ -792,7 +792,7 @@
       flat?.zipCode,
       lexFill.zip,
       lexFill.zipCode,
-      sheetRow.zipCode
+      row.zipCode
     );
 
     const address = buildCombinedAddress(street, city, state, zip) || firstNonEmpty(lexFill.searchAddress);
@@ -805,13 +805,13 @@
     const email = firstNonEmpty(
       flat?.email,
       lexFill.email,
-      sheetRow.email
+      row.email
     );
 
     const phone = formatPhone(firstNonEmpty(
       flat?.phone,
       lexFill.phone,
-      sheetRow.phoneNumber
+      row.phoneNumber
     ));
 
     const sourceCategory = firstNonEmpty(

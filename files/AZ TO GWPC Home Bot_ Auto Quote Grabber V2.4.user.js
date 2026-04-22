@@ -372,7 +372,7 @@
     const vehiclesList = buildVehiclesList(vehiclesData);
     const coveragesList = buildCoveragesList(paCoveragesData);
 
-    const sheetRow = {
+    const row = {
       'Auto': 'Completed',
       'Total Policy Premium': asRequiredValue(quoteData['Total Policy Premium']),
       'Submission Number (Auto)': asRequiredValue(quoteData['Submission Number (Auto)']),
@@ -544,7 +544,7 @@
         primaryInsuredName,
         secondaryInsuredName
       },
-      sheetRow
+      row
     };
 
     localStorage.setItem(KEYS.payload, JSON.stringify(payload, null, 2));
