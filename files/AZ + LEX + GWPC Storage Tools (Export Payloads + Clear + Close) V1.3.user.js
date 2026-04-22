@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ + LEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.3
+// @name         AZ + LEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4
 // @namespace    homebot.az.lex.gwpc.storage.tools
-// @version      1.3.0
+// @version      1.4.0
 // @description  Tiny standalone helper: exports tracked AZ + LEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_listValues
 // ==/UserScript==
 
 (function () {
@@ -21,8 +22,9 @@
   const TOAST_ID = 'tm-az-lex-gwpc-storage-tools-toast-v13';
 
   const TRACKED_PREFIXES = [
-    'tm_az_',
-    'tm_lex_'
+    'tm_',
+    'aqb_',
+    'hb_'
   ];
 
   const LIVE_KEYS = {
@@ -172,7 +174,7 @@
         const k = storageObj.key(i);
         if (!k) continue;
 
-        if (TRACKED_PREFIXES.some(prefix => k.startsWith(prefix)) || EXACT_TRACKED_KEYS.has(k)) {
+        if (isTrackedKey(k)) {
           found.add(k);
         }
       }
@@ -309,6 +311,21 @@
     try {
       GM_deleteValue(cacheKey);
     } catch {}
+  }
+
+  function listAllGmKeysSafe() {
+    try {
+      const keys = GM_listValues();
+      return Array.isArray(keys) ? keys : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function isTrackedKey(key) {
+    if (!key) return false;
+    if (TRACKED_PREFIXES.some(prefix => key.startsWith(prefix))) return true;
+    return EXACT_TRACKED_KEYS.has(key);
   }
 
   function readFromSource(sourceName, key) {
@@ -501,6 +518,7 @@
   function clearTrackedKeysAndCaches() {
     const localKeys = getAllTrackedKeys(localStorage);
     const sessionKeys = getAllTrackedKeys(sessionStorage);
+    const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
 
     const ok = window.confirm(
       `Clear tracked AZ / LEX / GWPC data on this site, clear mirrored caches, then close this tab?\n\nCurrent origin:\n${location.origin}`
@@ -527,6 +545,15 @@
       }
     }
 
+    for (const key of gmTrackedKeys) {
+      try {
+        GM_deleteValue(key);
+        cleared++;
+      } catch (err) {
+        console.error('[AZ+LEX+GWPC Storage Tools] Failed clearing GM key:', key, err);
+      }
+    }
+
     clearCachedRecord(CACHE_KEYS.azPayload);
     clearCachedRecord(CACHE_KEYS.lexPayload);
     clearCachedRecord(CACHE_KEYS.lexReady);
@@ -542,7 +569,7 @@
     delete state.lastSeen[`${CACHE_KEYS.gwpcHomePayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcAutoPayload}__lastRaw`];
 
-    toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} + mirrored caches. Closing tab...`, 1800);
+    toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches. Closing tab...`, 1800);
     closeCurrentTabSoon();
   }
 
