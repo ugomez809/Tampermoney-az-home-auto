@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Home Bot: LEX Quote New Account V3.9
-// @namespace    homebot.lex.quote.new.account
+// @name         Home Bot: APEX Quote New Account V3.9
+// @namespace    homebot.apex.quote.new.account
 // @version      3.9
-// @description  Reads the current LEX payload (flat or nested), fills LEX Quote New Account, ignores Personal Lines Quote modal, locks interaction to the real Quote New Account form only, and hard-stops until page reload after Save is clicked.
+// @description  Reads the current APEX payload (flat or nested), fills APEX Quote New Account, ignores Personal Lines Quote modal, locks interaction to the real Quote New Account form only, and hard-stops until page reload after Save is clicked.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: LEX Quote New Account V3.9';
+  const SCRIPT_NAME = 'Home Bot: APEX Quote New Account V3.9';
   const VERSION = '3.9';
 
   const CFG = {
@@ -38,24 +38,24 @@
   };
 
   const KEYS = {
-    PAYLOAD: 'tm_lex_home_bot_sheet_reader_payload_v1',
-    READY: 'tm_lex_home_bot_sheet_reader_ready_v1',
-    ACTIVE_ROW: 'tm_lex_home_bot_sheet_reader_active_row_v1',
-    DONE: 'tm_lex_quote_new_account_done_v1',
-    STATUS: 'tm_lex_quote_new_account_status_v1',
-    ENABLED: 'tm_lex_quote_new_account_enabled_v1'
+    PAYLOAD: 'tm_apex_home_bot_sheet_reader_payload_v1',
+    READY: 'tm_apex_home_bot_sheet_reader_ready_v1',
+    ACTIVE_ROW: 'tm_apex_home_bot_sheet_reader_active_row_v1',
+    DONE: 'tm_apex_quote_new_account_done_v1',
+    STATUS: 'tm_apex_quote_new_account_status_v1',
+    ENABLED: 'tm_apex_quote_new_account_enabled_v1'
   };
 
   const EXACT_SOURCE_BUTTON_SELECTOR = '#combobox-button-510';
-  const SESSION_STOP_KEY = '__hb_lex_qna_stop_this_session__';
-  const POST_SAVE_LOCK_KEY = '__hb_lex_qna_post_save_lock_this_reload__';
+  const SESSION_STOP_KEY = '__hb_apex_qna_stop_this_session__';
+  const POST_SAVE_LOCK_KEY = '__hb_apex_qna_post_save_lock_this_reload__';
 
   const UI = {
-    PANEL_ID: 'hb-lex-qna-panel-v39',
-    STATUS_ID: 'hb-lex-qna-status-v39',
-    TOGGLE_ID: 'hb-lex-qna-toggle-v39',
-    TOAST_WRAP_ID: 'hb-lex-qna-toast-wrap-v39',
-    STYLE_ID: 'hb-lex-qna-style-v39'
+    PANEL_ID: 'hb-apex-qna-panel-v39',
+    STATUS_ID: 'hb-apex-qna-status-v39',
+    TOGGLE_ID: 'hb-apex-qna-toggle-v39',
+    TOAST_WRAP_ID: 'hb-apex-qna-toast-wrap-v39',
+    STYLE_ID: 'hb-apex-qna-style-v39'
   };
 
   const STATE = {
@@ -734,12 +734,12 @@
 
     let payload = payloadRaw;
     let flat = null;
-    let lexFill = {};
+    let apexFill = {};
     let row = {};
     let source = {};
 
-    if (payload && typeof payload === 'object' && (payload.lexFill || payload.row || payload.source)) {
-      lexFill = payload.lexFill || {};
+    if (payload && typeof payload === 'object' && (payload.apexFill || payload.row || payload.source)) {
+      apexFill = payload.apexFill || {};
       row = payload.row || {};
       source = payload.source || {};
     } else if (payload && typeof payload === 'object') {
@@ -757,66 +757,66 @@
 
     const firstName = firstNonEmpty(
       flat?.firstName,
-      lexFill.firstName,
+      apexFill.firstName,
       row.first
     );
 
     const lastName = firstNonEmpty(
       flat?.lastName,
-      lexFill.lastName,
+      apexFill.lastName,
       row.last
     );
 
     const street = firstNonEmpty(
       flat?.address,
-      lexFill.street,
-      lexFill.address,
-      lexFill.searchAddress,
+      apexFill.street,
+      apexFill.address,
+      apexFill.searchAddress,
       row.address
     );
 
     const city = firstNonEmpty(
       flat?.city,
-      lexFill.city,
+      apexFill.city,
       row.city
     );
 
     const state = firstNonEmpty(
       flat?.state,
-      lexFill.state,
+      apexFill.state,
       row.state
     );
 
     const zip = firstNonEmpty(
       flat?.zip,
       flat?.zipCode,
-      lexFill.zip,
-      lexFill.zipCode,
+      apexFill.zip,
+      apexFill.zipCode,
       row.zipCode
     );
 
-    const address = buildCombinedAddress(street, city, state, zip) || firstNonEmpty(lexFill.searchAddress);
+    const address = buildCombinedAddress(street, city, state, zip) || firstNonEmpty(apexFill.searchAddress);
 
     const dob = formatDate(firstNonEmpty(
       flat?.dateOfBirth,
-      lexFill.dateOfBirth
+      apexFill.dateOfBirth
     )) || CFG.defaultDob;
 
     const email = firstNonEmpty(
       flat?.email,
-      lexFill.email,
+      apexFill.email,
       row.email
     );
 
     const phone = formatPhone(firstNonEmpty(
       flat?.phone,
-      lexFill.phone,
+      apexFill.phone,
       row.phoneNumber
     ));
 
     const sourceCategory = firstNonEmpty(
       flat?.sourceCategory,
-      lexFill.sourceCategory,
+      apexFill.sourceCategory,
       CFG.defaultSourceCategory
     );
 
@@ -1394,7 +1394,7 @@
     const ctx = buildLeadFromCurrentStorage();
 
     if (!ctx) {
-      setIdleLog('waiting_payload', 'Waiting for current LEX payload...', 'info', 'WAITING');
+      setIdleLog('waiting_payload', 'Waiting for current APEX payload...', 'info', 'WAITING');
       return;
     }
 
@@ -1413,7 +1413,7 @@
     setStatus(`ROW ${ctx.rowNumber || '?'}`);
 
     try {
-      log(`Using current LEX payload. Row ${ctx.rowNumber || '?'}`);
+      log(`Using current APEX payload. Row ${ctx.rowNumber || '?'}`);
       log(`First Name: ${ctx.lead.firstName}`);
       log(`Last Name: ${ctx.lead.lastName}`);
       log(`Final address: ${ctx.lead.address}`);

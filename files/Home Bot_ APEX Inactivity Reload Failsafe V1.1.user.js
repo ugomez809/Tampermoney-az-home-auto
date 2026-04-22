@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Home Bot: LEX Inactivity Reload Failsafe V1.1
-// @namespace    homebot.lex.inactivity.reload.failsafe
+// @name         Home Bot: APEX Inactivity Reload Failsafe V1.1
+// @namespace    homebot.apex.inactivity.reload.failsafe
 // @version      1.1
-// @description  Lightweight LEX failsafe. If the page shows no real activity for 60s, reloads the page. Uses a safe watcher that avoids freezing Lightning.
+// @description  Lightweight APEX failsafe. If the page shows no real activity for 60s, reloads the page. Uses a safe watcher that avoids freezing Lightning.
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
@@ -13,9 +13,9 @@
 
   if (window.top !== window.self) return;
 
-  try { window.__HB_LEX_IDLE_FAILSAFE_CLEANUP__?.(); } catch {}
+  try { window.__HB_APEX_IDLE_FAILSAFE_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: LEX Inactivity Reload Failsafe V1.1';
+  const SCRIPT_NAME = 'Home Bot: APEX Inactivity Reload Failsafe V1.1';
   const VERSION = '1.1';
 
   const CFG = {
@@ -30,13 +30,13 @@
   };
 
   const KEYS = {
-    STOP: 'tm_lex_idle_failsafe_stop_v11',
-    PANEL_POS: 'tm_lex_idle_failsafe_panel_pos_v11',
-    LOGS_OPEN: 'tm_lex_idle_failsafe_logs_open_v11',
-    RELOAD_META: 'tm_lex_idle_failsafe_reload_meta_v11'
+    STOP: 'tm_apex_idle_failsafe_stop_v11',
+    PANEL_POS: 'tm_apex_idle_failsafe_panel_pos_v11',
+    LOGS_OPEN: 'tm_apex_idle_failsafe_logs_open_v11',
+    RELOAD_META: 'tm_apex_idle_failsafe_reload_meta_v11'
   };
 
-  const UI_ID = 'hb-lex-idle-failsafe-panel-v11';
+  const UI_ID = 'hb-apex-idle-failsafe-panel-v11';
 
   const state = {
     running: sessionStorage.getItem(KEYS.STOP) !== '1',
@@ -75,7 +75,7 @@
     state.tickTimer = setInterval(tick, CFG.tickMs);
     tick();
 
-    window.__HB_LEX_IDLE_FAILSAFE_CLEANUP__ = cleanup;
+    window.__HB_APEX_IDLE_FAILSAFE_CLEANUP__ = cleanup;
   }
 
   function cleanup() {
@@ -88,7 +88,7 @@
 
     try { state.ui?.panel?.remove(); } catch {}
 
-    try { delete window.__HB_LEX_IDLE_FAILSAFE_CLEANUP__; } catch {}
+    try { delete window.__HB_APEX_IDLE_FAILSAFE_CLEANUP__; } catch {}
   }
 
   function now() {

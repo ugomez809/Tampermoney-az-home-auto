@@ -7,7 +7,7 @@ GM_setValueredundant @match
 1.9
 1,321
  
-Pipeline A — AZ → LEX → GWPC
+Pipeline A — AZ → APEX → GWPC
 Pipeline B — AZ → GWPC direct ✦ new
 Utilities
 All 24 scripts
@@ -22,8 +22,8 @@ Opens pipeline tickets one-by-one. Validates 13 AZ fields, clicks Auto or Home l
 GM_setValueredundant @match
 1.9
 1,321
-opens Salesforce LEX tab
-Salesforce LEX
+opens Salesforce APEX tab
+Salesforce APEX
 Script
 Ver
 Lines
@@ -34,19 +34,19 @@ GM_xmlhttpRequestno @noframes
 1.6
 730
 3
-LEX Quote New Account V3.9
+APEX Quote New Account V3.9
 Reads the Sheet Reader payload (flat or nested shape) and fills every field in the Quote New Account form. Hard-stops after Save is clicked.
 no @noframes
 3.9
 1,485
 3a
-LEX Duplicates Continue V1.8
+APEX Duplicates Continue V1.8
 Intercepts the Duplicates Found modal if it appears. Selects the first match, waits for Continue to enable, clicks it.
 no @noframes
 1.8
 756
 4
-LEX Continue New Quote V1.8
+APEX Continue New Quote V1.8
 Detects the Personal Lines Quote modal, clicks the Home control (custom107), selects Residence Address, clicks Continue New Quote exactly once.
 no @noframes
 1.8
@@ -110,14 +110,14 @@ GM_xmlhttpRequest@connect * wildcardno @noframes
  
 AZ Stage Runner + AZ Payload Grabber V1.9
 Opens tickets one at a time, checks the 13 required AgencyZoom fields, clicks the Home or Auto link, then waits until the lead gets the Bot Quoted tag before moving to the next one.
-Salesforce LEX
+Salesforce APEX
 2. Sheet Reader V1.6
 Pulls fresh data from Google Sheets, skips rows already used, saves the next lead’s info for the next script, and pauses itself while AgencyZoom is open.
-LEX Quote New Account V3.9
+APEX Quote New Account V3.9
 Takes that saved lead info and fills the whole Quote New Account form, then stops after clicking Save.
-3a. LEX Duplicates Continue V1.8
+3a. APEX Duplicates Continue V1.8
 If the Duplicates Found popup appears, it picks the first option and clicks Continue.
-LEX Continue New Quote V1.8
+APEX Continue New Quote V1.8
 Handles the Personal Lines Quote popup, chooses Home, picks Residence Address, and clicks Continue New Quote once.
 Guidewire PolicyCenter
 5. 01 GWPC Start Auto Quote V1.6

@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AZ + LEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4
-// @namespace    homebot.az.lex.gwpc.storage.tools
+// @name         AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4
+// @namespace    homebot.az.apex.gwpc.storage.tools
 // @version      1.4.0
-// @description  Tiny standalone helper: exports tracked AZ + LEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
+// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -18,8 +18,8 @@
 (function () {
   'use strict';
 
-  const UI_ID = 'tm-az-lex-gwpc-storage-tools-v13';
-  const TOAST_ID = 'tm-az-lex-gwpc-storage-tools-toast-v13';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v13';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v13';
 
   const TRACKED_PREFIXES = [
     'tm_',
@@ -35,9 +35,9 @@
       'tm_az_current_job_v1',
       'tm_pc_current_job_v1'
     ],
-    lexPayload: 'tm_lex_home_bot_sheet_reader_payload_v1',
-    lexReady: 'tm_lex_home_bot_sheet_reader_ready_v1',
-    lexActiveRow: 'tm_lex_home_bot_sheet_reader_active_row_v1',
+    apexPayload: 'tm_apex_home_bot_sheet_reader_payload_v1',
+    apexReady: 'tm_apex_home_bot_sheet_reader_ready_v1',
+    apexActiveRow: 'tm_apex_home_bot_sheet_reader_active_row_v1',
     gwpcHomePayload: 'tm_pc_home_quote_grab_payload_v1',
     gwpcAutoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     sharedCurrentJob: 'tm_pc_current_job_v1'
@@ -45,17 +45,17 @@
 
   const CACHE_KEYS = {
     azPayload: 'tm_shared_cache_az_payload_v1',
-    lexPayload: 'tm_shared_cache_lex_sheet_reader_payload_v1',
-    lexReady: 'tm_shared_cache_lex_sheet_reader_ready_v1',
-    lexActiveRow: 'tm_shared_cache_lex_sheet_reader_active_row_v1',
+    apexPayload: 'tm_shared_cache_apex_sheet_reader_payload_v1',
+    apexReady: 'tm_shared_cache_apex_sheet_reader_ready_v1',
+    apexActiveRow: 'tm_shared_cache_apex_sheet_reader_active_row_v1',
     gwpcHomePayload: 'tm_shared_cache_gwpc_home_quote_payload_v1',
     gwpcAutoPayload: 'tm_shared_cache_gwpc_auto_quote_payload_v1'
   };
 
   const EXACT_TRACKED_KEYS = new Set([
-    LIVE_KEYS.lexPayload,
-    LIVE_KEYS.lexReady,
-    LIVE_KEYS.lexActiveRow,
+    LIVE_KEYS.apexPayload,
+    LIVE_KEYS.apexReady,
+    LIVE_KEYS.apexActiveRow,
     LIVE_KEYS.gwpcHomePayload,
     LIVE_KEYS.gwpcAutoPayload,
     LIVE_KEYS.sharedCurrentJob,
@@ -78,7 +78,7 @@
     return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
   }
 
-  function isLexHost() {
+  function isApexHost() {
     return location.hostname === 'farmersagent.lightning.force.com';
   }
 
@@ -179,7 +179,7 @@
         }
       }
     } catch (err) {
-      console.error('[AZ+LEX+GWPC Storage Tools] Failed reading keys:', err);
+      console.error('[AZ+APEX+GWPC Storage Tools] Failed reading keys:', err);
     }
 
     return [...found].sort((a, b) => a.localeCompare(b));
@@ -241,9 +241,9 @@
 
     const specialKeys = [
       ...LIVE_KEYS.azPayloadCandidates,
-      LIVE_KEYS.lexPayload,
-      LIVE_KEYS.lexReady,
-      LIVE_KEYS.lexActiveRow,
+      LIVE_KEYS.apexPayload,
+      LIVE_KEYS.apexReady,
+      LIVE_KEYS.apexActiveRow,
       LIVE_KEYS.gwpcHomePayload,
       LIVE_KEYS.gwpcAutoPayload,
       LIVE_KEYS.sharedCurrentJob
@@ -303,7 +303,7 @@
     try {
       GM_setValue(cacheKey, payload);
     } catch (err) {
-      console.error('[AZ+LEX+GWPC Storage Tools] Failed writing shared cache:', err);
+      console.error('[AZ+APEX+GWPC Storage Tools] Failed writing shared cache:', err);
     }
   }
 
@@ -379,10 +379,10 @@
       syncCacheFromCandidates(CACHE_KEYS.azPayload, LIVE_KEYS.azPayloadCandidates, ['localStorage', 'sessionStorage']);
     }
 
-    if (isLexHost()) {
-      syncOneCache(CACHE_KEYS.lexPayload, LIVE_KEYS.lexPayload, ['localStorage', 'sessionStorage']);
-      syncOneCache(CACHE_KEYS.lexReady, LIVE_KEYS.lexReady, ['localStorage', 'sessionStorage']);
-      syncOneCache(CACHE_KEYS.lexActiveRow, LIVE_KEYS.lexActiveRow, ['localStorage', 'sessionStorage']);
+    if (isApexHost()) {
+      syncOneCache(CACHE_KEYS.apexPayload, LIVE_KEYS.apexPayload, ['localStorage', 'sessionStorage']);
+      syncOneCache(CACHE_KEYS.apexReady, LIVE_KEYS.apexReady, ['localStorage', 'sessionStorage']);
+      syncOneCache(CACHE_KEYS.apexActiveRow, LIVE_KEYS.apexActiveRow, ['localStorage', 'sessionStorage']);
     }
 
     if (isGwpcHost()) {
@@ -424,21 +424,21 @@
       const totalTracked = localSnap.count + sessionSnap.count;
 
       const azPayloadCache = getCachedRecord(CACHE_KEYS.azPayload);
-      const lexPayloadCache = getCachedRecord(CACHE_KEYS.lexPayload);
-      const lexReadyCache = getCachedRecord(CACHE_KEYS.lexReady);
-      const lexActiveRowCache = getCachedRecord(CACHE_KEYS.lexActiveRow);
+      const apexPayloadCache = getCachedRecord(CACHE_KEYS.apexPayload);
+      const apexReadyCache = getCachedRecord(CACHE_KEYS.apexReady);
+      const apexActiveRowCache = getCachedRecord(CACHE_KEYS.apexActiveRow);
       const gwpcHomePayloadCache = getCachedRecord(CACHE_KEYS.gwpcHomePayload);
       const gwpcAutoPayloadCache = getCachedRecord(CACHE_KEYS.gwpcAutoPayload);
 
       const parts = [];
-      parts.push('AZ + LEX + GWPC STORAGE EXPORT');
+      parts.push('AZ + APEX + GWPC STORAGE EXPORT');
       parts.push('');
       parts.push(`URL: ${location.href}`);
       parts.push(`HOST: ${location.host}`);
       parts.push(`ORIGIN: ${location.origin}`);
       parts.push(`EXPORTED AT: ${new Date().toISOString()}`);
       parts.push('NOTE: Browser storage is origin-specific. Current-origin tracked keys are exported below. Mirrored payloads are also exported from shared cache when available.');
-      parts.push('TIP: Open AZ once, LEX once, and GWPC once after installing this script so all mirrored payload caches get captured.');
+      parts.push('TIP: Open AZ once, APEX once, and GWPC once after installing this script so all mirrored payload caches get captured.');
       parts.push(`TOTAL CURRENT-ORIGIN TRACKED KEYS FOUND: ${totalTracked}`);
       parts.push('');
       parts.push(buildCurrentOriginSpecialSection());
@@ -449,11 +449,11 @@
       parts.push('');
       parts.push(buildCachedSection('MIRRORED AZ PAYLOAD', azPayloadCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX PAYLOAD', lexPayloadCache));
+      parts.push(buildCachedSection('MIRRORED APEX PAYLOAD', apexPayloadCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX READY', lexReadyCache));
+      parts.push(buildCachedSection('MIRRORED APEX READY', apexReadyCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX ACTIVE ROW', lexActiveRowCache));
+      parts.push(buildCachedSection('MIRRORED APEX ACTIVE ROW', apexActiveRowCache));
       parts.push('');
       parts.push(buildCachedSection('MIRRORED GWPC HOME QUOTE PAYLOAD', gwpcHomePayloadCache));
       parts.push('');
@@ -462,7 +462,7 @@
 
       const txt = parts.join('\n');
       const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
-      const fileName = `az-lex-gwpc-storage-export_${location.host.replace(/[^\w.-]+/g, '_')}_${safeNowStamp()}.txt`;
+      const fileName = `az-apex-gwpc-storage-export_${location.host.replace(/[^\w.-]+/g, '_')}_${safeNowStamp()}.txt`;
 
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -476,13 +476,13 @@
       }, 1000);
 
       const haveAz = !!(azPayloadCache && azPayloadCache.valueRaw != null);
-      const haveLex = !!(lexPayloadCache && lexPayloadCache.valueRaw != null);
+      const haveApex = !!(apexPayloadCache && apexPayloadCache.valueRaw != null);
       const haveHome = !!(gwpcHomePayloadCache && gwpcHomePayloadCache.valueRaw != null);
       const haveAuto = !!(gwpcAutoPayloadCache && gwpcAutoPayloadCache.valueRaw != null);
 
-      toast(`Exported. AZ: ${haveAz ? 'YES' : 'NO'} | LEX: ${haveLex ? 'YES' : 'NO'} | HOME: ${haveHome ? 'YES' : 'NO'} | AUTO: ${haveAuto ? 'YES' : 'NO'}`);
+      toast(`Exported. AZ: ${haveAz ? 'YES' : 'NO'} | APEX: ${haveApex ? 'YES' : 'NO'} | HOME: ${haveHome ? 'YES' : 'NO'} | AUTO: ${haveAuto ? 'YES' : 'NO'}`);
     } catch (err) {
-      console.error('[AZ+LEX+GWPC Storage Tools] Export failed:', err);
+      console.error('[AZ+APEX+GWPC Storage Tools] Export failed:', err);
       toast('Export failed');
     }
   }
@@ -521,7 +521,7 @@
     const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
 
     const ok = window.confirm(
-      `Clear tracked AZ / LEX / GWPC data on this site, clear mirrored caches, then close this tab?\n\nCurrent origin:\n${location.origin}`
+      `Clear tracked AZ / APEX / GWPC data on this site, clear mirrored caches, then close this tab?\n\nCurrent origin:\n${location.origin}`
     );
     if (!ok) return;
 
@@ -532,7 +532,7 @@
         localStorage.removeItem(key);
         cleared++;
       } catch (err) {
-        console.error('[AZ+LEX+GWPC Storage Tools] Failed clearing localStorage key:', key, err);
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing localStorage key:', key, err);
       }
     }
 
@@ -541,7 +541,7 @@
         sessionStorage.removeItem(key);
         cleared++;
       } catch (err) {
-        console.error('[AZ+LEX+GWPC Storage Tools] Failed clearing sessionStorage key:', key, err);
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing sessionStorage key:', key, err);
       }
     }
 
@@ -550,22 +550,22 @@
         GM_deleteValue(key);
         cleared++;
       } catch (err) {
-        console.error('[AZ+LEX+GWPC Storage Tools] Failed clearing GM key:', key, err);
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing GM key:', key, err);
       }
     }
 
     clearCachedRecord(CACHE_KEYS.azPayload);
-    clearCachedRecord(CACHE_KEYS.lexPayload);
-    clearCachedRecord(CACHE_KEYS.lexReady);
-    clearCachedRecord(CACHE_KEYS.lexActiveRow);
+    clearCachedRecord(CACHE_KEYS.apexPayload);
+    clearCachedRecord(CACHE_KEYS.apexReady);
+    clearCachedRecord(CACHE_KEYS.apexActiveRow);
     clearCachedRecord(CACHE_KEYS.gwpcHomePayload);
     clearCachedRecord(CACHE_KEYS.gwpcAutoPayload);
 
     delete state.lastSeen[`${CACHE_KEYS.azPayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.azPayload}__lastSourceKey`];
-    delete state.lastSeen[`${CACHE_KEYS.lexPayload}__lastRaw`];
-    delete state.lastSeen[`${CACHE_KEYS.lexReady}__lastRaw`];
-    delete state.lastSeen[`${CACHE_KEYS.lexActiveRow}__lastRaw`];
+    delete state.lastSeen[`${CACHE_KEYS.apexPayload}__lastRaw`];
+    delete state.lastSeen[`${CACHE_KEYS.apexReady}__lastRaw`];
+    delete state.lastSeen[`${CACHE_KEYS.apexActiveRow}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcHomePayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcAutoPayload}__lastRaw`];
 
@@ -631,7 +631,7 @@
 
     const exportBtn = makeButton(
       'ALL TXT',
-      'Export tracked current-origin keys plus mirrored AZ + LEX + GWPC payloads',
+      'Export tracked current-origin keys plus mirrored AZ + APEX + GWPC payloads',
       '#1f7a3d',
       exportTxt
     );

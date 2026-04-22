@@ -2,7 +2,7 @@
 // @name         AZ TO GWPC Shared Ticket Handoff V1.0
 // @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
 // @version      1.0
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address and writes tm_pc_current_job_v1. LEX ignored.
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -389,7 +389,7 @@
           <button id="hb-shared-az-gwpc-toggle" type="button" style="border:0;border-radius:8px;padding:8px 10px;background:${state.running ? '#b91c1c' : '#166534'};color:#fff;font-weight:700;cursor:pointer;">${state.running ? 'STOP' : 'START'}</button>
           <button id="hb-shared-az-gwpc-copy" type="button" style="border:0;border-radius:8px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;">COPY LOGS</button>
         </div>
-        <div style="font-size:11px;opacity:.82;margin-bottom:8px;">AZ captures Ticket ID. GWPC writes tm_pc_current_job_v1. LEX ignored.</div>
+        <div style="font-size:11px;opacity:.82;margin-bottom:8px;">AZ captures Ticket ID. GWPC writes tm_pc_current_job_v1. APEX ignored.</div>
         <div id="hb-shared-az-gwpc-logs" style="max-height:180px;overflow:auto;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:8px;white-space:pre-wrap;word-break:break-word;font-family:Consolas,monospace;font-size:11px;"></div>
       </div>
     `;

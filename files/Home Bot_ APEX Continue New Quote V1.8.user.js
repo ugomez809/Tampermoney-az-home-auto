@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: LEX Continue New Quote V1.8
-// @namespace    homebot.lex.continue.new.quote
+// @name         Home Bot: APEX Continue New Quote V1.8
+// @namespace    homebot.apex.continue.new.quote
 // @version      1.8
 // @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load.
 // @author       OpenAI
@@ -14,7 +14,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: LEX Continue New Quote V1.8';
+  const SCRIPT_NAME = 'Home Bot: APEX Continue New Quote V1.8';
   const VERSION = '1.8';
 
   const CFG = {
@@ -33,8 +33,8 @@
     panelBottom: 12,
     panelWidth: 340,
     zIndex: 2147483647,
-    posKey: 'tm_lex_continue_new_quote_panel_pos_v18',
-    doneThisLoadKey: 'tm_lex_continue_new_quote_done_this_load_v18',
+    posKey: 'tm_apex_continue_new_quote_panel_pos_v18',
+    doneThisLoadKey: 'tm_apex_continue_new_quote_done_this_load_v18',
     sameElementCooldownMs: 4000
   };
 
@@ -211,7 +211,7 @@
   }
 
   function getPanel() {
-    return document.getElementById('hb-lex-continue-panel');
+    return document.getElementById('hb-apex-continue-panel');
   }
 
   function clamp(val, min, max) {
@@ -338,22 +338,22 @@
   }
 
   function makePanel() {
-    if (document.getElementById('hb-lex-continue-panel')) return;
+    if (document.getElementById('hb-apex-continue-panel')) return;
 
     const panel = document.createElement('div');
-    panel.id = 'hb-lex-continue-panel';
+    panel.id = 'hb-apex-continue-panel';
     panel.innerHTML = `
-      <div id="hb-lex-continue-drag" style="font-weight:700;margin-bottom:6px;cursor:move;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <div id="hb-apex-continue-drag" style="font-weight:700;margin-bottom:6px;cursor:move;display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <span>${SCRIPT_NAME}</span>
         <span style="font-size:11px;opacity:.8;">${VERSION}</span>
       </div>
 
       <div style="margin-bottom:6px;">
-        <span id="hb-lex-continue-status" style="font-size:12px;">Running</span>
+        <span id="hb-apex-continue-status" style="font-size:12px;">Running</span>
       </div>
 
       <div>
-        <div id="hb-lex-continue-log" style="max-height:180px;overflow:auto;font-size:11px;line-height:1.35;"></div>
+        <div id="hb-apex-continue-log" style="max-height:180px;overflow:auto;font-size:11px;line-height:1.35;"></div>
       </div>
     `;
 
@@ -377,20 +377,20 @@
     const savedPos = loadPanelPosition();
     if (savedPos) applyPanelPosition(panel, savedPos);
 
-    const dragHandle = document.getElementById('hb-lex-continue-drag');
+    const dragHandle = document.getElementById('hb-apex-continue-drag');
     dragHandle.addEventListener('mousedown', beginDrag);
 
     window.addEventListener('resize', ensurePanelInView);
   }
 
   function setStatus(text) {
-    const el = document.getElementById('hb-lex-continue-status');
+    const el = document.getElementById('hb-apex-continue-status');
     if (el) el.textContent = text;
   }
 
   function log(msg) {
     console.log(`[${SCRIPT_NAME}] ${msg}`);
-    const box = document.getElementById('hb-lex-continue-log');
+    const box = document.getElementById('hb-apex-continue-log');
     if (!box) return;
 
     const line = document.createElement('div');
@@ -840,7 +840,7 @@
 
     makePanel();
     log('Script start.');
-    log('Page detected: LEX.');
+    log('Page detected: APEX.');
     log(`Version: ${VERSION}`);
     setStatus('Running');
 

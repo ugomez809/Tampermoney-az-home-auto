@@ -270,7 +270,7 @@
 
     const hasBigZ = Number.isFinite(z) && z >= CFG.minZIndex;
     const hasMarker =
-      /(^|[^a-z])(hb|tm|aqb|home bot|guidewire|lex|vin|cnq|dup|az-ha)([^a-z]|$)/i.test(marker) ||
+      /(^|[^a-z])(hb|tm|aqb|home bot|guidewire|apex|vin|cnq|dup|az-ha)([^a-z]|$)/i.test(marker) ||
       /aqb:\s*(start|stop)/i.test(marker) ||
       /home bot/i.test(marker);
 

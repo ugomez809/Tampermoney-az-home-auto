@@ -2,7 +2,7 @@
 // @name         Home Bot: Clean All → Refresh → Home V1.3
 // @namespace    homebot.clean.refresh.home
 // @version      1.3
-// @description  LEX Account page in front 2s -> open 1 GWPC cleaner tab in front -> wait 3s there -> GWPC clears keys and closes -> LEX clears keys -> refresh -> click Home. No UI.
+// @description  APEX Account page in front 2s -> open 1 GWPC cleaner tab in front -> wait 3s there -> GWPC clears keys and closes -> APEX clears keys -> refresh -> click Home. No UI.
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
 // @run-at       document-start
@@ -16,9 +16,9 @@
   if (window.top !== window.self) return;
 
   const CFG = {
-    lexHoldMs: 2000,
-    lexTickMs: 300,
-    lexBlockMs: 30000,
+    apexHoldMs: 2000,
+    apexTickMs: 300,
+    apexBlockMs: 30000,
     gwpcWaitMs: 3000,
     gwpcBlockMs: 10000,
     gwpcTabTotalWaitMs: 5200,
@@ -40,11 +40,11 @@
   const nativeSetItem = Storage.prototype.setItem;
   const nativeRemoveItem = Storage.prototype.removeItem;
 
-  const isLEX = location.host === 'farmersagent.lightning.force.com';
+  const isAPEX = location.host === 'farmersagent.lightning.force.com';
   const isGWPC = location.host === 'policycenter.farmersinsurance.com';
 
   let storagePatched = false;
-  let lexBusy = false;
+  let apexBusy = false;
   let homeBusy = false;
 
   function log(msg) {
@@ -218,7 +218,7 @@
     }
   }
 
-  function isLexAccountPage() {
+  function isApexAccountPage() {
     return /\/lightning\/r\/Account\/[^/]+\/view(?:[?#]|$)/i.test(location.href);
   }
 
@@ -358,7 +358,7 @@
   }
 
   async function runPendingHome() {
-    if (!isLEX || homeBusy) return;
+    if (!isAPEX || homeBusy) return;
 
     const pending = getPendingHome();
     if (!pending) return;
@@ -406,9 +406,9 @@
     }
   }
 
-  async function runLexFlow() {
-    if (!isLEX || lexBusy) return;
-    lexBusy = true;
+  async function runApexFlow() {
+    if (!isAPEX || apexBusy) return;
+    apexBusy = true;
 
     try {
       const reqId = makeReqId();
@@ -416,7 +416,7 @@
 
       await waitAndCloseGwpcTab(handle);
 
-      setBlock(CFG.lexBlockMs);
+      setBlock(CFG.apexBlockMs);
       clearCurrentOriginKeys();
 
       setPendingHome({
@@ -427,15 +427,15 @@
       setPhase('waiting_home');
       setLastTrigger(location.href, reqId);
 
-      log('Refreshing LEX');
+      log('Refreshing APEX');
       location.reload();
     } finally {
-      lexBusy = false;
+      apexBusy = false;
     }
   }
 
-  function startLexLoop() {
-    if (!isLEX) return;
+  function startApexLoop() {
+    if (!isAPEX) return;
 
     setInterval(() => {
       const phase = getPhase();
@@ -447,13 +447,13 @@
       if (phase === 'waiting_home') return;
 
       if (phase === 'done') {
-        if (!isLexAccountPage() || !doneCooling()) {
+        if (!isApexAccountPage() || !doneCooling()) {
           clearFlowState();
         }
         return;
       }
 
-      if (!isLexAccountPage()) {
+      if (!isApexAccountPage()) {
         clearVisibleSince();
         return;
       }
@@ -472,15 +472,15 @@
         return;
       }
 
-      if ((now() - since) < CFG.lexHoldMs) return;
+      if ((now() - since) < CFG.apexHoldMs) return;
 
       clearVisibleSince();
       setPhase('cleaning');
-      runLexFlow().catch(err => {
-        log(`LEX flow error: ${err && err.message ? err.message : err}`);
+      runApexFlow().catch(err => {
+        log(`APEX flow error: ${err && err.message ? err.message : err}`);
         clearFlowState();
       });
-    }, CFG.lexTickMs);
+    }, CFG.apexTickMs);
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') clearVisibleSince();
@@ -533,9 +533,9 @@
   startGwpcCleanerMode().then((handled) => {
     if (handled) return;
 
-    startLexLoop();
+    startApexLoop();
 
-    if (isLEX) {
+    if (isAPEX) {
       runPendingHome().catch(err => {
         log(`Startup Home error: ${err && err.message ? err.message : err}`);
       });

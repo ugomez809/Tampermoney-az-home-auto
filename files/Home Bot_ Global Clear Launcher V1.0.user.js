@@ -2,7 +2,7 @@
 // @name         Home Bot: Global Clear Launcher V1.0
 // @namespace    home.bot.global.clear.launcher
 // @version      1.0
-// @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + LEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
+// @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -53,14 +53,14 @@
 
   const PROJECT_PREFIXES = [
     'tm_az_',
-    'tm_lex_',
+    'tm_apex_',
     'tm_pc_',
     'tm_shared_',
     'aqb_'
   ];
 
   const PROJECT_EXACT_KEYS = [
-    '__hb_lex_qna_stop_this_session__',
+    '__hb_apex_qna_stop_this_session__',
     'az_ha_panel_left_v12'
   ];
 
@@ -121,7 +121,7 @@
         </div>
 
         <div style="font-size:11px;opacity:.82;margin-bottom:8px;">
-          Opens AZ + LEX + GWPC 1/2/3. Each opened tab clears itself and auto-closes.
+          Opens AZ + APEX + GWPC 1/2/3. Each opened tab clears itself and auto-closes.
         </div>
 
         <div id="hb-gcl-logs" style="max-height:180px;overflow:auto;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:8px;white-space:pre-wrap;word-break:break-word;font-family:Consolas,monospace;font-size:11px;"></div>

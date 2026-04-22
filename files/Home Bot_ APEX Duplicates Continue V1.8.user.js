@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Home Bot: LEX Duplicates Continue V1.8
-// @namespace    homebot.lex.duplicates.continue
+// @name         Home Bot: APEX Duplicates Continue V1.8
+// @namespace    homebot.apex.duplicates.continue
 // @version      1.8
-// @description  Detects Duplicates Found inside LEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning.
+// @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -14,12 +14,12 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: LEX Duplicates Continue V1.8';
+  const SCRIPT_NAME = 'Home Bot: APEX Duplicates Continue V1.8';
   const VERSION = '1.8';
 
   const KEYS = {
-    PANEL_POS: 'tm_lex_duplicates_continue_panel_pos_v18',
-    LAST_HANDLED: 'tm_lex_duplicates_continue_last_handled_v18'
+    PANEL_POS: 'tm_apex_duplicates_continue_panel_pos_v18',
+    LAST_HANDLED: 'tm_apex_duplicates_continue_last_handled_v18'
   };
 
   const CFG = {
