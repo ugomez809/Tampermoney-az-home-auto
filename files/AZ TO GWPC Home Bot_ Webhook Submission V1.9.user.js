@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
 // @namespace    az.to.gwpc.webhook.submission
-// @version      1.12
+// @version      1.13
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.12';
+  const VERSION = '1.13';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
@@ -400,6 +400,38 @@
     return !!(bundle?.timeout?.ready && Array.isArray(bundle?.timeout?.events) && bundle.timeout.events.length);
   }
 
+  function getTimeoutEvents(bundle) {
+    return Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events : [];
+  }
+
+  function hasSectionErrors(section) {
+    if (!isPlainObject(section?.data)) return false;
+    if (Array.isArray(section.data.errors) && section.data.errors.length) return true;
+    return !!(isPlainObject(section.data.latestError) && normalizeText(section.data.latestError.errorType || section.data.latestError.errorName || section.data.latestError.errorText));
+  }
+
+  function hasHomeError(bundle) {
+    if (hasSectionErrors(bundle?.home)) return true;
+    return getTimeoutEvents(bundle).some((event) => normalizeText(event?.product).toLowerCase() === 'home');
+  }
+
+  function hasAutoError(bundle) {
+    if (hasSectionErrors(bundle?.auto)) return true;
+    return getTimeoutEvents(bundle).some((event) => normalizeText(event?.product).toLowerCase() === 'auto');
+  }
+
+  function hasHomeSuccess(bundle) {
+    return hasMeaningfulHome(bundle) && !hasHomeError(bundle);
+  }
+
+  function hasAutoSuccess(bundle) {
+    return hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
+  }
+
+  function shouldWaitForAuto(bundle) {
+    return hasHomeSuccess(bundle) && !hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
+  }
+
   function buildHomeOnlySyntheticBundle(job, homePayload) {
     const row = isPlainObject(homePayload?.row) ? homePayload.row : null;
     if (!row) return null;
@@ -596,6 +628,8 @@
         hasHome: hasMeaningfulHome(bundle),
         hasAuto: hasMeaningfulAuto(bundle),
         hasTimeout: hasPendingTimeout(bundle),
+        hasHomeError: hasHomeError(bundle),
+        hasAutoError: hasAutoError(bundle),
         timeoutCount: Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events.length : 0
       }
     };
@@ -685,6 +719,12 @@
   }
 
   function shouldSendNow(bundle) {
+    if (hasHomeError(bundle)) return true;
+    if (hasAutoError(bundle)) return true;
+    if (shouldWaitForAuto(bundle)) {
+      state.quoteSeenAt = 0;
+      return false;
+    }
     if (hasPendingTimeout(bundle)) return true;
 
     if (!(hasMeaningfulHome(bundle) || hasMeaningfulAuto(bundle))) {
@@ -763,6 +803,7 @@
     log(`Current Job AZ ID: ${job['AZ ID']}`);
     log(`Bundle source: ${source}`);
     log(`Bundle sections -> home:${hasMeaningfulHome(bundle) ? 'yes' : 'no'} auto:${hasMeaningfulAuto(bundle) ? 'yes' : 'no'} timeout:${hasPendingTimeout(bundle) ? 'yes' : 'no'}`);
+    log(`Bundle errors -> home:${hasHomeError(bundle) ? 'yes' : 'no'} auto:${hasAutoError(bundle) ? 'yes' : 'no'}`);
 
     const requestBody = buildRequestBody(job, bundle, signature, false);
 
@@ -841,6 +882,25 @@
     if (forceSend) {
       setStatus('Force send ready');
       sendBundle(true);
+      return;
+    }
+
+    if (shouldWaitForAuto(bundle)) {
+      state.quoteSeenAt = 0;
+      setStatus('Home complete, waiting for auto');
+      logWait('wait-auto-after-home', 'Home complete. Waiting for AUTO completion or AUTO error before sending');
+      return;
+    }
+
+    if (hasHomeError(bundle)) {
+      setStatus('Home error ready');
+      sendBundle(false);
+      return;
+    }
+
+    if (hasAutoError(bundle)) {
+      setStatus('Auto error ready');
+      sendBundle(false);
       return;
     }
 
