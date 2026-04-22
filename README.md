@@ -110,6 +110,12 @@ webhook (Pabbly) for downstream processing.
   Account V3.9 is kept dormant so the form-fill slot is ready when the
   webhook-to-APEX adapter is built.
 
+## Install & auto-update
+
+Scripts ship with `@updateURL` + `@downloadURL` pointing at raw GitHub. See
+[`UPDATE.md`](UPDATE.md) for install links, update-interval configuration,
+and the developer version-bump rule.
+
 ## Operator install notes
 
 Tampermonkey treats changes to `@name` or `@namespace` as new scripts. After
