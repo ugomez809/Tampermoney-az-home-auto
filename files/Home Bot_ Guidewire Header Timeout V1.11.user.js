@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.16
+// @version      1.17
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.16';
+  const VERSION = '1.17';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
@@ -58,6 +58,7 @@
     panel: null,
     els: {},
     tickTimer: null,
+    uiTimer: null,
     selectorMode: false,
     selectorDialogOpen: false,
     selectorTargetEl: null,
@@ -86,8 +87,11 @@
     renderStatus();
 
     if (state.tickTimer) clearInterval(state.tickTimer);
+    if (state.uiTimer) clearInterval(state.uiTimer);
     state.tickTimer = setInterval(tick, CFG.tickMs);
+    state.uiTimer = setInterval(renderLiveUi, 250);
     window.addEventListener('beforeunload', cleanupSelectorMode, true);
+    renderLiveUi();
     tick();
   }
 
@@ -461,6 +465,13 @@
 
   function getHeaderElapsedMs() {
     return state.lastHeaderAt ? Math.max(0, Date.now() - state.lastHeaderAt) : 0;
+  }
+
+  function renderLiveUi() {
+    if (!state.enabled) return;
+    const currentSubmission = normalizeText(getSubmissionNumber()) || state.lastSubmission || '';
+    const currentHeader = normalizeText(getGuidewireHeader()) || state.lastHeader || '';
+    setUiValues(currentSubmission, currentHeader, getHeaderElapsedMs());
   }
 
   function getAutoVehiclesState() {
@@ -883,12 +894,49 @@
   function getUsableSelectorTarget(el) {
     if (!(el instanceof Element)) return null;
 
+    const wrapperUpgraded = upgradeFrameworkWrapperTarget(el);
+    if (wrapperUpgraded) return wrapperUpgraded;
+
     const direct = normalizeInteractiveTarget(el, true);
     if (direct) return direct;
 
     const wrapper = findTargetWrapper(el) || el;
     const upgraded = findPreferredTargetIn(wrapper);
     return normalizeInteractiveTarget(upgraded || wrapper || el, false) || upgraded || wrapper || el;
+  }
+
+  function upgradeFrameworkWrapperTarget(el) {
+    const wrapper = findTargetWrapper(el);
+    if (!wrapper) return null;
+
+    const preferred = [
+      'input[type="radio"]',
+      'input[type="checkbox"]',
+      'input:not([type="hidden"])',
+      'textarea',
+      'select',
+      'button',
+      'a[href]',
+      'label[for]',
+      'label',
+      '[role="button"]',
+      '[role="link"]'
+    ];
+
+    for (const selector of preferred) {
+      const match = $$(selector, wrapper).find(isVisible);
+      if (match) return normalizeInteractiveTarget(match, false);
+    }
+
+    let current = wrapper;
+    for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+      for (const selector of preferred) {
+        const siblingMatch = $$(selector, current).find((node) => isVisible(node) && (node === wrapper || node.contains(wrapper) || wrapper.contains(node) || node.closest?.('mat-radio-button, mat-radio-group, iv360-question-row, iv360-widget-integer, iv360-page-link, iv360-quality-section, iv360-page-area, iv360-quality-no-slider') === wrapper));
+        if (siblingMatch) return normalizeInteractiveTarget(siblingMatch, false);
+      }
+    }
+
+    return null;
   }
 
   function findTargetWrapper(el) {
