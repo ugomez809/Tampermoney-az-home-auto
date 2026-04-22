@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    tm.pc.aqb.2.autodataprefill.vehicles
-// @version      1.3
+// @version      1.4
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, then set Primary Driver to first non-<none>. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,6 +19,7 @@
   /************* CONFIG *************/
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const WAIT_KEY = 'aqb_step_drivers_done';
   const DONE_KEY = 'aqb_step_vehicles_done';
@@ -65,6 +66,10 @@
 
   // ---------- Helpers ----------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -189,7 +194,7 @@
   }
 
   function maybeRearmFromPrimaryDriverError() {
-    if (!armed) return;
+    if (!armed || isGloballyPaused()) return;
     if (running) return;
     if (!gateOK()) return;
     if (!headerOK()) return;
@@ -293,6 +298,7 @@
 
   async function removeVehiclesWithAnyEmptyCoreCell() {
     for (let guard = 0; guard < 30; guard++) {
+      if (!armed || isGloballyPaused()) return;
       const table = findVehiclesTable();
       if (!table) return;
 
@@ -324,6 +330,7 @@
   }
 
   function setPrimaryDriverAll() {
+    if (isGloballyPaused()) return;
     const table = findVehiclesTable();
     if (!table) return;
 
@@ -350,7 +357,7 @@
 
   // ---------- Main ----------
   async function runOnce() {
-    if (!armed || finished || running) return;
+    if (!armed || finished || running || isGloballyPaused()) return;
     if (!gateOK()) return;
     if (!headerOK()) return;
     if (!waitKeyReady()) return;
@@ -375,6 +382,7 @@
     mountToggle();
 
     setInterval(() => {
+      if (isGloballyPaused()) return;
       maybeRearmFromPrimaryDriverError();
 
       runOnce().catch(() => {

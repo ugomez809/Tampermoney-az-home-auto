@@ -1,16 +1,14 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.11
-// @description  Home/Auto header timeout + Auto no-vehicles poster. Prefers original sheet row identity + active row hints, posts to Google Sheets, blocks beforeunload leave prompts, then closes the tab. Never uses about:blank. If Dwelling shows 360 Value, posts No 360 Value. If main posting fails 3 times, sends FAIL to AA through a separate safefail endpoint and closes.
+// @version      1.12
+// @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-start
-// @grant        GM_xmlhttpRequest
-// @connect      script.google.com
-// @connect      script.googleusercontent.com
+// @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Header%20Timeout%20V1.11.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Header%20Timeout%20V1.11.user.js
 // ==/UserScript==
@@ -21,363 +19,672 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.11';
+  const VERSION = '1.12';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
+  const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
 
   const CFG = {
     tickMs: 1000,
-    timeoutMs: 60000,
-    noVehiclesStableMs: 3000,
-    postTimeoutMs: 30000,
-    closeDelayMs: 1200,
-    retryAfterFailMs: 10000,
-    maxLogLines: 14,
-    closeRetryMs: [0, 120, 300, 700],
-    closeBlockedOverlayAfterMs: 1400,
-    maxPostFailCount: 3
+    timeoutMs: 120000,
+    autoMissingStableMs: 3000,
+    maxLogLines: 18,
+    selectorOutlineColor: '#22d3ee',
+    selectorOutlineWidth: 2
   };
 
-  const API_URL = 'https://script.google.com/macros/s/AKfycbzZ-hRY1zw7-dnQfcUqtrrqbXfs6dzcW1Y3VhuBEYz58CSdfeNrcW6ZkBwB5Kq0e0MA/exec';
-  const SAFEFAIL_API_URL = 'https://script.google.com/macros/s/AKfycbxoth6h1IIOiLz3zE6GvNZCDFrO24FfxiaFYLrPrb4Xg3cmYHQXficxqhlINB9Ir9OI/exec';
-
   const KEYS = {
-    postedMap: 'tm_pc_header_timeout_posted_v16',
-    identityCache: 'tm_pc_header_timeout_identity_cache_v1',
-    panelPos: 'tm_pc_header_timeout_panel_pos_v111',
-    lexPayload: 'tm_lex_home_bot_sheet_reader_payload_v1',
-    lexActiveRow: 'tm_lex_home_bot_sheet_reader_active_row_v1',
+    panelPos: 'tm_pc_header_timeout_panel_pos_v112',
+    identityCache: 'tm_pc_header_timeout_identity_cache_v2',
+    selectorRules: 'tm_pc_header_timeout_selector_rules_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
 
   const AUTO_VEHICLES_LV_ID = 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PriorCarrier_ExtScreen-PAVehiclesExtPanelSet-VehiclesLV';
   const AUTO_VEHICLES_EMPTY_TEXT = 'No data to display';
-  const IV360_CONTAINER_ID = 'iv360-valuationContainer';
+  const HOME_IV360_CONTAINER_ID = 'iv360-valuationContainer';
 
   const state = {
     enabled: true,
-    inFlight: false,
-    lastAttemptAt: 0,
+    saving: false,
     lastSubmission: '',
     lastHeader: '',
     lastHeaderAt: 0,
     lastProduct: '',
-    autoNoVehiclesSince: 0,
-    firedLocal: Object.create(null),
+    autoVehiclesIssueSince: 0,
     logs: [],
     panel: null,
     els: {},
     tickTimer: null,
-    closeStarted: false,
-    closeOverlayShown: false,
-    postFailCount: 0,
-    aaFallbackTried: false
+    selectorMode: false,
+    hoveredEl: null,
+    hoveredPrevOutline: '',
+    hoveredPrevOffset: '',
+    capturedRuleId: '',
+    savedEventIds: Object.create(null)
   };
 
-  installLeaveGuard();
+  boot();
 
-  function installLeaveGuard() {
-    const nativeWinAdd = window.addEventListener.bind(window);
-    const nativeWinRemove = window.removeEventListener.bind(window);
-    const nativeDocAdd = document.addEventListener.bind(document);
+  function boot() {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', onReady, { once: true });
+    } else {
+      onReady();
+    }
+  }
 
-    function isBeforeUnloadType(type) {
-      return String(type || '').toLowerCase() === 'beforeunload';
+  function onReady() {
+    buildUi();
+    log('Script started');
+    log('Shared-payload error gatherer armed');
+    log('Selector mode publishes tm_pc_global_pause_v1');
+    renderStatus();
+
+    if (state.tickTimer) clearInterval(state.tickTimer);
+    state.tickTimer = setInterval(tick, CFG.tickMs);
+    window.addEventListener('beforeunload', cleanupSelectorMode, true);
+    tick();
+  }
+
+  function tick() {
+    if (!state.enabled || state.saving || state.selectorMode) return;
+
+    const submission = normalizeText(getSubmissionNumber());
+    const product = detectProduct();
+    const header = normalizeText(getGuidewireHeader());
+
+    if (!submission) {
+      resetSubmissionState('', product, header);
+      setUiValues('', header, 0);
+      return;
     }
 
-    function scrubBeforeUnloadEvent(e) {
-      try { e.stopImmediatePropagation(); } catch {}
-      try { e.stopPropagation(); } catch {}
-      try { e.preventDefault(); } catch {}
-      try { delete e.returnValue; } catch {}
-      try { e.returnValue = undefined; } catch {}
-      try {
-        Object.defineProperty(e, 'returnValue', {
-          configurable: true,
-          enumerable: true,
-          get() { return undefined; },
-          set() { return true; }
-        });
-      } catch {}
-      return undefined;
+    updateIdentityCache(submission);
+
+    if (submission !== state.lastSubmission) {
+      resetSubmissionState(submission, product, header);
+      setUiValues(submission, header, 0);
+      if (header) log(`Header change: ${header}`);
+      return;
     }
 
-    try {
-      nativeWinAdd('beforeunload', scrubBeforeUnloadEvent, true);
-      nativeWinAdd('beforeunload', scrubBeforeUnloadEvent, false);
-      nativeDocAdd('beforeunload', scrubBeforeUnloadEvent, true);
-    } catch {}
+    if (product !== state.lastProduct) {
+      state.lastProduct = product;
+      state.lastHeader = header;
+      state.lastHeaderAt = header ? Date.now() : 0;
+      state.autoVehiclesIssueSince = 0;
+      setUiValues(submission, header, 0);
+      if (header) log(`Header change: ${header}`);
+      return;
+    }
 
-    try {
-      window.addEventListener = function (type, listener, options) {
-        if (isBeforeUnloadType(type)) return;
-        return nativeWinAdd(type, listener, options);
-      };
-    } catch {}
+    if (!header) {
+      setUiValues(submission, '', 0);
+      detectSavedSelectorErrors(product, submission);
+      return;
+    }
 
-    try {
-      window.removeEventListener = function (type, listener, options) {
-        if (isBeforeUnloadType(type)) return;
-        return nativeWinRemove(type, listener, options);
-      };
-    } catch {}
+    if (header !== state.lastHeader) {
+      state.lastHeader = header;
+      state.lastHeaderAt = Date.now();
+      state.autoVehiclesIssueSince = 0;
+      setUiValues(submission, header, 0);
+      log(`Header change: ${header}`);
+      detectSavedSelectorErrors(product, submission);
+      return;
+    }
 
-    try {
-      const origProtoAdd = Window.prototype.addEventListener;
-      Object.defineProperty(Window.prototype, 'addEventListener', {
-        configurable: true,
-        writable: true,
-        value: function (type, listener, options) {
-          if (isBeforeUnloadType(type)) return;
-          return origProtoAdd.call(this, type, listener, options);
+    const ageMs = Date.now() - state.lastHeaderAt;
+    setUiValues(submission, header, ageMs);
+    detectSavedSelectorErrors(product, submission);
+
+    if (product === 'auto') {
+      const autoTableState = getAutoVehiclesState();
+      if (autoTableState !== 'present') {
+        if (!state.autoVehiclesIssueSince) {
+          state.autoVehiclesIssueSince = Date.now();
+          log(`AUTO vehicles ${autoTableState}. Waiting for stability...`);
+        } else if ((Date.now() - state.autoVehiclesIssueSince) >= CFG.autoMissingStableMs) {
+          const message = autoTableState === 'missing'
+            ? 'AUTO vehicles table missing'
+            : AUTO_VEHICLES_EMPTY_TEXT;
+          gatherError({
+            product: 'auto',
+            actionKey: 'auto_no_vehicles',
+            errorType: autoTableState === 'missing' ? 'AutoVehiclesTableMissing' : 'AutoVehiclesEmpty',
+            errorName: autoTableState === 'missing' ? 'AUTO table missing' : 'NO AUTO/SKIPEED',
+            errorText: message,
+            headerText: header,
+            source: 'auto-vehicles-check'
+          });
+          return;
         }
-      });
-    } catch {}
-
-    try {
-      Object.defineProperty(window, 'onbeforeunload', {
-        configurable: true,
-        enumerable: true,
-        get() { return null; },
-        set() { return true; }
-      });
-    } catch {}
-
-    try {
-      const desc = Object.getOwnPropertyDescriptor(Window.prototype, 'onbeforeunload');
-      if (!desc || desc.configurable) {
-        Object.defineProperty(Window.prototype, 'onbeforeunload', {
-          configurable: true,
-          enumerable: true,
-          get() { return null; },
-          set() { return true; }
-        });
+      } else {
+        state.autoVehiclesIssueSince = 0;
       }
-    } catch {}
+    } else {
+      state.autoVehiclesIssueSince = 0;
+    }
 
-    try {
-      const descDoc = Object.getOwnPropertyDescriptor(Document.prototype, 'onbeforeunload');
-      if (!descDoc || descDoc.configurable) {
-        Object.defineProperty(Document.prototype, 'onbeforeunload', {
-          configurable: true,
-          enumerable: true,
-          get() { return null; },
-          set() { return true; }
-        });
-      }
-    } catch {}
-  }
+    if (ageMs < CFG.timeoutMs) return;
 
-  function $(sel, root = document) {
-    try { return root.querySelector(sel); } catch { return null; }
-  }
+    if (product === 'home') {
+      const hasIv360 = hasVisibleIv360ValuationContainer();
+      const errorText = hasIv360 && normalizeText(header).toLowerCase() === 'dwelling'
+        ? 'No 360 Value'
+        : `Header "${header}" did not change for 120 seconds`;
 
-  function $$(sel, root = document) {
-    try { return Array.from(root.querySelectorAll(sel)); } catch { return []; }
-  }
+      gatherError({
+        product: 'home',
+        actionKey: 'home_timeout',
+        errorType: hasIv360 && normalizeText(header).toLowerCase() === 'dwelling' ? 'No360Value' : 'HeaderTimeout',
+        errorName: hasIv360 && normalizeText(header).toLowerCase() === 'dwelling' ? 'No 360 Value' : 'HOME timeout',
+        errorText,
+        headerText: header,
+        source: 'header-timeout'
+      });
+      return;
+    }
 
-  function txt(v) {
-    return (v == null ? '' : String(v)).replace(/\s+/g, ' ').trim();
-  }
-
-  function low(v) {
-    return txt(v).toLowerCase();
-  }
-
-  function isVisible(el) {
-    try {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      if (!r || r.width <= 0 || r.height <= 0) return false;
-      const cs = getComputedStyle(el);
-      return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
-    } catch {
-      return false;
+    if (product === 'auto') {
+      gatherError({
+        product: 'auto',
+        actionKey: 'auto_timeout',
+        errorType: 'HeaderTimeout',
+        errorName: 'AUTO timeout',
+        errorText: `Header "${header}" did not change for 120 seconds`,
+        headerText: header,
+        source: 'header-timeout'
+      });
     }
   }
 
-  function safeJsonParse(s) {
-    try { return JSON.parse(s); } catch { return null; }
-  }
+  function gatherError(details) {
+    if (state.saving) return;
 
-  function isPlainObject(v) {
-    return !!v && typeof v === 'object' && !Array.isArray(v);
-  }
+    const context = buildErrorContext(details);
+    if (!context.ok) {
+      log(context.reason, 'error');
+      return;
+    }
 
-  function nowIso() {
-    return new Date().toISOString();
-  }
+    const event = buildErrorEvent(context.job, context.identity, details);
+    if (alreadySavedEvent(event.id)) return;
 
-  function todayEt() {
+    state.saving = true;
+    renderStatus();
+
     try {
-      return new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-      }).format(new Date());
-    } catch {
-      const d = new Date();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const yyyy = d.getFullYear();
-      return `${mm}/${dd}/${yyyy}`;
+      saveErrorToPayload(context.productPayloadKey, context.product, context.job, event);
+      saveErrorToBundle(context.product, context.job, event);
+      markSavedEvent(event.id);
+      log(`Saved ${details.product.toUpperCase()} error: ${event.errorName}`);
+      setStatusText(`Saved ${details.product.toUpperCase()} error`);
+    } catch (err) {
+      log(`Save failed: ${err?.message || err}`, 'error');
+      setStatusText('Save failed');
+    } finally {
+      state.saving = false;
+      renderStatus();
     }
   }
 
-  function pick(obj, keys) {
-    if (!obj) return '';
-    for (const key of keys) {
-      if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
-      const v = obj[key];
-      if (v == null) continue;
-      if (typeof v === 'string' && !v.trim()) continue;
-      return v;
+  function buildErrorContext(details) {
+    const job = readCurrentJob();
+    if (!job['AZ ID']) {
+      return { ok: false, reason: 'Missing tm_pc_current_job_v1 / AZ ID' };
+    }
+
+    const identity = getPageIdentity();
+    if (job['Name'] && identity.name && !namesLikelySame(job['Name'], identity.name)) {
+      return { ok: false, reason: `Blocked error save: current job Name mismatch | job=${job['Name']} | page=${identity.name}` };
+    }
+    if (job['Mailing Address'] && identity.mailingAddress && !addressesLikelySame(job['Mailing Address'], identity.mailingAddress)) {
+      return { ok: false, reason: 'Blocked error save: current job address mismatch' };
+    }
+
+    return {
+      ok: true,
+      job,
+      identity,
+      product: details.product === 'home' ? 'home' : 'auto',
+      productPayloadKey: details.product === 'home' ? KEYS.homePayload : KEYS.autoPayload
+    };
+  }
+
+  function buildErrorEvent(job, identity, details) {
+    const errorText = normalizeText(details.errorText || '');
+    const headerText = normalizeText(details.headerText || '');
+    const submissionNumber = normalizeText(identity.submissionNumber || state.lastSubmission || '');
+    const selectorRuleId = normalizeText(details.selectorRuleId || '');
+    const actionKey = normalizeText(details.actionKey || 'gwpc_error');
+    const baseId = [
+      job['AZ ID'],
+      details.product,
+      actionKey,
+      details.errorType || '',
+      selectorRuleId || '',
+      errorText || headerText
+    ].join('|');
+
+    return {
+      id: hashString(baseId),
+      actionKey,
+      product: details.product,
+      errorType: normalizeText(details.errorType || 'GuidewireError'),
+      errorName: normalizeText(details.errorName || details.errorType || 'Guidewire error'),
+      errorMessage: errorText || headerText || 'Unknown Guidewire error',
+      errorText: errorText || headerText || 'Unknown Guidewire error',
+      headerText,
+      submissionNumber,
+      selectorRuleId,
+      detectedAt: nowIso(),
+      source: normalizeText(details.source || SCRIPT_NAME),
+      sourceScript: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      identity: {
+        'AZ ID': job['AZ ID'],
+        'Name': job['Name'] || identity.name || '',
+        'Mailing Address': job['Mailing Address'] || identity.mailingAddress || '',
+        'SubmissionNumber': job['SubmissionNumber'] || submissionNumber || ''
+      }
+    };
+  }
+
+  function saveErrorToPayload(payloadKey, product, job, event) {
+    const current = safeJsonParse(localStorage.getItem(payloadKey), null);
+    const next = isPlainObject(current) ? deepClone(current) : {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      event: 'gwpc_error_gathered',
+      product,
+      'AZ ID': job['AZ ID'],
+      currentJob: normalizeCurrentJob(job),
+      savedAt: nowIso(),
+      page: {
+        url: location.href,
+        title: document.title
+      }
+    };
+
+    const payloadAzId = normalizeText(next['AZ ID'] || next?.currentJob?.['AZ ID'] || '');
+    if (payloadAzId && payloadAzId !== job['AZ ID']) {
+      throw new Error(`Payload AZ ID mismatch (${payloadAzId} != ${job['AZ ID']})`);
+    }
+
+    next.script = SCRIPT_NAME;
+    next.version = VERSION;
+    next.product = product;
+    next['AZ ID'] = job['AZ ID'];
+    next.currentJob = normalizeCurrentJob({
+      ...(isPlainObject(next.currentJob) ? next.currentJob : {}),
+      ...job
+    });
+    next.savedAt = nowIso();
+    next.page = { url: location.href, title: document.title };
+    next.errors = mergeEventList(next.errors, event);
+    next.latestError = deepClone(event);
+
+    localStorage.setItem(payloadKey, JSON.stringify(next, null, 2));
+  }
+
+  function saveErrorToBundle(product, job, event) {
+    const bundle = ensureBundleForJob(job);
+    if (!bundle) throw new Error('Missing current AZ job for bundle save');
+
+    const next = deepClone(bundle);
+    next.timeout = isPlainObject(next.timeout) ? next.timeout : {};
+    next.timeout.ready = true;
+    next.timeout.events = mergeEventList(next.timeout.events, event);
+    next.timeout.lastEvent = deepClone(event);
+
+    const section = isPlainObject(next[product]) ? next[product] : {};
+    section.ready = section.ready === true;
+    section.savedAt = nowIso();
+    section.script = SCRIPT_NAME;
+    section.version = VERSION;
+    section.data = isPlainObject(section.data) ? section.data : {};
+    section.data.errors = mergeEventList(section.data.errors, event);
+    section.data.latestError = deepClone(event);
+    next[product] = section;
+
+    next['AZ ID'] = job['AZ ID'];
+    next['Name'] = next['Name'] || normalizeText(job['Name']);
+    next['Mailing Address'] = next['Mailing Address'] || normalizeText(job['Mailing Address']);
+    next['SubmissionNumber'] = next['SubmissionNumber'] || normalizeText(job['SubmissionNumber']);
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.updatedAt = nowIso();
+    next.meta.lastWriter = SCRIPT_NAME;
+    next.meta.version = VERSION;
+
+    localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2));
+  }
+
+  function ensureBundleForJob(job) {
+    const azId = normalizeText(job && job['AZ ID']);
+    if (!azId) return null;
+
+    const current = safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
+    if (!isPlainObject(current) || !normalizeText(current['AZ ID'])) {
+      return writeBundle(emptyBundleForJob(job));
+    }
+
+    if (normalizeText(current['AZ ID']) !== azId) {
+      return writeBundle(emptyBundleForJob(job));
+    }
+
+    current['Name'] = current['Name'] || normalizeText(job['Name']);
+    current['Mailing Address'] = current['Mailing Address'] || normalizeText(job['Mailing Address']);
+    current['SubmissionNumber'] = current['SubmissionNumber'] || normalizeText(job['SubmissionNumber']);
+    current.timeout = isPlainObject(current.timeout) ? current.timeout : { ready: false, events: [] };
+    if (!Array.isArray(current.timeout.events)) current.timeout.events = [];
+    current.meta = isPlainObject(current.meta) ? current.meta : {};
+    current.meta.updatedAt = nowIso();
+    current.meta.lastWriter = SCRIPT_NAME;
+    current.meta.version = VERSION;
+    return writeBundle(current);
+  }
+
+  function emptyBundleForJob(job) {
+    return {
+      'AZ ID': normalizeText(job && job['AZ ID']),
+      'Name': normalizeText(job && job['Name']),
+      'Mailing Address': normalizeText(job && job['Mailing Address']),
+      'SubmissionNumber': normalizeText(job && job['SubmissionNumber']),
+      home: {},
+      auto: {},
+      timeout: {
+        ready: false,
+        events: []
+      },
+      meta: {
+        updatedAt: nowIso(),
+        lastWriter: SCRIPT_NAME,
+        version: VERSION
+      }
+    };
+  }
+
+  function writeBundle(bundle) {
+    localStorage.setItem(BUNDLE_KEY, JSON.stringify(bundle, null, 2));
+    return bundle;
+  }
+
+  function mergeEventList(list, event) {
+    const out = Array.isArray(list) ? list.map(deepClone) : [];
+    const idx = out.findIndex((item) => normalizeText(item?.id) === event.id);
+    if (idx >= 0) out[idx] = deepClone(event);
+    else out.push(deepClone(event));
+    return out;
+  }
+
+  function alreadySavedEvent(id) {
+    return !!state.savedEventIds[id];
+  }
+
+  function markSavedEvent(id) {
+    state.savedEventIds[id] = true;
+  }
+
+  function resetSubmissionState(submission, product, header) {
+    state.lastSubmission = submission || '';
+    state.lastProduct = product || '';
+    state.lastHeader = header || '';
+    state.lastHeaderAt = header ? Date.now() : 0;
+    state.autoVehiclesIssueSince = 0;
+    state.savedEventIds = Object.create(null);
+  }
+
+  function getAutoVehiclesState() {
+    const root = findAutoVehiclesRoot();
+    if (!root) return 'missing';
+
+    const emptyCell = $$('.gw-ListView--empty-info-cell', root)
+      .find((el) => isVisible(el) && normalizeText(el.textContent) === AUTO_VEHICLES_EMPTY_TEXT);
+    if (emptyCell) return 'empty';
+
+    const bodyRows = $$('tbody tr', root).filter(isVisible);
+    if (!bodyRows.length) {
+      const anyText = normalizeText(root.textContent);
+      if (anyText.includes(AUTO_VEHICLES_EMPTY_TEXT)) return 'empty';
+      return 'missing';
+    }
+
+    return 'present';
+  }
+
+  function findAutoVehiclesRoot() {
+    for (const doc of getDocs()) {
+      const root = doc.getElementById(AUTO_VEHICLES_LV_ID) || queryByCssId(doc, AUTO_VEHICLES_LV_ID);
+      if (root && isVisible(root)) return root;
+    }
+    return null;
+  }
+
+  function hasVisibleIv360ValuationContainer() {
+    for (const doc of getDocs()) {
+      const el = doc.getElementById(HOME_IV360_CONTAINER_ID) || queryByCssId(doc, HOME_IV360_CONTAINER_ID);
+      if (el && isVisible(el)) return true;
+    }
+    return false;
+  }
+
+  function queryByCssId(root, id) {
+    try {
+      return root.querySelector(`#${cssEscape(id)}`);
+    } catch {
+      return null;
+    }
+  }
+
+  function getPageIdentity() {
+    const submissionNumber = normalizeText(getSubmissionNumber());
+    const cache = getIdentityCache();
+    const cached = isPlainObject(cache[submissionNumber]) ? cache[submissionNumber] : {};
+
+    const name = normalizeText(getAccountNameFromPage()) || normalizeText(cached['Name'] || '');
+    const mailingAddress = normalizeText(getMailingAddressFromPage()) || normalizeText(cached['Mailing Address'] || '');
+
+    return {
+      name,
+      mailingAddress,
+      submissionNumber
+    };
+  }
+
+  function updateIdentityCache(submission) {
+    const sub = normalizeText(submission);
+    if (!sub) return;
+
+    const name = normalizeText(getAccountNameFromPage());
+    const mailingAddress = normalizeText(getMailingAddressFromPage());
+    if (!name || !mailingAddress) return;
+
+    const cache = getIdentityCache();
+    cache[sub] = {
+      'Name': name,
+      'Mailing Address': mailingAddress,
+      'SubmissionNumber': sub,
+      seenAt: nowIso()
+    };
+    setIdentityCache(cache);
+  }
+
+  function getIdentityCache() {
+    return safeJsonParse(sessionStorage.getItem(KEYS.identityCache), {}) || {};
+  }
+
+  function setIdentityCache(cache) {
+    try { sessionStorage.setItem(KEYS.identityCache, JSON.stringify(cache)); } catch {}
+  }
+
+  function readCurrentJob() {
+    let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    let job = normalizeCurrentJob(raw);
+    if (job['AZ ID']) return job;
+
+    raw = safeJsonParse(localStorage.getItem(LEGACY_SHARED_JOB_KEY), null);
+    job = normalizeCurrentJob(raw);
+    return job;
+  }
+
+  function normalizeCurrentJob(raw) {
+    const out = {
+      'AZ ID': '',
+      'Name': '',
+      'Mailing Address': '',
+      'SubmissionNumber': '',
+      'updatedAt': ''
+    };
+
+    if (!isPlainObject(raw)) return out;
+
+    out['AZ ID'] = normalizeText(raw['AZ ID'] || raw.ticketId || raw.masterId || raw.id || '');
+    out['Name'] = normalizeText(raw['Name'] || raw.name || '');
+    out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || '');
+    out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
+    out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || '');
+    return out;
+  }
+
+  function detectProduct() {
+    const isAuto = hasLabelExactAnyDoc('Personal Auto');
+    const isHome = hasLabelExactAnyDoc('Homeowners');
+    if (isAuto) return 'auto';
+    if (isHome) return 'home';
+    return '';
+  }
+
+  function hasLabelExactAnyDoc(labelText) {
+    const wanted = normalizeText(labelText);
+    if (!wanted) return false;
+    for (const doc of getDocs()) {
+      const hit = $$('.gw-label', doc).some((el) => isVisible(el) && normalizeText(el.textContent) === wanted);
+      if (hit) return true;
+    }
+    return false;
+  }
+
+  function getSubmissionNumber() {
+    const titleText = firstVisibleTextBySelectors([
+      '.gw-Wizard--Title',
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '[role="heading"][aria-level="1"]'
+    ]);
+    const match = titleText.match(/Submission\s+(\d{6,})/i);
+    return match ? match[1] : '';
+  }
+
+  function getGuidewireHeader() {
+    return firstVisibleTextBySelectors([
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '.gw-Wizard--Title',
+      '[role="heading"][aria-level="1"]'
+    ]);
+  }
+
+  function getAccountNameFromPage() {
+    for (const doc of getDocs()) {
+      const exact = $('div#SubmissionWizard-JobWizardInfoBar-AccountName > div.gw-label.gw-infoValue:nth-of-type(2)', doc);
+      const exactText = normalizeText(exact && exact.textContent);
+      if (exactText) return exactText;
+
+      const wrap = $('#SubmissionWizard-JobWizardInfoBar-AccountName', doc);
+      if (!wrap) continue;
+
+      const values = $$('.gw-label.gw-infoValue, .gw-infoValue', wrap)
+        .map((el) => normalizeText(el.textContent))
+        .filter(Boolean);
+
+      if (values[1]) return values[1];
+      if (values[0]) return values[0];
     }
     return '';
   }
 
-  function smartMerge(dst, src) {
-    if (!isPlainObject(src)) return dst;
+  function getMailingAddressFromPage() {
+    const selectors = [
+      'div#SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HODwellingLocationHOEInputSet-HODwellingLocationInput > div.gw-vw--value.gw-align-h--left:nth-of-type(1)',
+      '#SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HODwellingLocationHOEInputSet-HODwellingLocationInput .gw-vw--value.gw-align-h--left:nth-of-type(1)',
+      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-infoValue',
+      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-label.gw-infoValue'
+    ];
 
-    Object.entries(src).forEach(([k, v]) => {
-      if (v == null) return;
-
-      if (typeof v === 'string') {
-        const sv = v.trim();
-        if (!sv) return;
-        if (!(k in dst) || dst[k] == null || String(dst[k]).trim() === '') dst[k] = sv;
-        return;
+    for (const doc of getDocs()) {
+      for (const selector of selectors) {
+        const el = $(selector, doc);
+        const text = normalizeText(el && el.textContent);
+        if (text && looksLikeAddress(text)) return text;
       }
+    }
 
-      if (Array.isArray(v)) {
-        if (!(k in dst) || !Array.isArray(dst[k]) || !dst[k].length) dst[k] = v;
-        return;
+    for (const doc of getDocs()) {
+      const nodes = [
+        ...$$('.gw-infoValue', doc),
+        ...$$('.gw-label.gw-infoValue', doc),
+        ...$$('.gw-vw--value', doc)
+      ];
+
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const text = normalizeText(el.textContent);
+        if (text && looksLikeAddress(text)) return text;
       }
+    }
 
-      if (isPlainObject(v)) {
-        if (!(k in dst) || !isPlainObject(dst[k])) dst[k] = v;
-        return;
+    return '';
+  }
+
+  function looksLikeAddress(value) {
+    return /\d{1,6}\s+.+,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?/.test(normalizeText(value));
+  }
+
+  function getDocs() {
+    const docs = [];
+    try { docs.push(document); } catch {}
+    for (const frame of $$('iframe, frame', document)) {
+      try {
+        if (frame.contentDocument) docs.push(frame.contentDocument);
+      } catch {}
+    }
+    return docs;
+  }
+
+  function firstVisibleTextBySelectors(selectors) {
+    for (const doc of getDocs()) {
+      for (const selector of selectors) {
+        const el = $(selector, doc);
+        if (!el || !isVisible(el)) continue;
+        const text = normalizeText(el.textContent);
+        if (text) return text;
       }
-
-      if (!(k in dst) || dst[k] == null || dst[k] === '') dst[k] = v;
-    });
-
-    return dst;
-  }
-
-  function log(msg, type = 'info') {
-    const stamp = new Date().toLocaleTimeString();
-    state.logs.unshift(`[${stamp}] ${msg}`);
-    if (state.logs.length > CFG.maxLogLines) state.logs.length = CFG.maxLogLines;
-    renderLogs();
-    if (type === 'error') console.error(`${SCRIPT_NAME}: ${msg}`);
-    else console.log(`${SCRIPT_NAME}: ${msg}`);
-  }
-
-  function renderLogs() {
-    if (state.els.logs) state.els.logs.textContent = state.logs.join('\n');
-  }
-
-  function renderStatus() {
-    if (!state.els.status || !state.els.toggle) return;
-
-    const running = state.enabled && !state.inFlight;
-
-    state.els.status.textContent =
-      state.inFlight ? 'POSTING...' :
-      running ? 'RUNNING' : 'STOPPED';
-
-    state.els.status.style.color =
-      state.inFlight ? '#facc15' :
-      running ? '#86efac' : '#fca5a5';
-
-    state.els.toggle.textContent = running ? 'STOP' : 'START';
-    state.els.toggle.style.background = running ? '#16a34a' : '#6b7280';
-  }
-
-  function setUiValues(submission, header, ageMs) {
-    if (state.els.submission) state.els.submission.textContent = submission || '—';
-    if (state.els.header) state.els.header.textContent = header || '—';
-    if (state.els.age) state.els.age.textContent = header ? `${Math.max(0, Math.floor(ageMs / 1000))}s / 60s` : '—';
-  }
-
-  function savePanelPos() {
-    if (!state.panel) return;
-    try {
-      localStorage.setItem(KEYS.panelPos, JSON.stringify({
-        left: state.panel.style.left || '',
-        top: state.panel.style.top || '',
-        right: state.panel.style.right || '',
-        bottom: state.panel.style.bottom || ''
-      }));
-    } catch {}
-  }
-
-  function loadPanelPos(panel) {
-    try {
-      const raw = localStorage.getItem(KEYS.panelPos);
-      if (!raw) return;
-      const pos = JSON.parse(raw);
-      if (!pos || typeof pos !== 'object') return;
-      if (pos.left) panel.style.left = pos.left;
-      if (pos.top) panel.style.top = pos.top;
-      if (pos.right) panel.style.right = pos.right;
-      if (pos.bottom) panel.style.bottom = pos.bottom;
-    } catch {}
-  }
-
-  function makeDraggable(panel, handle) {
-    let dragging = false;
-    let startX = 0;
-    let startY = 0;
-    let startLeft = 0;
-    let startTop = 0;
-
-    handle.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      dragging = true;
-
-      const rect = panel.getBoundingClientRect();
-      startX = e.clientX;
-      startY = e.clientY;
-      startLeft = rect.left;
-      startTop = rect.top;
-
-      panel.style.left = `${rect.left}px`;
-      panel.style.top = `${rect.top}px`;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-
-      document.body.style.userSelect = 'none';
-      e.preventDefault();
-    });
-
-    window.addEventListener('mousemove', (e) => {
-      if (!dragging) return;
-      panel.style.left = `${Math.max(4, startLeft + (e.clientX - startX))}px`;
-      panel.style.top = `${Math.max(4, startTop + (e.clientY - startY))}px`;
-    });
-
-    window.addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      document.body.style.userSelect = '';
-      savePanelPos();
-    });
+    }
+    return '';
   }
 
   function buildUi() {
     if (!document.documentElement) return false;
-    if ($('#tm-pc-header-timeout-panel')) return true;
+    const existing = $('#tm-pc-header-timeout-panel');
+    if (existing) return true;
 
     const panel = document.createElement('div');
     panel.id = 'tm-pc-header-timeout-panel';
-
     Object.assign(panel.style, {
       position: 'fixed',
       right: '12px',
       bottom: '12px',
-      width: '360px',
+      width: '390px',
       zIndex: 2147483647,
       background: 'rgba(17,24,39,0.96)',
       color: '#f9fafb',
@@ -394,23 +701,20 @@
         <div style="opacity:.75;">v${VERSION}</div>
       </div>
       <div style="padding:10px;">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
           <button id="tm-pc-header-timeout-toggle" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer;background:#16a34a;color:#fff;font-weight:700;">STOP</button>
+          <button id="tm-pc-header-timeout-selector" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer;background:#0891b2;color:#fff;font-weight:700;">ERROR SELECTOR</button>
           <div id="tm-pc-header-timeout-status" style="font-weight:700;color:#86efac;">RUNNING</div>
         </div>
-
-        <div style="display:grid;grid-template-columns:88px 1fr;gap:4px 8px;margin-bottom:8px;">
+        <div style="display:grid;grid-template-columns:92px 1fr;gap:4px 8px;margin-bottom:8px;">
           <div style="opacity:.8;">Submission</div>
           <div id="tm-pc-header-timeout-submission">—</div>
-
           <div style="opacity:.8;">Header</div>
           <div id="tm-pc-header-timeout-header" style="word-break:break-word;">—</div>
-
           <div style="opacity:.8;">No change</div>
           <div id="tm-pc-header-timeout-age">—</div>
         </div>
-
-        <div id="tm-pc-header-timeout-logs" style="max-height:180px;overflow:auto;background:rgba(0,0,0,0.22);border-radius:8px;padding:8px;white-space:pre-wrap;"></div>
+        <div id="tm-pc-header-timeout-logs" style="max-height:190px;overflow:auto;background:rgba(0,0,0,0.22);border-radius:8px;padding:8px;white-space:pre-wrap;"></div>
       </div>
     `;
 
@@ -420,6 +724,7 @@
 
     state.panel = panel;
     state.els.toggle = $('#tm-pc-header-timeout-toggle', panel);
+    state.els.selector = $('#tm-pc-header-timeout-selector', panel);
     state.els.status = $('#tm-pc-header-timeout-status', panel);
     state.els.submission = $('#tm-pc-header-timeout-submission', panel);
     state.els.header = $('#tm-pc-header-timeout-header', panel);
@@ -432,258 +737,338 @@
       log(state.enabled ? 'Manual START.' : 'Manual STOP for this page session.');
     });
 
+    state.els.selector.addEventListener('click', () => {
+      if (state.selectorMode) cancelSelectorMode('Selector canceled');
+      else enterSelectorMode();
+    });
+
     renderStatus();
     renderLogs();
     return true;
   }
 
-  function getDocs() {
-    const docs = [];
-    try { docs.push(document); } catch {}
+  function enterSelectorMode() {
+    state.selectorMode = true;
+    publishGlobalPause(true);
+    updateSelectorButton();
+    log('Selector mode started. Hover an error and click to save rule. Press Esc to cancel.');
 
-    const frames = $$('iframe, frame', document);
-    for (const fr of frames) {
-      try {
-        if (fr.contentDocument) docs.push(fr.contentDocument);
-      } catch {}
-    }
-
-    return docs;
+    document.addEventListener('mousemove', onSelectorMove, true);
+    document.addEventListener('click', onSelectorClick, true);
+    document.addEventListener('keydown', onSelectorKeydown, true);
   }
 
-  function hasLabelExactAnyDoc(labelText) {
-    const want = txt(labelText);
-    if (!want) return false;
-
-    for (const doc of getDocs()) {
-      const hit = $$('.gw-label', doc).some(el => isVisible(el) && txt(el.textContent) === want);
-      if (hit) return true;
-    }
-    return false;
+  function cancelSelectorMode(message = 'Selector mode ended') {
+    cleanupSelectorMode();
+    log(message);
   }
 
-  function firstVisibleTextBySelectors(docs, selectors) {
-    for (const doc of docs) {
-      for (const sel of selectors) {
-        const el = $(sel, doc);
-        if (!el || !isVisible(el)) continue;
-        const t = txt(el.textContent);
-        if (t) return t;
-      }
-    }
-    return '';
+  function cleanupSelectorMode() {
+    if (!state.selectorMode) return;
+    state.selectorMode = false;
+    publishGlobalPause(false);
+    clearHoveredHighlight();
+    updateSelectorButton();
+    document.removeEventListener('mousemove', onSelectorMove, true);
+    document.removeEventListener('click', onSelectorClick, true);
+    document.removeEventListener('keydown', onSelectorKeydown, true);
   }
 
-  function getSubmissionNumber() {
-    const docs = getDocs();
-
-    const titleText = firstVisibleTextBySelectors(docs, [
-      '.gw-Wizard--Title',
-      '.gw-TitleBar--title[role="heading"]',
-      '.gw-TitleBar--title',
-      '.gw-WizardScreen-title',
-      '[role="heading"][aria-level="1"]'
-    ]);
-
-    const m = titleText.match(/Submission\s+(\d{6,})/i);
-    return m ? m[1] : '';
+  function updateSelectorButton() {
+    if (!state.els.selector) return;
+    state.els.selector.textContent = state.selectorMode ? 'EXIT SELECTOR' : 'ERROR SELECTOR';
+    state.els.selector.style.background = state.selectorMode ? '#dc2626' : '#0891b2';
   }
 
-  function getGuidewireHeader() {
-    const docs = getDocs();
-
-    return firstVisibleTextBySelectors(docs, [
-      '.gw-TitleBar--title[role="heading"]',
-      '.gw-TitleBar--title',
-      '.gw-WizardScreen-title',
-      '.gw-Wizard--Title',
-      '[role="heading"][aria-level="1"]'
-    ]);
+  function onSelectorMove(event) {
+    const el = event.target instanceof Element ? event.target : null;
+    if (!el || (state.panel && state.panel.contains(el))) return;
+    setHoveredElement(el);
   }
 
-  function hasVisibleIv360ValuationContainer() {
-    for (const doc of getDocs()) {
-      const el = doc.getElementById(IV360_CONTAINER_ID) || $(`#${CSS.escape(IV360_CONTAINER_ID)}`, doc);
-      if (el && isVisible(el)) return true;
-    }
-    return false;
+  function onSelectorClick(event) {
+    const el = event.target instanceof Element ? event.target : null;
+    if (!el || (state.panel && state.panel.contains(el))) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+
+    const product = detectProduct() || state.lastProduct || 'home';
+    const rule = buildSelectorRule(el, product);
+    const rules = getSelectorRules();
+    const existingIdx = rules.findIndex((item) => item.id === rule.id);
+    if (existingIdx >= 0) rules[existingIdx] = rule;
+    else rules.push(rule);
+    setSelectorRules(rules);
+    state.capturedRuleId = rule.id;
+    cleanupSelectorMode();
+    log(`Selector rule saved: ${rule.errorName}`);
   }
 
-  function looksLikeAddress(value) {
-    const s = txt(value);
-    return /\d{1,6}\s+.+,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?/.test(s);
-  }
-
-  function getAccountNameFromPage() {
-    const docs = getDocs();
-
-    for (const doc of docs) {
-      const exact = $('div#SubmissionWizard-JobWizardInfoBar-AccountName > div.gw-label.gw-infoValue:nth-of-type(2)', doc);
-      const exactText = txt(exact && exact.textContent);
-      if (exactText) return exactText;
-
-      const wrap = $('#SubmissionWizard-JobWizardInfoBar-AccountName', doc);
-      if (wrap) {
-        const vals = $$('.gw-label.gw-infoValue, .gw-infoValue', wrap)
-          .map(el => txt(el.textContent))
-          .filter(Boolean);
-
-        if (vals[1]) return vals[1];
-        if (vals[0]) return vals[0];
-      }
-    }
-
-    return '';
-  }
-
-  function getMailingAddressFromPage() {
-    const docs = getDocs();
-
-    const exactSelectors = [
-      'div#SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HODwellingLocationHOEInputSet-HODwellingLocationInput > div.gw-vw--value.gw-align-h--left:nth-of-type(1)',
-      '#SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HODwellingLocationHOEInputSet-HODwellingLocationInput .gw-vw--value.gw-align-h--left:nth-of-type(1)',
-      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-infoValue',
-      '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-label.gw-infoValue'
-    ];
-
-    for (const doc of docs) {
-      for (const sel of exactSelectors) {
-        const el = $(sel, doc);
-        const t = txt(el && el.textContent);
-        if (t && looksLikeAddress(t)) return t;
-      }
-    }
-
-    for (const doc of docs) {
-      const vals = [
-        ...$$('.gw-infoValue', doc),
-        ...$$('.gw-label.gw-infoValue', doc),
-        ...$$('.gw-vw--value', doc)
-      ];
-
-      for (const el of vals) {
-        if (!isVisible(el)) continue;
-        const t = txt(el.textContent);
-        if (t && looksLikeAddress(t)) return t;
-      }
-    }
-
-    return '';
-  }
-
-  function getIdentityCache() {
-    try {
-      const raw = sessionStorage.getItem(KEYS.identityCache);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return isPlainObject(parsed) ? parsed : {};
-    } catch {
-      return {};
+  function onSelectorKeydown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelSelectorMode('Selector canceled');
     }
   }
 
-  function setIdentityCache(cache) {
-    try { sessionStorage.setItem(KEYS.identityCache, JSON.stringify(cache || {})); } catch {}
+  function setHoveredElement(el) {
+    if (state.hoveredEl === el) return;
+    clearHoveredHighlight();
+    state.hoveredEl = el;
+    if (!el) return;
+    state.hoveredPrevOutline = el.style.outline || '';
+    state.hoveredPrevOffset = el.style.outlineOffset || '';
+    el.style.outline = `${CFG.selectorOutlineWidth}px solid ${CFG.selectorOutlineColor}`;
+    el.style.outlineOffset = '2px';
   }
 
-  function updateIdentityCache(submission) {
-    const sub = txt(submission);
-    if (!sub) return;
+  function clearHoveredHighlight() {
+    if (!state.hoveredEl) return;
+    state.hoveredEl.style.outline = state.hoveredPrevOutline;
+    state.hoveredEl.style.outlineOffset = state.hoveredPrevOffset;
+    state.hoveredEl = null;
+    state.hoveredPrevOutline = '';
+    state.hoveredPrevOffset = '';
+  }
 
-    const name = txt(getAccountNameFromPage());
-    const address = txt(getMailingAddressFromPage());
+  function buildSelectorRule(el, product) {
+    const textSample = normalizeText(el.innerText || el.textContent || '').slice(0, 180);
+    const selector = buildStableSelector(el);
+    const errorName = textSample || normalizeText(el.getAttribute('aria-label') || `${el.tagName.toLowerCase()} error`);
+    const id = hashString([product, selector, textSample].join('|'));
 
-    if (!name || !address || !looksLikeAddress(address)) return;
-
-    const cache = getIdentityCache();
-    cache[sub] = {
-      Name: name,
-      'Mailing Address': address,
-      SubmissionNumber: sub,
-      seenAt: nowIso()
+    return {
+      id,
+      product,
+      selector,
+      textSample,
+      errorName,
+      createdAt: nowIso()
     };
-    setIdentityCache(cache);
   }
 
-  function getCachedIdentity(submission) {
-    const sub = txt(submission);
-    if (!sub) return null;
-    const cache = getIdentityCache();
-    return isPlainObject(cache[sub]) ? cache[sub] : null;
+  function buildStableSelector(el) {
+    if (el.id) return `#${cssEscape(el.id)}`;
+
+    const aria = normalizeText(el.getAttribute('aria-label') || '');
+    if (aria) {
+      const attrSelector = `${el.tagName.toLowerCase()}[aria-label="${cssEscapeAttr(aria)}"]`;
+      if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
+    }
+
+    const dataAttrs = ['data-gw-id', 'data-testid', 'name', 'role'];
+    for (const attr of dataAttrs) {
+      const value = normalizeText(el.getAttribute(attr) || '');
+      if (!value) continue;
+      const attrSelector = `${el.tagName.toLowerCase()}[${attr}="${cssEscapeAttr(value)}"]`;
+      if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
+    }
+
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === 1 && current !== document.body && parts.length < 6) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += `#${cssEscape(current.id)}`;
+        parts.unshift(part);
+        break;
+      }
+
+      const classes = Array.from(current.classList || []).filter(Boolean).slice(0, 2);
+      if (classes.length) part += `.${classes.map(cssEscape).join('.')}`;
+
+      const siblings = current.parentElement
+        ? Array.from(current.parentElement.children).filter((node) => node.tagName === current.tagName)
+        : [];
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(current) + 1;
+        part += `:nth-of-type(${idx})`;
+      }
+
+      parts.unshift(part);
+      const selector = parts.join(' > ');
+      if (isUniqueSelector(selector, el.ownerDocument)) return selector;
+      current = current.parentElement;
+    }
+
+    return parts.join(' > ');
   }
 
-  function readJsonAnyStore(key) {
+  function isUniqueSelector(selector, doc) {
     try {
-      const fromLocal = localStorage.getItem(key);
-      if (fromLocal) {
-        const parsed = safeJsonParse(fromLocal);
-        if (parsed != null) return parsed;
-      }
-    } catch {}
+      return doc.querySelectorAll(selector).length === 1;
+    } catch {
+      return false;
+    }
+  }
 
-    try {
-      const fromSession = sessionStorage.getItem(key);
-      if (fromSession) {
-        const parsed = safeJsonParse(fromSession);
-        if (parsed != null) return parsed;
-      }
-    } catch {}
+  function getSelectorRules() {
+    return safeJsonParse(localStorage.getItem(KEYS.selectorRules), []) || [];
+  }
 
+  function setSelectorRules(rules) {
+    localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
+  }
+
+  function detectSavedSelectorErrors(product, submission) {
+    if (!submission || !product) return;
+    for (const rule of getSelectorRules()) {
+      if (normalizeText(rule.product) && normalizeText(rule.product) !== product) continue;
+      const match = findRuleMatch(rule);
+      if (!match) continue;
+
+      gatherError({
+        product,
+        actionKey: 'selected_error',
+        errorType: 'SelectedError',
+        errorName: normalizeText(rule.errorName || 'Selected error'),
+        errorText: normalizeText(match.innerText || match.textContent || rule.textSample || ''),
+        headerText: normalizeText(getGuidewireHeader()),
+        selectorRuleId: rule.id,
+        source: 'selector-rule'
+      });
+      return;
+    }
+  }
+
+  function findRuleMatch(rule) {
+    const selector = normalizeText(rule.selector);
+    if (!selector) return null;
+    for (const doc of getDocs()) {
+      let nodes = [];
+      try { nodes = Array.from(doc.querySelectorAll(selector)); } catch {}
+      for (const node of nodes) {
+        if (!isVisible(node)) continue;
+        const text = normalizeText(node.innerText || node.textContent || '');
+        if (rule.textSample && text && !text.includes(normalizeText(rule.textSample))) continue;
+        return node;
+      }
+    }
     return null;
   }
 
-  function getStoredRowData(payload) {
-    if (!payload || !isPlainObject(payload)) return {};
-    if (isPlainObject(payload.sheetRow)) return payload.sheetRow;
-    if (isPlainObject(payload.payload) && isPlainObject(payload.payload.sheetRow)) return payload.payload.sheetRow;
-    return payload;
+  function publishGlobalPause(value) {
+    try {
+      if (value) localStorage.setItem(GLOBAL_PAUSE_KEY, '1');
+      else localStorage.removeItem(GLOBAL_PAUSE_KEY);
+    } catch {}
   }
 
-  function getStoredSubmission(payload) {
-    const row = getStoredRowData(payload);
-    return txt(
-      pick(row, [
-        'Submission Number',
-        'Submission Number (Auto)',
-        'SubmissionNumber',
-        'submissionNumber',
-        'submission'
-      ]) ||
-      pick(payload, [
-        'Submission Number',
-        'Submission Number (Auto)',
-        'SubmissionNumber',
-        'submissionNumber',
-        'submission'
-      ])
-    );
+  function renderStatus() {
+    if (!state.els.status || !state.els.toggle) return;
+    const running = state.enabled && !state.saving && !state.selectorMode;
+    state.els.status.textContent =
+      state.selectorMode ? 'SELECTOR MODE' :
+      state.saving ? 'SAVING...' :
+      running ? 'RUNNING' : 'STOPPED';
+    state.els.status.style.color =
+      state.selectorMode ? '#67e8f9' :
+      state.saving ? '#facc15' :
+      running ? '#86efac' : '#fca5a5';
+    state.els.toggle.textContent = running ? 'STOP' : 'START';
+    state.els.toggle.style.background = running ? '#16a34a' : '#6b7280';
   }
 
-  function parseNameSimple(name) {
-    const parts = txt(name).split(/\s+/).filter(Boolean);
-    if (!parts.length) return { first: '', last: '' };
-    if (parts.length === 1) return { first: parts[0], last: '' };
-    return {
-      first: parts[0],
-      last: parts[parts.length - 1]
-    };
+  function setStatusText(text) {
+    if (state.els.status) state.els.status.textContent = text;
   }
 
-  function parseMailingAddressSimple(address) {
-    const s = txt(address);
-    const m = s.match(/^(.*?),\s*([^,]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/i);
-    if (!m) {
-      return { address: '', city: '', state: '', zipCode: '' };
-    }
-    return {
-      address: txt(m[1]),
-      city: txt(m[2]),
-      state: txt(m[3]).toUpperCase(),
-      zipCode: txt(m[4])
-    };
+  function setUiValues(submission, header, ageMs) {
+    if (state.els.submission) state.els.submission.textContent = submission || '-';
+    if (state.els.header) state.els.header.textContent = header || '-';
+    if (state.els.age) state.els.age.textContent = header ? `${Math.max(0, Math.floor(ageMs / 1000))}s / 120s` : '-';
   }
 
-  function normalizeCompare(v) {
-    return txt(v)
+  function log(message, type = 'info') {
+    const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+    state.logs.unshift(line);
+    if (state.logs.length > CFG.maxLogLines) state.logs.length = CFG.maxLogLines;
+    renderLogs();
+    if (type === 'error') console.error(`[${SCRIPT_NAME}] ${message}`);
+    else console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
+
+  function renderLogs() {
+    if (state.els.logs) state.els.logs.textContent = state.logs.join('\n');
+  }
+
+  function savePanelPos() {
+    if (!state.panel) return;
+    localStorage.setItem(KEYS.panelPos, JSON.stringify({
+      left: state.panel.style.left || '',
+      top: state.panel.style.top || '',
+      right: state.panel.style.right || '',
+      bottom: state.panel.style.bottom || ''
+    }));
+  }
+
+  function loadPanelPos(panel) {
+    const raw = safeJsonParse(localStorage.getItem(KEYS.panelPos), null);
+    if (!raw || !isPlainObject(raw)) return;
+    if (raw.left) panel.style.left = raw.left;
+    if (raw.top) panel.style.top = raw.top;
+    if (raw.right) panel.style.right = raw.right;
+    if (raw.bottom) panel.style.bottom = raw.bottom;
+  }
+
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    handle.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      document.body.style.userSelect = 'none';
+      event.preventDefault();
+    });
+
+    window.addEventListener('mousemove', (event) => {
+      if (!dragging) return;
+      panel.style.left = `${Math.max(4, startLeft + (event.clientX - startX))}px`;
+      panel.style.top = `${Math.max(4, startTop + (event.clientY - startY))}px`;
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      savePanelPos();
+    });
+  }
+
+  function normalizeText(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function namesLikelySame(a, b) {
+    const aa = normalizeCompare(a);
+    const bb = normalizeCompare(b);
+    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  }
+
+  function addressesLikelySame(a, b) {
+    const aa = normalizeCompare(a);
+    const bb = normalizeCompare(b);
+    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  }
+
+  function normalizeCompare(value) {
+    return normalizeText(value)
       .toLowerCase()
       .replace(/[\.,#]/g, '')
       .replace(/\bstreet\b/g, 'st')
@@ -702,680 +1087,33 @@
       .trim();
   }
 
-  function namesLikelySame(a, b) {
-    const aa = normalizeCompare(a);
-    const bb = normalizeCompare(b);
-    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  function deepClone(value) {
+    try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
   }
 
-  function addressesLikelySame(a, b) {
-    const aa = normalizeCompare(a);
-    const bb = normalizeCompare(b);
-    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
   }
 
-  function lexRowToSheetHeaders(row) {
-    if (!row || !isPlainObject(row)) return {};
-
-    return {
-      'Address': txt(pick(row, ['Address', 'address'])),
-      'City': txt(pick(row, ['City', 'city'])),
-      'State': txt(pick(row, ['State', 'state'])).toUpperCase(),
-      'Zip Code': txt(pick(row, ['Zip Code', 'zipCode', 'zip'])),
-      'First': txt(pick(row, ['First', 'first', 'firstName'])),
-      'Last': txt(pick(row, ['Last', 'last', 'lastName'])),
-      'First 2': txt(pick(row, ['First 2', 'first2'])),
-      'Last 2': txt(pick(row, ['Last 2', 'last2'])),
-      'Email': txt(pick(row, ['Email', 'email'])),
-      'Phone Number': txt(pick(row, ['Phone Number', 'phoneNumber', 'phone'])),
-      'DND': txt(pick(row, ['DND', 'dnd'])),
-      'DataZapp_DoNotCall': txt(pick(row, ['DataZapp_DoNotCall', 'datazappDoNotCall'])),
-      'DataZapp_Phone': txt(pick(row, ['DataZapp_Phone', 'datazappPhone']))
-    };
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
-  function combineSplitAddress(row) {
-    const addr = txt(pick(row, ['Address', 'address']));
-    const city = txt(pick(row, ['City', 'city']));
-    const state = txt(pick(row, ['State', 'state']));
-    const zip = txt(pick(row, ['Zip Code', 'zipCode', 'zip']));
-    if (!addr || !city || !state || !zip) return '';
-    return `${addr}, ${city}, ${state} ${zip}`;
-  }
-
-  function readMatchingStoredPayload(currentSubmission) {
-    const sub = txt(currentSubmission);
-    const directKeys = [KEYS.homePayload, KEYS.autoPayload];
-
-    for (const key of directKeys) {
-      const parsed = readJsonAnyStore(key);
-      if (!parsed) continue;
-      const foundSub = getStoredSubmission(parsed);
-      if (sub && foundSub && foundSub === sub) return parsed;
+  function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0;
     }
-
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (!key || !/^tm_pc_/i.test(key)) continue;
-        if (!/payload/i.test(key)) continue;
-
-        const raw = localStorage.getItem(key);
-        if (!raw || raw.length < 2) continue;
-
-        const parsed = safeJsonParse(raw);
-        if (!parsed || !isPlainObject(parsed)) continue;
-
-        const foundSub = getStoredSubmission(parsed);
-        if (sub && foundSub && foundSub === sub) return parsed;
-      }
-    } catch {}
-
-    return null;
+    return `e${Math.abs(hash)}`;
   }
 
-  function getBestLexIdentity(pageName, pageAddress) {
-    const lexPayload = readJsonAnyStore(KEYS.lexPayload);
-    const lexActiveRow = readJsonAnyStore(KEYS.lexActiveRow);
-
-    if (!lexPayload || !isPlainObject(lexPayload)) {
-      return { rowData: {}, rowNumber: '', matched: false };
-    }
-
-    const row = getStoredRowData(lexPayload);
-    const mapped = lexRowToSheetHeaders(row);
-    const combinedName = `${txt(mapped['First'])} ${txt(mapped['Last'])}`.trim();
-    const combinedAddress = combineSplitAddress(mapped);
-    const rowNumber = txt(
-      pick(lexPayload?.source || {}, ['rowNumber', 'row']) ||
-      pick(lexActiveRow || {}, ['rowNumber', 'row'])
-    );
-
-    const nameOkay = pageName ? namesLikelySame(pageName, combinedName) : false;
-    const addressOkay = pageAddress ? addressesLikelySame(pageAddress, combinedAddress) : false;
-
-    return {
-      rowData: mapped,
-      rowNumber,
-      matched: !!(nameOkay || addressOkay)
-    };
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+    return String(value).replace(/([ #;?%&,.+*~':"!^$[\]()=>|/@])/g, '\\$1');
   }
 
-  function getPostedMap() {
-    try {
-      const raw = localStorage.getItem(KEYS.postedMap);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return isPlainObject(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
+  function cssEscapeAttr(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
-
-  function setPostedMap(map) {
-    try { localStorage.setItem(KEYS.postedMap, JSON.stringify(map || {})); } catch {}
-  }
-
-  function makePostId(submission, name, address, actionKey) {
-    const sub = txt(submission);
-    const nm = low(name);
-    const addr = low(address);
-    const act = txt(actionKey);
-    return [sub || `${nm}__${addr}`, act].join('__');
-  }
-
-  function alreadyPosted(submission, name, address, actionKey) {
-    const map = getPostedMap();
-    return !!map[makePostId(submission, name, address, actionKey)];
-  }
-
-  function markPosted(submission, name, address, actionKey) {
-    const map = getPostedMap();
-    map[makePostId(submission, name, address, actionKey)] = {
-      at: nowIso(),
-      submission: submission || '',
-      name: name || '',
-      address: address || '',
-      actionKey: actionKey || ''
-    };
-    setPostedMap(map);
-  }
-
-  function detectProduct() {
-    const isAuto = hasLabelExactAnyDoc('Personal Auto');
-    const isHome = hasLabelExactAnyDoc('Homeowners');
-
-    if (isAuto) return 'auto';
-    if (isHome) return 'home';
-    return '';
-  }
-
-  function findAutoVehiclesRoot() {
-    for (const doc of getDocs()) {
-      const root = doc.getElementById(AUTO_VEHICLES_LV_ID) || $(`#${CSS.escape(AUTO_VEHICLES_LV_ID)}`, doc);
-      if (root && isVisible(root)) return root;
-    }
-    return null;
-  }
-
-  function isAutoVehiclesEmpty() {
-    const root = findAutoVehiclesRoot();
-    if (!root) return false;
-
-    const emptyCell = $$('.gw-ListView--empty-info-cell', root)
-      .find(el => isVisible(el) && txt(el.textContent) === AUTO_VEHICLES_EMPTY_TEXT);
-
-    if (emptyCell) return true;
-
-    const bodyRows = $$('tbody tr', root).filter(isVisible);
-    if (!bodyRows.length) {
-      const anyText = txt(root.textContent);
-      if (anyText.includes(AUTO_VEHICLES_EMPTY_TEXT)) return true;
-    }
-
-    return false;
-  }
-
-  function buildPostBody(actionKey, headerText) {
-    const currentSubmission = txt(getSubmissionNumber());
-    if (!currentSubmission) throw new Error('No current Submission Number on page');
-
-    const pageName = txt(getAccountNameFromPage());
-    const pageAddress = txt(getMailingAddressFromPage());
-
-    const cachedIdentity = getCachedIdentity(currentSubmission) || {};
-    const storedPayload = readMatchingStoredPayload(currentSubmission);
-    const storedSubmission = getStoredSubmission(storedPayload);
-    const storedMatchesCurrent = !!storedSubmission && storedSubmission === currentSubmission;
-    const storedRow = storedMatchesCurrent ? getStoredRowData(storedPayload) : {};
-
-    const lexIdentity = getBestLexIdentity(pageName || txt(cachedIdentity['Name']), pageAddress || txt(cachedIdentity['Mailing Address']));
-    const lexRowData = lexIdentity.matched ? lexIdentity.rowData : {};
-    const lexRowNumber = lexIdentity.matched ? lexIdentity.rowNumber : '';
-
-    const safeName =
-      pageName ||
-      txt(cachedIdentity['Name']) ||
-      txt(pick(storedRow, ['Name', 'PrimaryInsuredName'])) ||
-      `${txt(lexRowData['First'])} ${txt(lexRowData['Last'])}`.trim();
-
-    const safeAddress =
-      pageAddress ||
-      txt(cachedIdentity['Mailing Address']) ||
-      txt(pick(storedRow, ['Mailing Address', 'Address'])) ||
-      combineSplitAddress(lexRowData);
-
-    if (!safeName) throw new Error('Could not safely determine Name for current submission');
-    if (!safeAddress || !looksLikeAddress(safeAddress)) {
-      throw new Error('Could not safely determine full Mailing Address for current submission');
-    }
-
-    const pageNameParts = parseNameSimple(safeName);
-    const pageAddrParts = parseMailingAddressSimple(safeAddress);
-
-    const rowData = {};
-
-    if (lexIdentity.matched && isPlainObject(lexRowData)) {
-      smartMerge(rowData, lexRowData);
-    }
-
-    if (storedMatchesCurrent && isPlainObject(storedRow)) {
-      smartMerge(rowData, storedRow);
-    }
-
-    rowData['Name'] = safeName;
-    rowData['Mailing Address'] = safeAddress;
-    rowData['Submission Number'] = currentSubmission;
-    rowData['Date Processed?'] = todayEt();
-    rowData['Timeout Header'] = txt(headerText);
-    rowData['Timeout At'] = nowIso();
-
-    if (!txt(rowData['First'])) rowData['First'] = pageNameParts.first;
-    if (!txt(rowData['Last'])) rowData['Last'] = pageNameParts.last;
-    if (!txt(rowData['Address'])) rowData['Address'] = pageAddrParts.address;
-    if (!txt(rowData['City'])) rowData['City'] = pageAddrParts.city;
-    if (!txt(rowData['State'])) rowData['State'] = pageAddrParts.state;
-    if (!txt(rowData['Zip Code'])) rowData['Zip Code'] = pageAddrParts.zipCode;
-
-    const activeRowInfo = readJsonAnyStore(KEYS.lexActiveRow) || {};
-    const rowNumberHint = txt(
-      lexRowNumber ||
-      pick(storedPayload?.source || {}, ['rowNumber', 'row']) ||
-      pick(activeRowInfo, ['rowNumber', 'row'])
-    );
-
-    let targetField = '';
-    let targetValue = '';
-    let resultText = '';
-
-    if (actionKey === 'home_timeout') {
-      const isDwelling = low(headerText) === 'dwelling';
-      const hasIv360 = hasVisibleIv360ValuationContainer();
-
-      targetField = 'Done?';
-
-      if (isDwelling && hasIv360) {
-        targetValue = 'No 360 Value';
-        resultText = 'No 360 Value';
-      } else {
-        targetValue = 'FAIL TIMEOUT';
-        resultText = 'Header did not change for 60 seconds';
-      }
-
-      rowData['Done?'] = targetValue;
-      rowData['Result'] = resultText;
-    } else if (actionKey === 'auto_timeout') {
-      targetField = 'Auto';
-      targetValue = 'FAIL TIMEOUT';
-      resultText = 'Header did not change for 60 seconds';
-      rowData['Auto'] = targetValue;
-      rowData['AUTO'] = targetValue;
-      rowData['Result'] = resultText;
-    } else if (actionKey === 'auto_no_vehicles') {
-      targetField = 'Auto';
-      targetValue = 'NO AUTO/SKIPEED';
-      resultText = 'Auto vehicles table has no vehicles';
-      rowData['Auto'] = targetValue;
-      rowData['AUTO'] = targetValue;
-      rowData['Result'] = resultText;
-    } else {
-      throw new Error(`Unknown actionKey: ${actionKey}`);
-    }
-
-    return {
-      payload: {
-        sheetRow: rowData,
-        source: rowNumberHint ? { rowNumber: Number(rowNumberHint) || rowNumberHint } : {}
-      },
-      sheetRow: rowData,
-      rowNumber: rowNumberHint ? (Number(rowNumberHint) || rowNumberHint) : '',
-      __rowNumber: rowNumberHint ? (Number(rowNumberHint) || rowNumberHint) : '',
-      sender: {
-        script: SCRIPT_NAME,
-        version: VERSION,
-        sentAt: nowIso(),
-        pageUrl: location.href,
-        pageTitle: document.title
-      },
-      meta: {
-        actionKey,
-        targetField,
-        targetValue,
-        currentSubmission,
-        safeName,
-        safeAddress,
-        rowNumberHint,
-        sourceName: pageName ? 'page' : (cachedIdentity['Name'] ? 'cache' : (lexIdentity.matched ? 'lex' : 'stored payload')),
-        sourceAddress: pageAddress ? 'page' : (cachedIdentity['Mailing Address'] ? 'cache' : (lexIdentity.matched ? 'lex' : 'stored payload')),
-        storedMatchesCurrent,
-        lexMatched: lexIdentity.matched
-      }
-    };
-  }
-
-  function gmPostJson(url, data) {
-    return new Promise((resolve, reject) => {
-      try {
-        GM_xmlhttpRequest({
-          method: 'POST',
-          url,
-          headers: { 'Content-Type': 'application/json' },
-          data: JSON.stringify(data),
-          timeout: CFG.postTimeoutMs,
-          onload: (res) => {
-            let parsed = null;
-            try { parsed = JSON.parse(res.responseText); } catch {}
-            if (res.status < 200 || res.status >= 400) {
-              reject(new Error(`HTTP ${res.status}`));
-              return;
-            }
-            resolve({
-              status: res.status,
-              body: parsed,
-              text: res.responseText
-            });
-          },
-          ontimeout: () => reject(new Error('Request timeout')),
-          onerror: () => reject(new Error('Network error'))
-        });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
-  function postPayload(body) {
-    return gmPostJson(API_URL, body);
-  }
-
-  function postSafefailAA(headerText, actionKey) {
-    const currentSubmission = txt(getSubmissionNumber());
-    const pageName = txt(getAccountNameFromPage());
-    const pageAddress = txt(getMailingAddressFromPage());
-
-    const body = {
-      value: 'FAIL',
-      reason: 'Main post failed 3 times',
-      actionKey: actionKey || '',
-      header: txt(headerText),
-      submissionNumber: currentSubmission,
-      name: pageName,
-      mailingAddress: pageAddress,
-      sender: {
-        script: SCRIPT_NAME,
-        version: VERSION,
-        sentAt: nowIso(),
-        pageUrl: location.href,
-        pageTitle: document.title
-      }
-    };
-
-    return gmPostJson(SAFEFAIL_API_URL, body);
-  }
-
-  function stopRuntimeForBlockedClose() {
-    state.enabled = false;
-    state.inFlight = false;
-    renderStatus();
-    try {
-      if (state.tickTimer) {
-        clearInterval(state.tickTimer);
-        state.tickTimer = null;
-      }
-    } catch {}
-  }
-
-  function showCloseBlockedOverlay() {
-    if (state.closeOverlayShown) return;
-    state.closeOverlayShown = true;
-
-    stopRuntimeForBlockedClose();
-
-    let overlay = document.getElementById('tm-pc-header-timeout-close-blocked');
-    if (overlay) return;
-
-    overlay = document.createElement('div');
-    overlay.id = 'tm-pc-header-timeout-close-blocked';
-    overlay.innerHTML = `
-      <div style="max-width:560px;padding:24px 28px;border:1px solid #334155;border-radius:14px;background:#111827;box-shadow:0 16px 40px rgba(0,0,0,.35);">
-        <div style="font-size:18px;font-weight:700;margin-bottom:10px;">${SCRIPT_NAME}</div>
-        <div style="margin-bottom:8px;">Post finished, but browser blocked tab close.</div>
-        <div style="opacity:.85;">This tab was intentionally stopped and preserved. Close it manually.</div>
-      </div>
-    `;
-    Object.assign(overlay.style, {
-      position: 'fixed',
-      inset: '0',
-      zIndex: '2147483647',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'rgba(15,23,42,0.92)',
-      color: '#e5e7eb',
-      font: '14px/1.45 Segoe UI,Arial,sans-serif'
-    });
-
-    try { document.documentElement.appendChild(overlay); } catch {}
-
-    log('Close blocked by browser. Tab preserved on original URL.');
-  }
-
-  function tryCloseOnce() {
-    try { window.onbeforeunload = null; } catch {}
-    try { window.top.onbeforeunload = null; } catch {}
-    try { window.top.opener = null; } catch {}
-
-    try { window.dispatchEvent(new Event('beforeunload', { cancelable: true })); } catch {}
-    try { window.top.dispatchEvent(new Event('beforeunload', { cancelable: true })); } catch {}
-
-    try { window.top.open('', '_self'); } catch {}
-    try { window.top.close(); } catch {}
-  }
-
-  function hardCloseTop(afterMs = 0) {
-    if (state.closeStarted) return;
-    state.closeStarted = true;
-
-    const start = () => {
-      log('Attempting to close tab...');
-
-      for (const ms of CFG.closeRetryMs) {
-        setTimeout(() => {
-          if (document.visibilityState === 'hidden' || window.top.closed) return;
-          tryCloseOnce();
-        }, ms);
-      }
-
-      setTimeout(() => {
-        if (document.visibilityState === 'hidden' || window.top.closed) return;
-        showCloseBlockedOverlay();
-      }, CFG.closeBlockedOverlayAfterMs);
-    };
-
-    if (afterMs > 0) setTimeout(start, afterMs);
-    else start();
-  }
-
-  async function sendAaFailFallback(actionKey, headerText) {
-    if (state.aaFallbackTried) {
-      log('AA safefail already tried. Closing tab.');
-      state.firedLocal[actionKey] = true;
-      hardCloseTop(CFG.closeDelayMs);
-      return;
-    }
-
-    state.aaFallbackTried = true;
-    state.inFlight = true;
-    renderStatus();
-
-    try {
-      log('Trying AA safefail endpoint...');
-      const res = await postSafefailAA(headerText, actionKey);
-
-      if (res.body && res.body.ok === false) {
-        throw new Error(res.body.error || 'Safefail returned ok:false');
-      }
-
-      state.firedLocal[actionKey] = true;
-      state.postFailCount = 0;
-
-      const rowInfo = res.body && res.body.rowNumber ? ` row ${res.body.rowNumber}` : '';
-      log(`AA safefail success${rowInfo}. Closing tab...`);
-      hardCloseTop(CFG.closeDelayMs);
-    } catch (err) {
-      state.inFlight = false;
-      renderStatus();
-      state.firedLocal[actionKey] = true;
-      log(`AA safefail failed: ${err && err.message ? err.message : String(err)}`, 'error');
-      log('Closing tab after safefail failure.');
-      hardCloseTop(CFG.closeDelayMs);
-    }
-  }
-
-  function handlePostFailure(actionKey, headerText, err) {
-    state.inFlight = false;
-    state.postFailCount += 1;
-    renderStatus();
-
-    log(`Post blocked/failed: ${err && err.message ? err.message : String(err)}`, 'error');
-    log(`Post fail count: ${state.postFailCount}/${CFG.maxPostFailCount}`);
-
-    if (state.postFailCount >= CFG.maxPostFailCount) {
-      sendAaFailFallback(actionKey, headerText);
-    }
-  }
-
-  async function fireAction(actionKey, headerText) {
-    if (state.inFlight) return;
-    if (Date.now() - state.lastAttemptAt < CFG.retryAfterFailMs) return;
-    if (state.firedLocal[actionKey]) return;
-
-    state.inFlight = true;
-    state.lastAttemptAt = Date.now();
-    renderStatus();
-
-    try {
-      const body = buildPostBody(actionKey, headerText);
-      const rowData = body.payload.sheetRow;
-      const meta = body.meta;
-
-      const submission = txt(rowData['Submission Number']);
-      const name = txt(rowData['Name']);
-      const address = txt(rowData['Mailing Address']);
-
-      if (alreadyPosted(submission, name, address, actionKey)) {
-        log(`Already posted ${actionKey}. Closing tab.`);
-        state.firedLocal[actionKey] = true;
-        state.postFailCount = 0;
-        hardCloseTop(CFG.closeDelayMs);
-        return;
-      }
-
-      log(`Action hit: ${actionKey}`);
-      log(`Posting: ${name} | ${address}`);
-      if (meta.rowNumberHint) log(`Row hint: ${meta.rowNumberHint}`);
-      log(`Name source: ${meta.sourceName} | Address source: ${meta.sourceAddress}`);
-
-      const res = await postPayload(body);
-
-      if (res.body && res.body.ok === false) {
-        throw new Error(res.body.error || 'Receiver returned ok:false');
-      }
-
-      markPosted(submission, name, address, actionKey);
-      state.firedLocal[actionKey] = true;
-      state.postFailCount = 0;
-      state.aaFallbackTried = false;
-
-      const rowInfo = res.body && res.body.rowNumber ? ` row ${res.body.rowNumber}` : '';
-      const matchInfo = res.body && res.body.matchedBy ? ` (${res.body.matchedBy})` : '';
-      log(`Post success${rowInfo}${matchInfo}. Closing tab...`);
-      hardCloseTop(CFG.closeDelayMs);
-    } catch (err) {
-      handlePostFailure(actionKey, headerText, err);
-    }
-  }
-
-  function resetSubmissionState(submission, product, header) {
-    state.lastSubmission = submission || '';
-    state.lastProduct = product || '';
-    state.lastHeader = header || '';
-    state.lastHeaderAt = header ? Date.now() : 0;
-    state.autoNoVehiclesSince = 0;
-    state.firedLocal = Object.create(null);
-    state.closeStarted = false;
-    state.closeOverlayShown = false;
-    state.postFailCount = 0;
-    state.aaFallbackTried = false;
-  }
-
-  function tick() {
-    if (!state.enabled || state.inFlight) return;
-
-    const submission = txt(getSubmissionNumber());
-
-    if (!submission) {
-      resetSubmissionState('', '', '');
-      setUiValues('', '', 0);
-      return;
-    }
-
-    updateIdentityCache(submission);
-
-    const product = detectProduct();
-    const header = txt(getGuidewireHeader());
-
-    if (submission !== state.lastSubmission) {
-      resetSubmissionState(submission, product, header);
-      setUiValues(submission, header, 0);
-      if (header) log(`Header change: ${header}`);
-      return;
-    }
-
-    if (product !== state.lastProduct) {
-      state.lastProduct = product;
-      state.lastHeader = header;
-      state.lastHeaderAt = header ? Date.now() : 0;
-      state.autoNoVehiclesSince = 0;
-      state.firedLocal = Object.create(null);
-      state.closeStarted = false;
-      state.closeOverlayShown = false;
-      state.postFailCount = 0;
-      state.aaFallbackTried = false;
-      setUiValues(submission, header, 0);
-      if (header) log(`Header change: ${header}`);
-      return;
-    }
-
-    if (!header) {
-      setUiValues(submission, '', 0);
-      return;
-    }
-
-    if (header !== state.lastHeader) {
-      state.lastHeader = header;
-      state.lastHeaderAt = Date.now();
-      state.autoNoVehiclesSince = 0;
-      state.firedLocal.home_timeout = false;
-      state.firedLocal.auto_timeout = false;
-      state.closeStarted = false;
-      state.closeOverlayShown = false;
-      state.postFailCount = 0;
-      state.aaFallbackTried = false;
-      setUiValues(submission, header, 0);
-      log(`Header change: ${header}`);
-      return;
-    }
-
-    const ageMs = Date.now() - state.lastHeaderAt;
-    setUiValues(submission, header, ageMs);
-
-    if (product === 'auto') {
-      if (isAutoVehiclesEmpty()) {
-        if (!state.autoNoVehiclesSince) {
-          state.autoNoVehiclesSince = Date.now();
-          log('Auto vehicles empty detected. Waiting for stability...');
-        } else if ((Date.now() - state.autoNoVehiclesSince) >= CFG.noVehiclesStableMs && !state.firedLocal.auto_no_vehicles) {
-          fireAction('auto_no_vehicles', header);
-          return;
-        }
-      } else {
-        state.autoNoVehiclesSince = 0;
-      }
-    } else {
-      state.autoNoVehiclesSince = 0;
-    }
-
-    if (ageMs < CFG.timeoutMs) return;
-
-    if (product === 'home' && !state.firedLocal.home_timeout) {
-      fireAction('home_timeout', header);
-      return;
-    }
-
-    if (product === 'auto' && !state.firedLocal.auto_timeout) {
-      fireAction('auto_timeout', header);
-    }
-  }
-
-  function boot() {
-    if (!buildUi()) {
-      setTimeout(boot, 50);
-      return;
-    }
-
-    if (state.tickTimer) clearInterval(state.tickTimer);
-    state.tickTimer = setInterval(tick, CFG.tickMs);
-
-    log('Script started.');
-    log('Auto-armed on fresh load/reload.');
-    log('Leave-site blocker armed.');
-    log('Prefers original sheet row + active row hints first.');
-    log('Close fallback no longer uses about:blank.');
-    log('Dwelling + 360 Value timeout posts: No 360 Value.');
-    log(`After ${CFG.maxPostFailCount} failed main post attempts, sends FAIL through safefail endpoint and closes.`);
-    renderStatus();
-    tick();
-  }
-
-  boot();
 })();

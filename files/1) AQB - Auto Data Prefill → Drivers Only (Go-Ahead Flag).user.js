@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    tm.pc.aqb.1.autodataprefill.drivers
-// @version      1.6
+// @version      1.7
 // @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -18,6 +18,7 @@
 
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const DONE_KEY = 'aqb_step_drivers_done';
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
@@ -77,6 +78,10 @@
   function hasLabelExact(txt) {
     return Array.from(document.querySelectorAll('.gw-label'))
       .some(n => (n.textContent || '').trim() === txt && isVisible(n));
+  }
+
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
 
   function gateOK() {
@@ -345,11 +350,12 @@
   }
 
   async function runSequence() {
-    if (done || !armed) return;
+    if (done || !armed || isGloballyPaused()) return;
     if (!gateOK() || !headerOK()) return;
 
     const start = Date.now();
     while (Date.now() - start < 1200) {
+      if (!armed || done || isGloballyPaused()) return;
       applyDriversOnce();
       await new Promise(r => setTimeout(r, 200));
     }
@@ -364,7 +370,7 @@
   }
 
   function tick() {
-    if (!armed || done) return;
+    if (!armed || done || isGloballyPaused()) return;
     runSequence().catch(() => {});
   }
 

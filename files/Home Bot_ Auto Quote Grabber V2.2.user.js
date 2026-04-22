@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber V2.2
 // @namespace    home.bot.auto.quote.grabber
-// @version      2.3
+// @version      2.4
 // @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -19,7 +19,8 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber V2.2';
-  const VERSION = '2.3';
+  const VERSION = '2.4';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const KEYS = {
     payload: 'tm_pc_auto_quote_grab_payload_v1',
@@ -285,8 +286,16 @@
     tick();
   }
 
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
+
   function tick() {
     if (!state.running || state.busy || state.doneThisLoad) return;
+    if (isGloballyPaused()) {
+      setStatus('Paused by shared selector');
+      return;
+    }
 
     if (!hasVisibleExactLabel('Submission (Quoted)') || !hasVisibleExactLabel('Personal Auto')) {
       state.triggerSince = 0;

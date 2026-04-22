@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         01 GWPC Start Auto Quote V1.6
 // @namespace    home.bot.gwpc.start.auto.quote
-// @version      1.6
+// @version      1.7
 // @description  Waits for Current Activities, reloads once, waits 2 seconds after Current Activities is visible again, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,8 @@
   'use strict';
 
   const SCRIPT_NAME = '01 GWPC Start Auto Quote V1.6';
-  const VERSION = '1.6';
+  const VERSION = '1.7';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const KEYS = {
     RELOADED: 'hb_gwpc_start_auto_quote_reloaded_v16'
@@ -127,6 +128,10 @@
 
   function tick() {
     if (!state.armed || state.busy || state.done) return;
+    if (isGloballyPaused()) {
+      setStatus('Paused by shared selector');
+      return;
+    }
 
     if (state.phase === 'wait-trigger') {
       const trigger = findTriggerLabel();
@@ -294,6 +299,10 @@
     } catch {
       return false;
     }
+  }
+
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
 
   function markReloadOnce() {

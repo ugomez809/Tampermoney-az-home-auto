@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         03 AQB - Specialty Product → Remove if needed, then Quote
 // @namespace    tm.pc.aqb.03.specialty.quote
-// @version      1.5
+// @version      1.6
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. After Quote click: if header "Auto Data Prefill" still visible after 3s, click Quote again (up to 3 total). Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -18,6 +18,7 @@
 
   /************* CONFIG *************/
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const WAIT_KEY = 'aqb_step_specialty_start';
   const DONE_KEY = 'aqb_step_specialty_done';
@@ -66,6 +67,10 @@
 
   // ---------- Helpers ----------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -233,6 +238,7 @@
 
   async function clickQuoteUpTo3IfStuck() {
     for (let attempt = 1; attempt <= MAX_QUOTE_ATTEMPTS; attempt++) {
+      if (!armed || isGloballyPaused()) return false;
       clickQuoteOnce();
       await sleep(AFTER_QUOTE_WAIT_MS);
 
@@ -243,7 +249,7 @@
 
   // ---------- Main ----------
   async function runOnce() {
-    if (!armed || finished || running) return;
+    if (!armed || finished || running || isGloballyPaused()) return;
     if (!gateOK()) return;
 
     if (!waitKeyReady()) {
@@ -298,6 +304,7 @@
     clearDoneFlag();
     mountToggle();
     setInterval(() => {
+      if (isGloballyPaused()) return;
       runOnce().catch(() => { running = false; });
     }, POLL_MS);
   }

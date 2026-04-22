@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff V1.0
 // @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
-// @version      1.1
+// @version      1.2
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,7 +22,8 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.1';
+  const VERSION = '1.2';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const GM_KEYS = {
     HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1'
@@ -68,6 +69,10 @@
 
   function tick() {
     if (!state.running || state.busy) return;
+    if (isGloballyPaused()) {
+      setStatus('Paused by shared selector');
+      return;
+    }
 
     state.busy = true;
 
@@ -92,6 +97,10 @@
 
   function isGwpcOrigin() {
     return /(^|\.)policycenter(?:-2|-3)?\.farmersinsurance\.com$/i.test(location.hostname);
+  }
+
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
 
   function runAzCapture() {

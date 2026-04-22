@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
 // @namespace    az.to.gwpc.webhook.submission
-// @version      1.10
+// @version      1.11
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,8 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.10';
+  const VERSION = '1.11';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -483,6 +484,10 @@
     localStorage.removeItem(CFG.sentMetaKey);
   }
 
+  function isGloballyPaused() {
+    try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
+
   function isSameBundleAlreadySent(job, bundle) {
     const meta = getSentMeta();
     if (!meta || !meta.signature) return false;
@@ -684,6 +689,10 @@
       log('Send skipped: already busy');
       return;
     }
+    if (isGloballyPaused()) {
+      setStatus('Paused by shared selector');
+      return;
+    }
     if (!state.running && !force) return;
 
     const endpoint = getCurrentWebhookUrlFromUi();
@@ -763,6 +772,10 @@
 
   function tick() {
     if (state.destroyed || state.busy) return;
+    if (isGloballyPaused()) {
+      setStatus('Paused by shared selector');
+      return;
+    }
     if (!state.running) {
       setStatus('Stopped');
       return;
