@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.18
+// @version      1.20
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.18';
+  const VERSION = '1.20';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
@@ -185,6 +185,21 @@
       state.autoVehiclesIssueSince = 0;
     }
 
+    if (product === 'home' && hasVisibleIv360ValuationContainer()) {
+      gatherError({
+        product: 'home',
+        actionKey: 'home_no_360_value_present',
+        errorType: 'No360Value',
+        errorName: 'No 360 Value',
+        errorText: 'SKIPPED/NO 360 VALUE',
+        headerText: header,
+        source: 'iv360-container-present',
+        resultField: 'Done?',
+        resultValue: 'SKIPPED/NO 360 VALUE'
+      });
+      return;
+    }
+
     if (ageMs < CFG.timeoutMs) return;
 
     if (product === 'home') {
@@ -296,6 +311,8 @@
       errorText: errorText || headerText || 'Unknown Guidewire error',
       postMode: normalizeText(details.postMode || 'visible_text'),
       ruleKind: normalizeText(details.ruleKind || 'error'),
+      resultField: normalizeText(details.resultField || 'Done?'),
+      resultValue: normalizeText(details.resultValue || errorText || headerText || 'Unknown Guidewire error'),
       headerText,
       submissionNumber,
       selectorRuleId,
@@ -352,6 +369,7 @@
     next.page = { url: location.href, title: document.title };
     next.errors = mergeEventList(next.errors, event);
     next.latestError = deepClone(event);
+    if (event.resultField && event.resultValue) next[event.resultField] = event.resultValue;
 
     localStorage.setItem(payloadKey, JSON.stringify(next, null, 2));
   }
@@ -374,6 +392,7 @@
     section.data = isPlainObject(section.data) ? section.data : {};
     section.data.errors = mergeEventList(section.data.errors, event);
     section.data.latestError = deepClone(event);
+    if (event.resultField && event.resultValue) section.data[event.resultField] = event.resultValue;
     next[product] = section;
 
     next['AZ ID'] = job['AZ ID'];
