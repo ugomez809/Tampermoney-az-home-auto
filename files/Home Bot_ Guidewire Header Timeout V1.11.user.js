@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.13
+// @version      1.14
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
-  const VERSION = '1.13';
+  const VERSION = '1.14';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
@@ -59,6 +59,8 @@
     els: {},
     tickTimer: null,
     selectorMode: false,
+    selectorDialogOpen: false,
+    selectorTargetEl: null,
     hoveredEl: null,
     hoveredPrevOutline: '',
     hoveredPrevOffset: '',
@@ -98,7 +100,7 @@
   }
 
   function tick() {
-    if (!state.enabled || state.saving || state.selectorMode) return;
+    if (!state.enabled || state.saving || state.selectorMode || state.selectorDialogOpen) return;
 
     const submission = normalizeText(getSubmissionNumber());
     const product = detectProduct();
@@ -286,9 +288,14 @@
       errorName: normalizeText(details.errorName || details.errorType || 'Guidewire error'),
       errorMessage: errorText || headerText || 'Unknown Guidewire error',
       errorText: errorText || headerText || 'Unknown Guidewire error',
+      postMode: normalizeText(details.postMode || 'visible_text'),
+      ruleKind: normalizeText(details.ruleKind || 'error'),
       headerText,
       submissionNumber,
       selectorRuleId,
+      customMessage: normalizeText(details.customMessage || ''),
+      capturedElementHtml: normalizeText(details.capturedElementHtml || ''),
+      capturedText: normalizeText(details.capturedText || ''),
       detectedAt: nowIso(),
       source: normalizeText(details.source || SCRIPT_NAME),
       sourceScript: SCRIPT_NAME,
@@ -721,6 +728,8 @@
           <div id="tm-pc-header-timeout-header" style="word-break:break-word;">—</div>
           <div style="opacity:.8;">No change</div>
           <div id="tm-pc-header-timeout-age">—</div>
+          <div style="opacity:.8;">Action in</div>
+          <div id="tm-pc-header-timeout-deadline">—</div>
         </div>
         <div id="tm-pc-header-timeout-logs" style="max-height:190px;overflow:auto;background:rgba(0,0,0,0.22);border-radius:8px;padding:8px;white-space:pre-wrap;"></div>
       </div>
@@ -737,6 +746,7 @@
     state.els.submission = $('#tm-pc-header-timeout-submission', panel);
     state.els.header = $('#tm-pc-header-timeout-header', panel);
     state.els.age = $('#tm-pc-header-timeout-age', panel);
+    state.els.deadline = $('#tm-pc-header-timeout-deadline', panel);
     state.els.logs = $('#tm-pc-header-timeout-logs', panel);
 
     state.els.toggle.addEventListener('click', () => {
@@ -772,14 +782,17 @@
   }
 
   function cleanupSelectorMode() {
-    if (!state.selectorMode) return;
+    if (!state.selectorMode && !state.selectorDialogOpen) return;
     state.selectorMode = false;
+    state.selectorDialogOpen = false;
+    state.selectorTargetEl = null;
     publishGlobalPause(false);
     clearHoveredHighlight();
     updateSelectorButton();
     document.removeEventListener('mousemove', onSelectorMove, true);
     document.removeEventListener('click', onSelectorClick, true);
     document.removeEventListener('keydown', onSelectorKeydown, true);
+    removeSelectorDialog();
   }
 
   function updateSelectorButton() {
@@ -802,16 +815,14 @@
     event.stopPropagation();
     event.stopImmediatePropagation();
 
-    const product = detectProduct() || state.lastProduct || 'home';
-    const rule = buildSelectorRule(el, product);
-    const rules = getSelectorRules();
-    const existingIdx = rules.findIndex((item) => item.id === rule.id);
-    if (existingIdx >= 0) rules[existingIdx] = rule;
-    else rules.push(rule);
-    setSelectorRules(rules);
-    state.capturedRuleId = rule.id;
-    cleanupSelectorMode();
-    log(`Selector rule saved: ${rule.errorName}`);
+    state.selectorMode = false;
+    state.selectorDialogOpen = true;
+    state.selectorTargetEl = el;
+    clearHoveredHighlight();
+    document.removeEventListener('mousemove', onSelectorMove, true);
+    document.removeEventListener('click', onSelectorClick, true);
+    document.removeEventListener('keydown', onSelectorKeydown, true);
+    openSelectorDialog(el, detectProduct() || state.lastProduct || 'home');
   }
 
   function onSelectorKeydown(event) {
@@ -854,8 +865,117 @@
       selector,
       textSample,
       errorName,
+      ruleKind: 'error',
+      postMode: 'visible_text',
+      customMessage: '',
       createdAt: nowIso()
     };
+  }
+
+  function openSelectorDialog(el, product) {
+    removeSelectorDialog();
+
+    const baseRule = buildSelectorRule(el, product);
+    const overlay = document.createElement('div');
+    overlay.id = 'tm-pc-header-timeout-selector-dialog';
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: 2147483647,
+      background: 'rgba(15,23,42,0.82)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '18px'
+    });
+
+    overlay.innerHTML = `
+      <div style="width:min(520px,100%);background:#0f172a;color:#e5e7eb;border:1px solid rgba(255,255,255,0.12);border-radius:14px;box-shadow:0 16px 40px rgba(0,0,0,.35);padding:16px;">
+        <div style="font-weight:700;font-size:15px;margin-bottom:10px;">Save Selector Rule</div>
+        <div style="font-size:12px;opacity:.85;margin-bottom:12px;white-space:pre-wrap;max-height:88px;overflow:auto;">${escapeHtml(baseRule.textSample || baseRule.selector || '(no text found)')}</div>
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Rule Name</label>
+        <input id="tm-pc-rule-name" type="text" value="${escapeAttr(baseRule.errorName || '')}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Rule Type</label>
+        <select id="tm-pc-rule-kind" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
+          <option value="error">Error</option>
+          <option value="blocker">Blocker / stop condition</option>
+        </select>
+        <label style="display:block;font-size:12px;margin-bottom:4px;">What to post</label>
+        <select id="tm-pc-rule-post-mode" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
+          <option value="visible_text">Visible text</option>
+          <option value="full_element">Full element HTML</option>
+          <option value="presence_only">Element present only</option>
+          <option value="custom_text">Custom text</option>
+        </select>
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Custom text override</label>
+        <textarea id="tm-pc-rule-custom" rows="3" style="width:100%;margin-bottom:12px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;"></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button id="tm-pc-rule-cancel" style="border:0;border-radius:8px;padding:8px 12px;background:#475569;color:#fff;font-weight:700;cursor:pointer;">Cancel</button>
+          <button id="tm-pc-rule-save" style="border:0;border-radius:8px;padding:8px 12px;background:#0891b2;color:#fff;font-weight:700;cursor:pointer;">Save Rule</button>
+        </div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
+
+    const nameEl = $('#tm-pc-rule-name', overlay);
+    const postModeEl = $('#tm-pc-rule-post-mode', overlay);
+    const customEl = $('#tm-pc-rule-custom', overlay);
+    const cancelEl = $('#tm-pc-rule-cancel', overlay);
+    const saveEl = $('#tm-pc-rule-save', overlay);
+
+    const updateCustomHint = () => {
+      const mode = normalizeText(postModeEl?.value || 'visible_text');
+      if (customEl) {
+        customEl.placeholder = mode === 'presence_only'
+          ? 'Optional text to save when the element is present'
+          : mode === 'custom_text'
+            ? 'Text to save instead of the element content'
+            : 'Optional override text';
+      }
+    };
+
+    postModeEl?.addEventListener('change', updateCustomHint);
+    updateCustomHint();
+    try { nameEl?.focus(); nameEl?.select(); } catch {}
+
+    cancelEl?.addEventListener('click', () => cancelSelectorMode('Selector canceled'));
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) cancelSelectorMode('Selector canceled');
+    });
+    saveEl?.addEventListener('click', () => {
+      const kindEl = $('#tm-pc-rule-kind', overlay);
+      const rule = {
+        ...baseRule,
+        errorName: normalizeText(nameEl?.value || baseRule.errorName || 'Selected rule'),
+        ruleKind: normalizeText(kindEl?.value || 'error'),
+        postMode: normalizeText(postModeEl?.value || 'visible_text'),
+        customMessage: normalizeText(customEl?.value || '')
+      };
+      const idBase = [
+        rule.product,
+        rule.selector,
+        rule.errorName,
+        rule.ruleKind,
+        rule.postMode,
+        rule.textSample
+      ].join('|');
+      rule.id = hashString(idBase);
+
+      const rules = getSelectorRules();
+      const existingIdx = rules.findIndex((item) => item.id === rule.id || (item.selector === rule.selector && item.product === rule.product));
+      if (existingIdx >= 0) rules[existingIdx] = rule;
+      else rules.push(rule);
+      setSelectorRules(rules);
+      state.capturedRuleId = rule.id;
+      cleanupSelectorMode();
+      log(`Selector rule saved: ${rule.errorName}`);
+    });
+  }
+
+  function removeSelectorDialog() {
+    const dialog = $('#tm-pc-header-timeout-selector-dialog');
+    if (dialog) dialog.remove();
   }
 
   function buildStableSelector(el) {
@@ -931,15 +1051,38 @@
       gatherError({
         product,
         actionKey: 'selected_error',
-        errorType: 'SelectedError',
+        errorType: normalizeText(rule.ruleKind === 'blocker' ? 'SelectedPresenceBlocker' : 'SelectedError'),
         errorName: normalizeText(rule.errorName || 'Selected error'),
-        errorText: normalizeText(match.innerText || match.textContent || rule.textSample || ''),
+        errorText: getRulePostText(rule, match),
         headerText: normalizeText(getGuidewireHeader()),
         selectorRuleId: rule.id,
-        source: 'selector-rule'
+        source: 'selector-rule',
+        postMode: normalizeText(rule.postMode || 'visible_text'),
+        ruleKind: normalizeText(rule.ruleKind || 'error'),
+        customMessage: normalizeText(rule.customMessage || ''),
+        capturedElementHtml: normalizeText((match.outerHTML || '').slice(0, 4000)),
+        capturedText: normalizeText(match.innerText || match.textContent || '')
       });
       return;
     }
+  }
+
+  function getRulePostText(rule, match) {
+    const mode = normalizeText(rule?.postMode || 'visible_text');
+    const customMessage = normalizeText(rule?.customMessage || '');
+    const visibleText = normalizeText(match?.innerText || match?.textContent || rule?.textSample || '');
+    const fullElement = normalizeText((match?.outerHTML || '').slice(0, 4000));
+
+    if (mode === 'presence_only') {
+      return customMessage || `Element present: ${normalizeText(rule?.errorName || 'Selected rule')}`;
+    }
+    if (mode === 'custom_text') {
+      return customMessage || visibleText || normalizeText(rule?.errorName || 'Selected rule');
+    }
+    if (mode === 'full_element') {
+      return fullElement || customMessage || visibleText || normalizeText(rule?.errorName || 'Selected rule');
+    }
+    return customMessage || visibleText || fullElement || normalizeText(rule?.errorName || 'Selected rule');
   }
 
   function findRuleMatch(rule) {
@@ -967,12 +1110,14 @@
 
   function renderStatus() {
     if (!state.els.status || !state.els.toggle) return;
-    const running = state.enabled && !state.saving && !state.selectorMode;
+    const running = state.enabled && !state.saving && !state.selectorMode && !state.selectorDialogOpen;
     state.els.status.textContent =
+      state.selectorDialogOpen ? 'SELECTOR CONFIG' :
       state.selectorMode ? 'SELECTOR MODE' :
       state.saving ? 'SAVING...' :
       running ? 'RUNNING' : 'STOPPED';
     state.els.status.style.color =
+      state.selectorDialogOpen ? '#93c5fd' :
       state.selectorMode ? '#67e8f9' :
       state.saving ? '#facc15' :
       running ? '#86efac' : '#fca5a5';
@@ -988,6 +1133,10 @@
     if (state.els.submission) state.els.submission.textContent = submission || '-';
     if (state.els.header) state.els.header.textContent = header || '-';
     if (state.els.age) state.els.age.textContent = header ? `${Math.max(0, Math.floor(ageMs / 1000))}s / 120s` : '-';
+    if (state.els.deadline) {
+      const remainingMs = header ? Math.max(0, CFG.timeoutMs - ageMs) : 0;
+      state.els.deadline.textContent = header ? `${Math.ceil(remainingMs / 1000)}s until timeout action` : '-';
+    }
   }
 
   function log(message, type = 'info') {
@@ -1123,5 +1272,18 @@
 
   function cssEscapeAttr(value) {
     return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function escapeAttr(value) {
+    return escapeHtml(value).replace(/`/g, '&#96;');
   }
 })();
