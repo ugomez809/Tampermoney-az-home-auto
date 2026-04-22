@@ -1,141 +1,124 @@
 # Tampermoney-az-home-auto
 
-1
-AZ Stage Runner + AZ Payload Grabber V1.9
-Opens pipeline tickets one-by-one. Validates 13 AZ fields, clicks Auto or Home link, then waits for "Bot Quoted" tag before advancing to the next card.
-GM_setValueredundant @match
-1.9
-1,321
- 
-Pipeline A — AZ → APEX → GWPC
-Pipeline B — AZ → GWPC direct ✦ new
-Utilities
-All 24 scripts
-Execution order ↓GMuses GM storage APIflaglocalStorage handoff flag
-AgencyZoom
-Script
-Ver
-Lines
-1
-AZ Stage Runner + AZ Payload Grabber V1.9
-Opens pipeline tickets one-by-one. Validates 13 AZ fields, clicks Auto or Home link, then waits for "Bot Quoted" tag before advancing to the next card.
-GM_setValueredundant @match
-1.9
-1,321
-opens Salesforce APEX tab
-Salesforce APEX
-Script
-Ver
-Lines
-2
-Sheet Reader V1.6
-Fetches Google Sheet fresh on each trigger. Skips rows where col AA has a value. Saves the selected payload for the next step. Blocks itself while AZ is open.
-GM_xmlhttpRequestno @noframes
-1.6
-730
-3
-APEX Quote New Account V3.9
-Reads the Sheet Reader payload (flat or nested shape) and fills every field in the Quote New Account form. Hard-stops after Save is clicked.
-no @noframes
-3.9
-1,485
-3a
-APEX Duplicates Continue V1.8
-Intercepts the Duplicates Found modal if it appears. Selects the first match, waits for Continue to enable, clicks it.
-no @noframes
-1.8
-756
-4
-APEX Continue New Quote V1.8
-Detects the Personal Lines Quote modal, clicks the Home control (custom107), selects Residence Address, clicks Continue New Quote exactly once.
-no @noframes
-1.8
-863
-opens Guidewire PolicyCenter tab
-Guidewire PolicyCenter
-Script
-Ver
-Lines
-5
-01 GWPC Start Auto Quote V1.6
-Waits for Current Activities, reloads once, clicks Start New Submission, selects Personal Auto row only.
-1.6
-647
-6
-Guidewire Policy Info V1.9
-Fills Policy Info. Branches on Personal Auto presence. Handles Non-Binary/Flex gender error by switching to Male. DT2 Next retry if stuck.
-1.9
-494
-7
-Guidewire Disclosure Qualification V1.9
-Clicks Yes on all disclosure questions. Handles 2 extra Personal Auto Yes radios. DT2 Next retry. Hard-stops if Submission (Quoted) appears.
-1.9
-488
-8
-Dwelling Water Rule V3.0
-Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure.
-no @noframes
-3.0
-778
-9
-04 GWPC Home Coverages + Risk Analysis V1.0.9
-Edit All → applies coverage changes → Quote → Risk Analysis.
-1.0.9
-907
-— Auto Data Prefill chain (flag handoff) —
-10
-1) AQB Drivers Only V1.6
-Gate: Draft + Personal Auto + "Auto Data Prefill" header. Sets dropdowns, Gender, DOB (26–50), Age Lic (16–22).
-→ aqb_step_drivers_done=1
-1.6
-382
-11
-2) AQB Vehicles Only V1.3
-Waits for drivers_done=1. Removes incomplete vehicle rows. Sets Primary Driver to first non-<none>.
-← drivers_done=1   → vehicles_done=1 + specialty_start=1
-1.3
-388
-12
-03 AQB Specialty Product V1.5
-Waits for specialty_start=1. If Specialty empty → Quote directly. Otherwise removes rows → Quote (up to 3 retries).
-← specialty_start=1   → specialty_done=1
-1.5
-307
-13
-Webhook Submission V1.4
-Waits for Quote header. Reads home payload, POSTs to Zapier/Pabbly/custom. Clicks Auto after success. Blocks infinite auto-fail loops.
-GM_xmlhttpRequest@connect * wildcardno @noframes
-1.4
-997
- 
-AZ Stage Runner + AZ Payload Grabber V1.9
-Opens tickets one at a time, checks the 13 required AgencyZoom fields, clicks the Home or Auto link, then waits until the lead gets the Bot Quoted tag before moving to the next one.
-Salesforce APEX
-2. Sheet Reader V1.6
-Pulls fresh data from Google Sheets, skips rows already used, saves the next lead’s info for the next script, and pauses itself while AgencyZoom is open.
-APEX Quote New Account V3.9
-Takes that saved lead info and fills the whole Quote New Account form, then stops after clicking Save.
-3a. APEX Duplicates Continue V1.8
-If the Duplicates Found popup appears, it picks the first option and clicks Continue.
-APEX Continue New Quote V1.8
-Handles the Personal Lines Quote popup, chooses Home, picks Residence Address, and clicks Continue New Quote once.
-Guidewire PolicyCenter
-5. 01 GWPC Start Auto Quote V1.6
-Waits for the main screen, reloads once, starts a new submission, and picks Personal Auto only.
-Guidewire Policy Info V1.9
-Fills the Policy Info page. If gender causes the non-binary/flex error, it switches to Male. Retries Next if the page gets stuck.
-Guidewire Disclosure Qualification V1.9
-Clicks Yes on all disclosure questions, including the extra Personal Auto ones, then retries Next if needed. Stops if the quote is already done.
-Dwelling Water Rule V3.0
-Handles the Dwelling page, optional valuation, plumbing replaced, water-device rule, and garage type fix after the first quote failure.
-04 GWPC Home Coverages + Risk Analysis V1.0.9
-Opens Edit All, applies coverage changes, clicks Quote, then goes to Risk Analysis.
-Auto prefill chain
-10. AQB Drivers Only V1.6
-Fills driver info, then sets a flag saying drivers are done.
-AQB Vehicles Only V1.3
-Waits for the drivers flag, cleans bad vehicle rows, sets the main driver, then sets the next flags.
-03 AQB Specialty Product V1.5
-Waits for the specialty flag. If no specialty product is selected, it quotes directly. If there is one, it removes rows and retries quoting up to 3 times.
-Webhook Submission V1.4
-Waits for the Quote page, reads the home quote payload, sends it to Zapier/Pabbly/custom webhook, then clicks Auto after success. Also prevents endless fail loops.
+Tampermonkey userscripts that automate an auto + home insurance quote pipeline
+across three tabs:
+
+1. **AgencyZoom (AZ)** — `app.agencyzoom.com` — opportunity pipeline, lead intake.
+2. **Salesforce Lightning (APEX)** — `farmersagent.lightning.force.com` — account
+   modals and LEX-side flow handlers.
+3. **Guidewire PolicyCenter (GWPC)** — `policycenter[-2|-3].farmersinsurance.com` —
+   submission, rating, quote data capture, webhook delivery.
+
+Lead data is captured on the AZ side and handed to GWPC via shared
+localStorage + GM storage. Quote results are scraped from GWPC and POSTed to a
+webhook (Pabbly) for downstream processing.
+
+## Pipeline flow
+
+```
+┌─────────────────────────┐
+│ AZ Stage Runner V2.3    │  picks tickets, validates 13 fields
+└──────────┬──────────────┘
+           │ writes: tm_shared_az_job_v1,
+           │         tm_az_current_job_v1,
+           │         tm_pc_current_job_v1
+           ▼
+┌─────────────────────────┐
+│ Shared Ticket Handoff   │  mirrors Ticket ID + Name + Address from AZ → GWPC
+└──────────┬──────────────┘
+           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ GWPC submission flow                                             │
+│                                                                  │
+│  01 Start Auto Quote  →  Policy Info  →  Disclosure             │
+│    →  AQB Drivers  →  AQB Vehicles  →  AQB Specialty            │
+│    →  Dwelling Water Rule  →  Home Coverages + Risk Analysis    │
+│    →  Home Quote Grabber + Auto Quote Grabber                   │
+└──────────┬───────────────────────────────────────────────────────┘
+           │ payloads saved to:
+           │   tm_pc_home_quote_grab_payload_v1
+           │   tm_pc_auto_quote_grab_payload_v1
+           │   tm_pc_webhook_bundle_v1
+           ▼
+┌─────────────────────────┐
+│ Webhook Submission V1.9 │  POSTs one consolidated bundle to Pabbly
+└─────────────────────────┘
+```
+
+## Scripts (22 total)
+
+### AgencyZoom
+
+| Script | Purpose |
+|---|---|
+| **AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber V2.3** | Opens pipeline tickets one-by-one. Validates 13 AZ fields. Clicks Auto or Home link. Waits for "Bot Quoted" tag before advancing. Writes shared job state. |
+| **AZ TO GWPC Shared Ticket Handoff V1.0** | Captures Ticket ID + Name + Mailing Address on AZ side; on GWPC side, matches by name + address and writes `tm_pc_current_job_v1`. |
+
+### Salesforce Lightning (APEX)
+
+| Script | Purpose |
+|---|---|
+| **Home Bot: APEX Quote New Account V3.9** | **Dormant.** Reads `tm_apex_home_bot_payload_v1` (not currently populated by any script in this repo). Kept installed for when webhook-seeded APEX form-fill is wired up. |
+| **Home Bot: APEX Duplicates Continue V1.8** | Handles the Duplicates Found modal: selects first match, waits for Continue to enable, clicks it. |
+| **Home Bot: APEX Continue New Quote V1.8** | Handles the Personal Lines Quote modal: clicks Home, picks Residence Address, clicks Continue New Quote once. |
+| **Home Bot: APEX Inactivity Reload Failsafe V1.1** | Reloads the page if no real activity for 60s. |
+
+### Guidewire PolicyCenter
+
+| Script | Purpose |
+|---|---|
+| **01 GWPC Start Auto Quote V1.6** | Waits for Current Activities, reloads once, clicks Start New Submission, picks Personal Auto. |
+| **Home Bot: Guidewire Policy Info V1.9** | Policy Info tab. Branches on Personal Auto presence. Handles Non-Binary/Flex gender error by switching to Male. DT2 Next retry. |
+| **Home Bot: Guidewire Disclosure Qualification V1.9** | Clicks Yes on all disclosure questions, including extra Personal Auto Yes radios. DT2 Next retry. Hard-stops if already quoted. |
+| **1) AQB - Auto Data Prefill → Drivers Only** | Driver info: dropdowns, Gender, DOB (26–50), Age Lic (16–22). Sets `aqb_step_drivers_done=1`. |
+| **2) AQB - Auto Data Prefill → Vehicles Only** | Waits for `drivers_done`. Removes incomplete vehicle rows. Sets Primary Driver. Sets `aqb_step_vehicles_done=1` + `aqb_step_specialty_start=1`. |
+| **03 AQB - Specialty Product → Remove if needed, then Quote** | Waits for `specialty_start`. Removes specialty rows if present. Clicks Quote with up to 3 retries. Sets `aqb_step_specialty_done=1`. |
+| **Home Bot: Dwelling Water Rule V3.0** | Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure. |
+| **04 GWPC Home Coverages Quote + Risk Analysis V1.0.9** | Edit All → apply coverage changes → Quote → Risk Analysis. |
+| **Home Bot: Home Quote Grabber V1.8** | After Submission (Quoted), scrapes home quote fields from Dwelling/Coverages/Quote and saves `tm_pc_home_quote_grab_payload_v1`. |
+| **AZ TO GWPC Home Bot: Auto Quote Grabber V2.4** | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves webhook-ready payload and bundle. |
+| **AZ TO GWPC Home Bot: Webhook Submission V1.9** | Waits for handoff + payloads, POSTs one consolidated bundle to the configured webhook URL (Pabbly). Blocks infinite retry loops. |
+| **Home Bot: GWPC Discard Unsaved Change Clicker V1.0** | Auto-dismisses the "Discard Unsaved Change" dialog whenever it appears. |
+
+### Cross-origin utilities
+
+| Script | Purpose |
+|---|---|
+| **AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4** | Floating panel per origin: exports tracked storage to TXT, clears tracked keys, closes the tab. |
+| **Home Bot: Global Clear Launcher V1.0** | One-click fan-out: opens AZ + APEX + GWPC tabs, each clears its own storage. |
+| **Home Bot: Clean All → Refresh → Home V1.3** | APEX → GWPC refresh cycle: opens cleaner tab, waits, clears keys, closes. |
+| **Home Bot: UI Dock Organizer V1.3** | Organizes floating UIs inside the viewport so they don't overlap. |
+
+## Storage key conventions
+
+| Prefix | Owner / purpose |
+|---|---|
+| `tm_az_*` | AgencyZoom side state (payloads, panel position, running flag). |
+| `tm_apex_*` | APEX-side script state. |
+| `tm_pc_*` | GWPC-side state: quote payloads, current job, webhook bundle + metadata. |
+| `tm_shared_az_job_v1`, `tm_shared_cache_*` | Shared state readable across origins (via Tampermonkey GM storage). |
+| `hb_*` | Home Bot inter-script flags (handoff signals, clear-workflow coordination). |
+| `aqb_step_*` | AQB sequencer gates (Drivers → Vehicles → Specialty). |
+
+## Development
+
+- All scripts live in `files/*.user.js`.
+- **PII dumps (`*.storage.json`, `*.options.json`) are gitignored** — Tampermonkey
+  export files contain real customer data and must never be committed. See
+  `.gitignore`.
+- **Data source is a webhook (Pabbly intake, planned).** The pipeline used to
+  read from a Google Sheet via a Sheet Reader script; that path is retired.
+  APEX Quote New Account V3.9 is kept dormant so the form-fill slot is ready
+  when the webhook-to-APEX adapter is built.
+
+## Operator install notes
+
+When an APEX-renamed or V1.4 script updates, Tampermonkey treats changes to
+`@name` or `@namespace` as new scripts. If you had the older LEX-named or V1.3
+versions installed, either:
+
+- Remove the old entries and install the new files, or
+- Manually edit the installed script's header to match.
+
+Old `tm_lex_*` localStorage values from previous installs will be orphaned;
+run the Storage Tools clear once (it sweeps `tm_*` prefix) to wipe them.
