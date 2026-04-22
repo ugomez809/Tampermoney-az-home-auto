@@ -45,7 +45,7 @@ webhook (Pabbly) for downstream processing.
 └─────────────────────────┘
 ```
 
-## Scripts (23 total)
+## Scripts (24 total)
 
 ### AgencyZoom
 
@@ -76,6 +76,7 @@ webhook (Pabbly) for downstream processing.
 | **Home Bot: Dwelling Water Rule V3.0** | Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure. |
 | **04 GWPC Home Coverages Quote + Risk Analysis V1.0.9** | Edit All → apply coverage changes → Quote → Risk Analysis. |
 | **Home Bot: Home Quote Grabber V1.8** | After Submission (Quoted), scrapes home quote fields from Dwelling/Coverages/Quote and saves `tm_pc_home_quote_grab_payload_v1`. |
+| **Home Bot: Guidewire Header Timeout V1.11** | Watches Guidewire header/product state, posts timeout or no-vehicle results to the configured Google Apps Script endpoints, then closes the tab. |
 | **GWPC Popup Blocker V1.0** | Utility support script that suppresses alert/confirm/prompt and beforeunload blockers across all 3 PolicyCenter hosts. |
 | **Home Bot: Auto Quote Grabber V2.2** | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves shared AUTO payload and bundle data only. |
 | **AZ TO GWPC Home Bot: Webhook Submission V1.9** | Waits for handoff + payloads, POSTs one consolidated bundle to the configured webhook URL (Pabbly). Blocks infinite retry loops. |
