@@ -11,6 +11,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20UI%20Dock%20Organizer%20V1.3.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20UI%20Dock%20Organizer%20V1.3.user.js
 // ==/UserScript==
 
 (function () {

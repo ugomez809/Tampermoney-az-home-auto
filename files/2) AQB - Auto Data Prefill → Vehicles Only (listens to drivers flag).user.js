@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/2%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Vehicles%20Only%20%28listens%20to%20drivers%20flag%29.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/2%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Vehicles%20Only%20%28listens%20to%20drivers%20flag%29.user.js
 // ==/UserScript==
 
 (function () {

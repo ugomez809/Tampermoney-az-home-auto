@@ -14,6 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Global%20Clear%20Launcher%20V1.0.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Global%20Clear%20Launcher%20V1.0.user.js
 // ==/UserScript==
 
 (function () {

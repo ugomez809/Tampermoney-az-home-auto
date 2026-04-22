@@ -9,6 +9,8 @@
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Home%20Quote%20Grabber%20V1.8.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Home%20Quote%20Grabber%20V1.8.user.js
 // ==/UserScript==
 
 (function () {

@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/1%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Drivers%20Only%20%28Go-Ahead%20Flag%29.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/1%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Drivers%20Only%20%28Go-Ahead%20Flag%29.user.js
 // ==/UserScript==
 
 (function () {

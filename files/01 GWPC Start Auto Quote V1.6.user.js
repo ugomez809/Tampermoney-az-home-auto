@@ -9,6 +9,8 @@
 // @run-at       document-start
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/01%20GWPC%20Start%20Auto%20Quote%20V1.6.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/01%20GWPC%20Start%20Auto%20Quote%20V1.6.user.js
 // ==/UserScript==
 
 (function () {

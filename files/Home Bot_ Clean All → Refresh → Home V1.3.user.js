@@ -8,6 +8,8 @@
 // @run-at       document-start
 // @noframes
 // @grant        GM_openInTab
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Clean%20All%20%E2%86%92%20Refresh%20%E2%86%92%20Home%20V1.3.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Clean%20All%20%E2%86%92%20Refresh%20%E2%86%92%20Home%20V1.3.user.js
 // ==/UserScript==
 
 (function () {

@@ -13,6 +13,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20%2B%20APEX%20%2B%20GWPC%20Storage%20Tools%20%28Export%20Payloads%20%2B%20Clear%20%2B%20Close%29%20V1.4.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20%2B%20APEX%20%2B%20GWPC%20Storage%20Tools%20%28Export%20Payloads%20%2B%20Clear%20%2B%20Close%29%20V1.4.user.js
 // ==/UserScript==
 
 (function () {

@@ -8,6 +8,8 @@
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%2001%20AZ%20Stage%20Runner%20%2B%20AZ%20Payload%20Grabber%20V2.3.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%2001%20AZ%20Stage%20Runner%20%2B%20AZ%20Payload%20Grabber%20V2.3.user.js
 // ==/UserScript==
 
 (function () {

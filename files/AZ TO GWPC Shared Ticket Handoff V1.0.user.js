@@ -12,6 +12,8 @@
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Shared%20Ticket%20Handoff%20V1.0.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Shared%20Ticket%20Handoff%20V1.0.user.js
 // ==/UserScript==
 
 (function () {

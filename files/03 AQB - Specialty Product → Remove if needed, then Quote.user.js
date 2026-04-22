@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/03%20AQB%20-%20Specialty%20Product%20%E2%86%92%20Remove%20if%20needed%2C%20then%20Quote.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/03%20AQB%20-%20Specialty%20Product%20%E2%86%92%20Remove%20if%20needed%2C%20then%20Quote.user.js
 // ==/UserScript==
 
 (function () {

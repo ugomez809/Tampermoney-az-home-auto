@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Policy%20Info%20V1.9.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Policy%20Info%20V1.9.user.js
 // ==/UserScript==
 
 (function () {

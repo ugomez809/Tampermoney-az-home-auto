@@ -7,6 +7,8 @@
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Quote%20New%20Account%20V3.9.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Quote%20New%20Account%20V3.9.user.js
 // ==/UserScript==
 
 (function () {

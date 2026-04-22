@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Auto%20Quote%20Grabber%20V2.4.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Auto%20Quote%20Grabber%20V2.4.user.js
 // ==/UserScript==
 
 (function () {

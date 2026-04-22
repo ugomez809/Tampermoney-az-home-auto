@@ -9,6 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/04%20GWPC%20Home%20Coverages%20Quote%20%2B%20Risk%20Analysis%20V1.0.9.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/04%20GWPC%20Home%20Coverages%20Quote%20%2B%20Risk%20Analysis%20V1.0.9.user.js
 // ==/UserScript==
 
 (function () {
