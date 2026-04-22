@@ -2,7 +2,7 @@
 // @name         Home Bot: LEX Quote New Account V3.9
 // @namespace    homebot.lex.quote.new.account
 // @version      3.9
-// @description  Reads the current Home Bot Sheet Reader payload shape (flat or nested), fills LEX Quote New Account, ignores Personal Lines Quote modal, locks interaction to the real Quote New Account form only, and hard-stops until page reload after Save is clicked.
+// @description  Reads the current LEX payload (flat or nested), fills LEX Quote New Account, ignores Personal Lines Quote modal, locks interaction to the real Quote New Account form only, and hard-stops until page reload after Save is clicked.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -847,7 +847,7 @@
     };
   }
 
-  function clearConsumedSheetReaderKeys() {
+  function clearConsumedPayloadKeys() {
     removeStorageEverywhere(KEYS.PAYLOAD);
     removeStorageEverywhere(KEYS.READY);
     removeStorageEverywhere(KEYS.ACTIVE_ROW);
@@ -1394,7 +1394,7 @@
     const ctx = buildLeadFromCurrentStorage();
 
     if (!ctx) {
-      setIdleLog('waiting_payload', 'Waiting for current Sheet Reader payload...', 'info', 'WAITING');
+      setIdleLog('waiting_payload', 'Waiting for current LEX payload...', 'info', 'WAITING');
       return;
     }
 
@@ -1413,7 +1413,7 @@
     setStatus(`ROW ${ctx.rowNumber || '?'}`);
 
     try {
-      log(`Using current Sheet Reader payload. Row ${ctx.rowNumber || '?'}`);
+      log(`Using current LEX payload. Row ${ctx.rowNumber || '?'}`);
       log(`First Name: ${ctx.lead.firstName}`);
       log(`Last Name: ${ctx.lead.lastName}`);
       log(`Final address: ${ctx.lead.address}`);
@@ -1440,7 +1440,7 @@
       await stepClickSave();
 
       rememberCompletedPayload(ctx);
-      clearConsumedSheetReaderKeys();
+      clearConsumedPayloadKeys();
 
       setStatus('STOPPED');
       log('Done. Payload cleared. Waiting for page reload.', 'ok');

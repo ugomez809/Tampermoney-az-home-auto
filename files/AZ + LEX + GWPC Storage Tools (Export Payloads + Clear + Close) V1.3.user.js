@@ -449,11 +449,11 @@
       parts.push('');
       parts.push(buildCachedSection('MIRRORED AZ PAYLOAD', azPayloadCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX SHEET READER PAYLOAD', lexPayloadCache));
+      parts.push(buildCachedSection('MIRRORED LEX PAYLOAD', lexPayloadCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX SHEET READER READY', lexReadyCache));
+      parts.push(buildCachedSection('MIRRORED LEX READY', lexReadyCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED LEX SHEET READER ACTIVE ROW', lexActiveRowCache));
+      parts.push(buildCachedSection('MIRRORED LEX ACTIVE ROW', lexActiveRowCache));
       parts.push('');
       parts.push(buildCachedSection('MIRRORED GWPC HOME QUOTE PAYLOAD', gwpcHomePayloadCache));
       parts.push('');
