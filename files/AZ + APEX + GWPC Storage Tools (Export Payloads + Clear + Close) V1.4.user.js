@@ -18,8 +18,8 @@
 (function () {
   'use strict';
 
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v13';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v13';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v14';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v14';
 
   const TRACKED_PREFIXES = [
     'tm_',
