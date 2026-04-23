@@ -126,3 +126,6 @@ and the developer version-bump rule.
    live only in `@version`.
 3. **Never rename** a file, `@name`, or `@namespace` after it's installed. Doing
    so orphans every operator's install silently.
+
+AI agents (Claude Code, Codex, Cursor, etc.) — read [`AGENTS.md`](AGENTS.md)
+before making any change.
