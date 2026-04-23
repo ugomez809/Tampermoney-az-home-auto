@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         03 AQB - Specialty Product → Remove if needed, then Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. After Quote click: if header "Auto Data Prefill" still visible after 3s, click Quote again (up to 3 total). Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.1
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses a stronger Quote target resolver and retries if the header stays on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -106,6 +106,10 @@
     return REQUIRED_LABELS.every(hasLabelExact);
   }
 
+  function log(message) {
+    try { console.log(`[AQB Specialty] ${message}`); } catch {}
+  }
+
   function waitKeyReady() {
     try { return localStorage.getItem(WAIT_KEY) === '1'; } catch { return false; }
   }
@@ -187,6 +191,7 @@
   function findQuoteCandidates() {
     const out = [];
     out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
+    out.push(...document.querySelectorAll('.gw-action--inner[aria-label="Quote"], [role="button"][aria-label="Quote"], [role="menuitem"][aria-label="Quote"]'));
 
     const host = document.getElementById('SubmissionWizard-Quote');
     if (host) out.unshift(host);
@@ -230,19 +235,29 @@
       const target = upgradeToClickable(el);
       if (target && strongClick(target)) {
         markQuoteClicked();
+        log('Quote clicked');
         return true;
       }
     }
+    log('Quote target not found or not clickable');
     return false;
   }
 
   async function clickQuoteUpTo3IfStuck() {
     for (let attempt = 1; attempt <= MAX_QUOTE_ATTEMPTS; attempt++) {
       if (!armed || isGloballyPaused()) return false;
-      clickQuoteOnce();
+      const clicked = clickQuoteOnce();
+      if (!clicked) {
+        await sleep(500);
+        continue;
+      }
       await sleep(AFTER_QUOTE_WAIT_MS);
 
-      if (!headerStillAutoDataPrefill()) return true;
+      if (!headerStillAutoDataPrefill()) {
+        log(`Quote moved off Auto Data Prefill on attempt ${attempt}`);
+        return true;
+      }
+      log(`Still on Auto Data Prefill after Quote attempt ${attempt}`);
     }
     return false;
   }
@@ -265,11 +280,15 @@
     if (Date.now() - sawFlagAt < AFTER_FLAG_WAIT_MS) return;
 
     const root = findLVRoot();
-    if (!root) return;
+    if (!root) {
+      log('Specialty Product list not ready yet');
+      return;
+    }
 
     running = true;
 
     if (isLVEmpty(root)) {
+      log('Specialty Product empty, going straight to Quote');
       const ok = await clickQuoteUpTo3IfStuck();
       if (ok) {
         setDoneFlag();
@@ -291,6 +310,7 @@
     if (didRemove) await sleep(AFTER_REMOVE_WAIT_MS);
     await sleep(WAIT_AFTER_REMOVE_MS);
 
+    log('Specialty rows handled, clicking Quote');
     const ok = await clickQuoteUpTo3IfStuck();
     if (ok) {
       setDoneFlag();
