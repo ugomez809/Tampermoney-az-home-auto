@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.8.3
-// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles. Sets localStorage aqb_step_drivers_done=1 when finished.
+// @version      1.8.4
+// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles. Saves the Accepted driver name when present and sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -24,6 +24,7 @@
 
   const DONE_KEY = 'aqb_step_drivers_done';
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
+  const ACCEPTED_DRIVER_KEY = 'aqb_step_accepted_driver_name';
 
   const DRV_ACCEPT_REASON_TEXT = 'Excluded Driver';
   const DRV_REL_TO_PNI_TEXT    = 'Resident Relative';
@@ -78,7 +79,7 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Drivers',
-      version: '1.8.3'
+      version: '1.8.4'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
@@ -342,6 +343,54 @@
     );
   }
 
+  function getCellValue(cell) {
+    if (!cell) return '';
+    const input = cell.querySelector('input[type="text"], input:not([type]), textarea');
+    if (input) return String(input.value || '').trim();
+    const select = cell.querySelector('select');
+    if (select) {
+      const opt = select.selectedOptions?.[0];
+      return String(opt?.textContent || select.value || '').trim();
+    }
+    const readonly = cell.querySelector('.gw-value-readonly-wrapper');
+    if (readonly) return String(readonly.textContent || '').trim();
+    return String(cell.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getColumnIndexByNames(table, wantedList) {
+    for (const wanted of wantedList) {
+      const idx = getColumnIndexByName(table, wanted);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+
+  function readDriverNameFromRow(tr, nameIdx) {
+    const tds = tr.querySelectorAll('td,th');
+    const fromCell = nameIdx >= 0 ? getCellValue(tds[nameIdx]) : '';
+    if (fromCell) return fromCell;
+    const byId = tr.querySelector('[id$="-Name"]');
+    return getCellValue(byId) || '';
+  }
+
+  function findAcceptedDriverName() {
+    const table = findDriversTable();
+    if (!table) return '';
+    const reasonIdx = getColumnIndexByNames(table, ['Accept/Reject Reason', 'Accept Reject Reason', 'Accept / Reject Reason']);
+    const nameIdx = getColumnIndexByNames(table, ['Driver Name', 'Name', 'Driver']);
+    if (reasonIdx < 0) return '';
+
+    const rows = getDriverRows(table);
+    for (const tr of rows) {
+      const tds = tr.querySelectorAll('td,th');
+      const reason = getCellValue(tds[reasonIdx]);
+      if (String(reason || '').trim() !== 'Accepted') continue;
+      const name = readDriverNameFromRow(tr, nameIdx).replace(/\s+/g, ' ').trim();
+      if (name) return name;
+    }
+    return '';
+  }
+
   function applyDriversOnce() {
     const table = findDriversTable();
     if (!table) return;
@@ -393,6 +442,11 @@
 
   function setDoneFlag() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    try {
+      const acceptedDriverName = findAcceptedDriverName();
+      if (acceptedDriverName) localStorage.setItem(ACCEPTED_DRIVER_KEY, acceptedDriverName);
+      else localStorage.removeItem(ACCEPTED_DRIVER_KEY);
+    } catch {}
     writeFlowStage('auto', 'vehicles');
   }
 

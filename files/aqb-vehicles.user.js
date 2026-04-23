@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.2
-// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver from the Accepted driver row, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
+// @version      1.5.3
+// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver from the Accepted driver row, then waits another 3s before handing off to Specialty. Retries until the Accepted driver is readable and matched instead of hard-stopping too early. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -28,6 +28,7 @@
   const WAIT_KEY = 'aqb_step_drivers_done';
   const DONE_KEY = 'aqb_step_vehicles_done';
   const SPECIALTY_START_KEY = 'aqb_step_specialty_start';
+  const ACCEPTED_DRIVER_KEY = 'aqb_step_accepted_driver_name';
 
   const REMOVE_LABEL_ARIA = 'Remove Vehicle';
   const WAIT_AFTER_CHECKBOX_MS = 1000;
@@ -80,7 +81,7 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Vehicles',
-      version: '1.5.2'
+      version: '1.5.3'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
@@ -318,6 +319,11 @@
   }
 
   function findAcceptedDriverName() {
+    try {
+      const cached = String(localStorage.getItem(ACCEPTED_DRIVER_KEY) || '').replace(/\s+/g, ' ').trim();
+      if (cached) return cached;
+    } catch {}
+
     const table = findDriversTable();
     if (!table) return '';
 
@@ -487,7 +493,7 @@
 
       const primaryDriverResult = setPrimaryDriverAll();
       if (!primaryDriverResult?.ok) {
-        finished = true;
+        log(`Will retry Primary Driver later: ${primaryDriverResult?.reason || 'unknown-reason'}`);
         return;
       }
 
