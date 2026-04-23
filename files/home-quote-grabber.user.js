@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      4.0
-// @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, and hands off Home completion through shared storage without sending the webhook directly.
+// @version      4.0.1
+// @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '4.0';
+  const VERSION = '4.0.1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -1510,7 +1510,7 @@
 
     writeFlowStage('home', 'handoff', targetJob['AZ ID']);
     setStatus(finalResult.ready ? 'Home ready for handoff' : 'Home partial after pass 2');
-    state.doneThisLoad = finalResult.ready === true;
+    state.doneThisLoad = true;
   }
 
   async function runGrab(opts = {}) {
@@ -1536,6 +1536,9 @@
     if (finalState.ready) {
       state.doneThisLoad = true;
       setStatus('Home gather complete');
+    } else if (finalState.pass2Ready || finalState.finalRefreshReady) {
+      state.doneThisLoad = true;
+      setStatus('Home final pass complete (stopped)');
     } else {
       state.flowStartedThisLoad = false;
       setStatus('Home gather incomplete');
