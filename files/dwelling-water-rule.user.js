@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.5
-// @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
+// @version      3.6
+// @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -18,9 +18,10 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.5';
+  const VERSION = '3.6';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';
 
   const CFG = {
     tickMs: 900,
@@ -29,11 +30,10 @@
     optionalFieldWaitMs: 2500,
     fieldsWaitAfterCreateMs: 30000,
     beforeQuoteWaitMs: 5000,
-    afterQuoteWaitMs: 3000,
+    afterQuoteWaitMs: 10000,
     afterGarageFixMs: 1200,
     garageErrorWaitMs: 7000,
     maxCreateAttempts: 3,
-    maxQuoteAttempts: 3,
     tabNudgeCooldownMs: 1500,
     tabNudgeSettleMs: 2500,
     maxLogLines: 14,
@@ -89,7 +89,8 @@
     logEl: null,
     btn: null,
     styleEl: null,
-    lastTabNudgeAt: 0
+    lastTabNudgeAt: 0,
+    quoteRetryUsed: false
   };
 
   function safeJsonParse(text, fallback = null) {
@@ -645,37 +646,30 @@
     return false;
   }
 
-  async function clickQuoteUpTo3IfStuck() {
-    for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
-      setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
-      clickQuoteOnce();
-      await sleep(CFG.afterQuoteWaitMs);
-
-      if (!headerStillDwelling()) {
-        log('Quote succeeded');
-        return true;
-      }
-
-      log(`Still on Dwelling after Quote attempt ${attempt}`);
-
-      if (attempt === 1) {
-        await fixGarageTypeIfNeeded();
-      }
+  async function waitForQuoteTransition() {
+    const start = Date.now();
+    while (Date.now() - start < CFG.afterQuoteWaitMs) {
+      if (!state.running) throw new Error('Stopped');
+      if (!headerStillDwelling()) return true;
+      await sleep(250);
     }
+    return !headerStillDwelling();
+  }
 
+  async function clickQuoteAndWaitForTransition() {
+    setStatus('Clicking Quote');
+    if (!clickQuoteOnce()) throw new Error('Quote target not found');
+    setStatus('Waiting for Quote to settle');
+    const moved = await waitForQuoteTransition();
+    if (moved) {
+      log('Quote succeeded');
+      return true;
+    }
+    log('Quote stayed on Dwelling after 10s');
     return false;
   }
 
-  async function quoteFlow() {
-    setStatus('Waiting 5s before Quote');
-    log('Waiting 5s before Quote');
-    await sleep(CFG.beforeQuoteWaitMs);
-
-    const quoteOK = await clickQuoteUpTo3IfStuck();
-    if (!quoteOK) throw new Error('Quote click did not move off Dwelling');
-  }
-
-  async function fillDwellingFlow() {
+  async function fillDwellingFields() {
     await ensureRadioChecked(IDS.poolNo, 'Swimming Pool = No');
     await ensureRadioChecked(IDS.solarNo, 'Solar Panels = No');
     await ensureRadioChecked(IDS.trampolineNo, 'Trampoline = No');
@@ -698,7 +692,52 @@
     } else {
       log('Year Built is 1997 or newer. Water device left unchanged');
     }
+  }
 
+  async function rerunAfterStuckQuote() {
+    if (state.quoteRetryUsed) return false;
+    state.quoteRetryUsed = true;
+
+    log('Dwelling header did not move. Trying one 360Value retry');
+    setStatus('Retrying after 360Value');
+
+    const clicked = await clickCreateValuation();
+    if (clicked) {
+      const start = Date.now();
+      while (Date.now() - start < CFG.fieldsWaitAfterCreateMs) {
+        if (!state.running) throw new Error('Stopped');
+        if (fieldsReady()) break;
+        await sleep(300);
+      }
+    } else {
+      log('360Value button not available for retry. Re-running current Dwelling fields');
+    }
+
+    if (hasGarageTypeRequiredMessage()) {
+      await fixGarageTypeIfNeeded();
+    }
+
+    setStatus('Repeating Dwelling one more time');
+    await fillDwellingFields();
+    return clickQuoteAndWaitForTransition();
+  }
+
+  async function quoteFlow() {
+    setStatus('Waiting 5s before Quote');
+    log('Waiting 5s before Quote');
+    await sleep(CFG.beforeQuoteWaitMs);
+
+    let quoteOK = await clickQuoteAndWaitForTransition();
+    if (!quoteOK) {
+      await fixGarageTypeIfNeeded();
+      quoteOK = await rerunAfterStuckQuote();
+    }
+    if (!quoteOK) throw new Error('Quote click did not move off Dwelling');
+  }
+
+  async function fillDwellingFlow() {
+    state.quoteRetryUsed = false;
+    await fillDwellingFields();
     await quoteFlow();
   }
 
@@ -794,23 +833,33 @@
     style.id = 'hb-dwelling-water-rule-style';
     style.textContent = `
       #hb-dwelling-water-rule-panel{
-        position:fixed;right:${CFG.panelRight}px;bottom:${CFG.panelBottom}px;width:340px;
-        background:rgba(18,18,18,.96);color:#fff;border:1px solid rgba(255,255,255,.14);
-        border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.35);z-index:${CFG.zIndex};
-        font:12px/1.35 Arial,sans-serif;overflow:hidden
+        position:fixed;right:${CFG.panelRight}px;bottom:${CFG.panelBottom}px;width:360px;
+        background:#111827;color:#f9fafb;border:1px solid #374151;
+        border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);z-index:${CFG.zIndex};
+        font:12px/1.35 Arial,sans-serif;overflow:hidden;user-select:none
       }
       #hb-dwelling-water-rule-head{
-        display:flex;align-items:center;justify-content:space-between;gap:8px;
-        padding:8px 10px;background:rgba(255,255,255,.06);border-bottom:1px solid rgba(255,255,255,.10)
+        padding:8px 10px;cursor:move;border-bottom:1px solid #374151;
+        background:#0f172a
       }
       #hb-dwelling-water-rule-title{font-weight:700;font-size:12px}
       #hb-dwelling-water-rule-sub{font-size:11px;opacity:.8}
-      #hb-dwelling-water-rule-btn{border:0;border-radius:6px;padding:6px 10px;cursor:pointer;font-weight:700}
+      #hb-dwelling-water-rule-controls{
+        display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px
+      }
+      #hb-dwelling-water-rule-btn,
+      #hb-dwelling-water-rule-copy{
+        border:0;border-radius:8px;padding:7px 8px;cursor:pointer;font-weight:700;color:#fff
+      }
+      #hb-dwelling-water-rule-btn{background:#dc2626}
+      #hb-dwelling-water-rule-copy{background:#2563eb}
       #hb-dwelling-water-rule-body{padding:8px 10px}
-      #hb-dwelling-water-rule-status{margin-bottom:8px;font-weight:700}
+      #hb-dwelling-water-rule-status{
+        margin-bottom:8px;padding:6px 8px;border-radius:8px;background:#1f2937
+      }
       #hb-dwelling-water-rule-log{
         white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;
-        background:rgba(255,255,255,.04);border-radius:6px;padding:8px
+        background:#0b1220;border:1px solid #243041;border-radius:8px;padding:8px
       }
     `;
     document.documentElement.appendChild(style);
@@ -818,15 +867,25 @@
 
     const panel = document.createElement('div');
     panel.id = 'hb-dwelling-water-rule-panel';
+    const saved = loadPanelPos();
+    if (saved) {
+      panel.style.left = saved.left;
+      panel.style.top = saved.top;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    }
     panel.innerHTML = `
       <div id="hb-dwelling-water-rule-head">
         <div>
-          <div id="hb-dwelling-water-rule-title">Home Bot: Dwelling Water Rule</div>
+          <div id="hb-dwelling-water-rule-title">${SCRIPT_NAME}</div>
           <div id="hb-dwelling-water-rule-sub">V${VERSION}</div>
         </div>
-        <button id="hb-dwelling-water-rule-btn" type="button">STOP</button>
       </div>
       <div id="hb-dwelling-water-rule-body">
+        <div id="hb-dwelling-water-rule-controls">
+          <button id="hb-dwelling-water-rule-btn" type="button">STOP</button>
+          <button id="hb-dwelling-water-rule-copy" type="button">COPY LOGS</button>
+        </div>
         <div id="hb-dwelling-water-rule-status">Starting</div>
         <div id="hb-dwelling-water-rule-log"></div>
       </div>
@@ -837,14 +896,18 @@
     state.statusEl = panel.querySelector('#hb-dwelling-water-rule-status');
     state.logEl = panel.querySelector('#hb-dwelling-water-rule-log');
     state.btn = panel.querySelector('#hb-dwelling-water-rule-btn');
+    const head = panel.querySelector('#hb-dwelling-water-rule-head');
+    const copyBtn = panel.querySelector('#hb-dwelling-water-rule-copy');
 
     state.btn.addEventListener('click', () => {
       state.running = !state.running;
       state.btn.textContent = state.running ? 'STOP' : 'START';
+      state.btn.style.background = state.running ? '#dc2626' : '#16a34a';
 
       if (state.running) {
         state.done = false;
         state.createAttempts = 0;
+        state.quoteRetryUsed = false;
         log('Script resumed');
         setStatus('Resumed');
       } else {
@@ -852,6 +915,63 @@
         setStatus('Stopped');
       }
     });
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText([...state.logs].reverse().join('\n'));
+        log('Logs copied');
+      } catch {
+        log('Copy logs failed');
+      }
+    });
+
+    makeDraggable(panel, head);
+  }
+
+  function makeDraggable(panel, handle) {
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    let dragging = false;
+
+    handle.addEventListener('mousedown', (e) => {
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      e.preventDefault();
+    });
+
+    function onMove(e) {
+      if (!dragging) return;
+      panel.style.left = `${Math.max(0, startLeft + (e.clientX - startX))}px`;
+      panel.style.top = `${Math.max(0, startTop + (e.clientY - startY))}px`;
+    }
+
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      savePanelPos({ left: panel.style.left, top: panel.style.top });
+    }
+  }
+
+  function savePanelPos(pos) {
+    try { localStorage.setItem(PANEL_POS_KEY, JSON.stringify(pos)); } catch {}
+  }
+
+  function loadPanelPos() {
+    try { return JSON.parse(localStorage.getItem(PANEL_POS_KEY) || 'null'); } catch { return null; }
   }
 
   function cleanup() {
