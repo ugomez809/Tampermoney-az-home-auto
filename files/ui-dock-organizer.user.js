@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.4
+// @version      1.5
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes the organizer's own panel in the dock.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: UI Dock Organizer';
-  const VERSION = '1.4';
+  const VERSION = '1.5';
 
   const CFG = {
     tickMs: 900,
@@ -103,7 +103,7 @@
 
     log('Organizer loaded');
     log('Viewport clamp enabled');
-    log('Organizer panel included in dock');
+    log('Organizer locked bottom-left');
 
     fullScanAndArrange();
     state.tickTimer = setInterval(tick, CFG.tickMs);
@@ -126,6 +126,7 @@
   }
 
   function onResize() {
+    enforceOrganizerAnchor();
     if (!state.running) return;
     setTimeout(() => {
       if (!state.running) return;
@@ -255,6 +256,7 @@
   function isDockCandidate(el) {
     if (!(el instanceof HTMLElement)) return false;
     if (!el.isConnected) return false;
+    if (isOrganizerPanel(el)) return false;
 
     const tag = (el.tagName || '').toUpperCase();
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') return false;
@@ -505,27 +507,27 @@
 
   function hideElement(el) {
     if (!(el instanceof HTMLElement) || !el.isConnected || isOrganizerPanel(el)) return;
-    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevDisplay')) {
-      el.dataset.hbUiDockPrevDisplay = el.style.display || '';
+    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevOpacity')) {
+      el.dataset.hbUiDockPrevOpacity = el.style.opacity || '';
     }
-    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevVisibility')) {
-      el.dataset.hbUiDockPrevVisibility = el.style.visibility || '';
+    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevPointerEvents')) {
+      el.dataset.hbUiDockPrevPointerEvents = el.style.pointerEvents || '';
     }
-    el.style.setProperty('display', 'none', 'important');
-    el.style.setProperty('visibility', 'hidden', 'important');
+    el.style.setProperty('opacity', '0.01', 'important');
+    el.style.setProperty('pointer-events', 'none', 'important');
   }
 
   function restoreHiddenElement(el) {
     if (!(el instanceof HTMLElement)) return;
-    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevDisplay')) {
-      if (el.dataset.hbUiDockPrevDisplay) el.style.display = el.dataset.hbUiDockPrevDisplay;
-      else el.style.removeProperty('display');
-      delete el.dataset.hbUiDockPrevDisplay;
+    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevOpacity')) {
+      if (el.dataset.hbUiDockPrevOpacity) el.style.opacity = el.dataset.hbUiDockPrevOpacity;
+      else el.style.removeProperty('opacity');
+      delete el.dataset.hbUiDockPrevOpacity;
     }
-    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevVisibility')) {
-      if (el.dataset.hbUiDockPrevVisibility) el.style.visibility = el.dataset.hbUiDockPrevVisibility;
-      else el.style.removeProperty('visibility');
-      delete el.dataset.hbUiDockPrevVisibility;
+    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevPointerEvents')) {
+      if (el.dataset.hbUiDockPrevPointerEvents) el.style.pointerEvents = el.dataset.hbUiDockPrevPointerEvents;
+      else el.style.removeProperty('pointer-events');
+      delete el.dataset.hbUiDockPrevPointerEvents;
     }
   }
 
@@ -536,8 +538,38 @@
     }
   }
 
+  function getOrganizerPanel() {
+    return document.getElementById(UI.panelId);
+  }
+
+  function enforceOrganizerAnchor() {
+    const panel = getOrganizerPanel();
+    if (!panel) return;
+    try {
+      panel.style.setProperty('position', 'fixed', 'important');
+      panel.style.setProperty('left', `${CFG.sideGap}px`, 'important');
+      panel.style.setProperty('right', 'auto', 'important');
+      panel.style.setProperty('top', 'auto', 'important');
+      panel.style.setProperty('bottom', `${CFG.bottomGap}px`, 'important');
+      panel.style.setProperty('transform', 'none', 'important');
+      panel.style.setProperty('margin', '0', 'important');
+    } catch {}
+  }
+
+  function getOrganizerRect() {
+    const panel = getOrganizerPanel();
+    if (!panel || !panel.isConnected) return null;
+    const rect = panel.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    return rect;
+  }
+
   function clampElementIntoViewport(el) {
     if (!el || !el.isConnected) return;
+    if (isOrganizerPanel(el)) {
+      enforceOrganizerAnchor();
+      return;
+    }
 
     const rect = el.getBoundingClientRect();
     if (!rect || rect.width <= 0 || rect.height <= 0) return;
@@ -548,8 +580,17 @@
     const maxLeft = Math.max(CFG.sideGap, vw - rect.width - CFG.sideGap);
     const maxTop = Math.max(CFG.topGap, vh - rect.height - CFG.bottomGap);
 
-    const nextLeft = clamp(rect.left, CFG.sideGap, maxLeft);
-    const nextTop = clamp(rect.top, CFG.topGap, maxTop);
+    let nextLeft = clamp(rect.left, CFG.sideGap, maxLeft);
+    let nextTop = clamp(rect.top, CFG.topGap, maxTop);
+
+    const organizerRect = getOrganizerRect();
+    if (organizerRect) {
+      const overlapX = nextLeft < (organizerRect.right + CFG.itemGap) && (nextLeft + rect.width) > organizerRect.left;
+      const overlapY = nextTop < (organizerRect.bottom + CFG.itemGap) && (nextTop + rect.height) > organizerRect.top;
+      if (overlapX && overlapY) {
+        nextLeft = clamp(organizerRect.right + CFG.itemGap, CFG.sideGap, maxLeft);
+      }
+    }
 
     try {
       el.style.setProperty('position', 'fixed', 'important');
@@ -676,8 +717,7 @@
     `;
 
     document.documentElement.appendChild(panel);
-    restorePanelPos(panel);
-    makeDraggable(panel, panel.querySelector(`#${UI.headId}`));
+    enforceOrganizerAnchor();
     setLogsOpen(loadLogsOpen());
     updateUI();
   }
