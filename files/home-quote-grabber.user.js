@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.9
-// @description  Triggered Home quote driver. Waits for the Dwelling Water Rule trigger, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits for the Quote action to become clickable after auto discount, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      3.9.1
+// @description  Triggered Home quote driver. Waits for a fresh Dwelling Water Rule trigger, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits for the Quote action to become clickable after auto discount, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.9';
+  const VERSION = '3.9.1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -128,6 +128,7 @@
     lastTriggerSource: '',
     announcedSkipReason: '',
     coverageTriggerSince: 0,
+    pageLoadedAtMs: Date.now(),
     lastQuoteClickAt: 0,
     lastTabNudgeAt: 0
   };
@@ -138,6 +139,16 @@
 
   function safeJsonParse(value, fallback = null) {
     try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  function parseTimeMs(value) {
+    const ms = Date.parse(String(value || ''));
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  function isFreshTriggerTimestamp(value) {
+    const ms = parseTimeMs(value);
+    return ms > 0 && ms > state.pageLoadedAtMs;
   }
 
   function readFlowStage() {
@@ -454,9 +465,11 @@
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
     const stage = readFlowStage();
+    const handoffFresh = !!handoff && isFreshTriggerTimestamp(handoff.requestedAt);
     const stageReady = matchesStage('home', 'coverages', currentJob['AZ ID']);
+    const stageFresh = stageReady && isFreshTriggerTimestamp(stage.updatedAt);
 
-    if (!handoff && !stageReady) {
+    if (!handoffFresh && !stageFresh) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = '';
       setWaiting('Waiting for Dwelling Water Rule trigger');
@@ -467,7 +480,7 @@
       return;
     }
 
-    if (handoff && !stageReady) {
+    if (handoffFresh && !stageReady) {
       writeFlowStage('home', 'coverages', currentJob['AZ ID']);
       const src = state.lastTriggerSource || '?';
       log(`Recovered coverages stage from direct handoff (source=${src})`);
@@ -479,12 +492,12 @@
       return;
     }
 
-    const triggerMarker = normalizeText(handoff?.requestedAt || stage.updatedAt || '');
+    const triggerMarker = normalizeText((handoffFresh && handoff?.requestedAt) || (stageFresh && stage.updatedAt) || '');
     if (triggerMarker && triggerMarker !== state.activeHandoffRequestedAt) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = triggerMarker;
       const src = state.lastTriggerSource || '?';
-      if (handoff) {
+      if (handoffFresh) {
         log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')} (source=${src})`);
       } else {
         log('Dwelling Water Rule trigger detected from flow stage');
