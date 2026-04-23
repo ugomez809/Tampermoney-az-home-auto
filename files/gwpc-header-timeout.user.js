@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      1.26
-// @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
+// @version      2.0
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -17,61 +17,86 @@
   'use strict';
 
   if (window.top !== window.self) return;
+  try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '1.26';
-  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
-  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
-  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
-  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
-  const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
+  const VERSION = '2.0';
+  const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
-  const CFG = {
-    tickMs: 1000,
-    timeoutMs: 120000,
-    autoMissingStableMs: 3000,
-    maxLogLines: 18,
-    selectorOutlineColor: '#22d3ee',
-    selectorOutlineWidth: 2,
-    bootstrapRetryMs: 500
-  };
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
+  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
+  const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const SENT_META_KEY = 'tm_pc_webhook_submit_sent_meta_v17';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
     identityCache: 'tm_pc_header_timeout_identity_cache_v2',
     selectorRules: 'tm_pc_header_timeout_selector_rules_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
-    autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
+    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
+    runtime: 'tm_pc_header_timeout_runtime_v2',
+    pendingPost: 'tm_pc_header_timeout_pending_post_v2',
+    sentEvents: 'tm_pc_header_timeout_sent_events_v2',
+    selectorPauseState: 'tm_pc_header_timeout_selector_pause_state_v1'
   };
 
-  const AUTO_VEHICLES_LV_ID = 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PriorCarrier_ExtScreen-PAVehiclesExtPanelSet-VehiclesLV';
-  const AUTO_VEHICLES_EMPTY_TEXT = 'No data to display';
-  const HOME_IV360_CONTAINER_ID = 'iv360-valuationContainer';
+  const CFG = {
+    scanMs: 500,
+    uiMs: 250,
+    bootstrapRetryMs: 500,
+    timeoutMs: 120000,
+    sendWaitMs: 180000,
+    closeBlockCheckMs: 1200,
+    maxLogLines: 140,
+    maxSentEvents: 300,
+    maxRuleText: 280,
+    zIndex: 2147483647,
+    panelWidth: 440,
+    selectorOutlineColor: '#22c55e',
+    selectorFillColor: 'rgba(34,197,94,0.18)',
+    observerThrottleMs: 60
+  };
 
   const state = {
-    enabled: true,
-    saving: false,
-    lastSubmission: '',
-    lastHeader: '',
-    lastHeaderAt: 0,
-    lastProduct: '',
-    autoVehiclesIssueSince: 0,
+    runtimeStarted: false,
+    destroyed: false,
+    running: true,
     logs: [],
-    panel: null,
     els: {},
+    panel: null,
+    bootstrapTimer: null,
     tickTimer: null,
     uiTimer: null,
-    bootstrapTimer: null,
-    runtimeStarted: false,
+    mutationObserver: null,
+    scanQueued: false,
+    observeScheduled: false,
     selectorMode: false,
-    selectorDialogOpen: false,
-    selectorTargetEl: null,
-    hoveredEl: null,
-    hoveredPrevOutline: '',
-    hoveredPrevOffset: '',
+    modalOpen: false,
+    selectorListeners: [],
     hoverBoxEl: null,
-    capturedRuleId: '',
-    savedEventIds: Object.create(null)
+    hoveredEl: null,
+    pending: null,
+    current: {
+      azId: '',
+      submission: '',
+      product: '',
+      productLabel: '',
+      header: '',
+      headerSinceMs: 0,
+      pageName: '',
+      pageAddress: ''
+    },
+    lastStatus: '',
+    lastHeaderLogKey: '',
+    lastStageLogKey: '',
+    lastWaitLogKey: '',
+    lastFailedWaitLogKey: '',
+    lastUnknownStageKey: '',
+    lastScanAt: 0,
+    lastRuntimePersistKey: '',
+    closeCheckTimer: null
   };
 
   boot();
@@ -83,7 +108,6 @@
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', tryStartRuntime, { once: true });
     }
-
     window.addEventListener('load', tryStartRuntime, { once: true });
     window.addEventListener('pageshow', tryStartRuntime, { once: true });
 
@@ -98,29 +122,69 @@
   }
 
   function tryStartRuntime() {
+    if (state.destroyed) return;
     if (!document.documentElement) return;
     if (!buildUi()) return;
 
     if (state.runtimeStarted) {
-      renderStatus();
-      renderLiveUi();
+      renderAll();
       return;
     }
 
     state.runtimeStarted = true;
-    clearStaleSharedPause();
-    log('Script started');
-    log('Shared-payload error gatherer armed');
-    log('Selector mode publishes tm_pc_global_pause_v1');
-    renderStatus();
+    restoreStaleSelectorPause();
+    state.pending = readPendingPost();
+    log(`Script started v${VERSION}`);
+    log(`Origin: ${location.origin}`);
+    log('Fresh timeout gatherer armed');
+
+    scheduleObserve();
+    scheduleScan('start');
 
     if (state.tickTimer) clearInterval(state.tickTimer);
+    state.tickTimer = setInterval(() => {
+      try {
+        processPendingSend();
+        if (state.running) scheduleScan('tick');
+      } catch (err) {
+        log(`Tick failed: ${err?.message || err}`);
+        setStatus('Tick failed');
+      }
+    }, CFG.scanMs);
+
     if (state.uiTimer) clearInterval(state.uiTimer);
-    state.tickTimer = setInterval(tick, CFG.tickMs);
-    state.uiTimer = setInterval(renderLiveUi, 250);
-    window.addEventListener('beforeunload', cleanupSelectorMode, true);
-    renderLiveUi();
-    tick();
+    state.uiTimer = setInterval(renderAll, CFG.uiMs);
+
+    window.addEventListener('beforeunload', handleBeforeUnload, true);
+    window.addEventListener('pagehide', handleBeforeUnload, true);
+    window.addEventListener('resize', keepPanelInView, true);
+    document.addEventListener('visibilitychange', handleVisibilityChange, true);
+
+    window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__ = cleanup;
+    setStatus('Watching header');
+    renderAll();
+  }
+
+  function cleanup() {
+    if (state.destroyed) return;
+    state.destroyed = true;
+
+    try { clearInterval(state.bootstrapTimer); } catch {}
+    try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.uiTimer); } catch {}
+    try { clearTimeout(state.closeCheckTimer); } catch {}
+    try { state.mutationObserver?.disconnect(); } catch {}
+
+    try { window.removeEventListener('beforeunload', handleBeforeUnload, true); } catch {}
+    try { window.removeEventListener('pagehide', handleBeforeUnload, true); } catch {}
+    try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
+    try { document.removeEventListener('visibilitychange', handleVisibilityChange, true); } catch {}
+
+    closeSelectorSession('', { logIt: false, restorePause: true });
+
+    try { state.hoverBoxEl?.remove(); } catch {}
+    try { state.panel?.remove(); } catch {}
+    try { delete window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__; } catch {}
   }
 
   function $(selector, root = document) {
@@ -131,564 +195,181 @@
     try { return Array.from(root.querySelectorAll(selector)); } catch { return []; }
   }
 
-  function tick() {
-    if (!state.enabled || state.saving || state.selectorMode || state.selectorDialogOpen) return;
-
-    const submission = normalizeText(getSubmissionNumber());
-    const product = detectProduct();
-    const header = normalizeText(getGuidewireHeader());
-    const headerChanged = !!header && header !== state.lastHeader;
-
-    if (headerChanged) {
-      state.lastHeader = header;
-      state.lastHeaderAt = Date.now();
-      state.autoVehiclesIssueSince = 0;
-      log(`Header change: ${header}`);
-    }
-
-    if (!submission) {
-      state.lastSubmission = '';
-      state.lastProduct = product || state.lastProduct || '';
-      setUiValues('', header, getHeaderElapsedMs());
-      return;
-    }
-
-    updateIdentityCache(submission);
-
-    if (submission !== state.lastSubmission) {
-      state.lastSubmission = submission;
-      state.savedEventIds = Object.create(null);
-      setUiValues(submission, header, getHeaderElapsedMs());
-      return;
-    }
-
-    if (product !== state.lastProduct) {
-      state.lastProduct = product;
-      state.autoVehiclesIssueSince = 0;
-      setUiValues(submission, header, getHeaderElapsedMs());
-      return;
-    }
-
-    if (!header) {
-      setUiValues(submission, '', getHeaderElapsedMs());
-      detectSavedSelectorErrors(product, submission);
-      return;
-    }
-
-    if (headerChanged) {
-      setUiValues(submission, header, getHeaderElapsedMs());
-      detectSavedSelectorErrors(product, submission);
-      return;
-    }
-
-    const ageMs = getHeaderElapsedMs();
-    setUiValues(submission, header, ageMs);
-    detectSavedSelectorErrors(product, submission);
-
-    if (product === 'auto') {
-      const autoTableState = getAutoVehiclesState();
-      if (autoTableState !== 'present') {
-        if (!state.autoVehiclesIssueSince) {
-          state.autoVehiclesIssueSince = Date.now();
-          log(`AUTO vehicles ${autoTableState}. Waiting for stability...`);
-        } else if ((Date.now() - state.autoVehiclesIssueSince) >= CFG.autoMissingStableMs) {
-          const message = autoTableState === 'missing'
-            ? 'AUTO vehicles table missing'
-            : AUTO_VEHICLES_EMPTY_TEXT;
-          gatherError({
-            product: 'auto',
-            actionKey: 'auto_no_vehicles',
-            errorType: autoTableState === 'missing' ? 'AutoVehiclesTableMissing' : 'AutoVehiclesEmpty',
-            errorName: autoTableState === 'missing' ? 'AUTO table missing' : 'NO AUTO/SKIPEED',
-            errorText: message,
-            headerText: header,
-            source: 'auto-vehicles-check'
-          });
-          return;
-        }
-      } else {
-        state.autoVehiclesIssueSince = 0;
-      }
-    } else {
-      state.autoVehiclesIssueSince = 0;
-    }
-
-    if (product === 'home' && hasVisibleIv360ValuationContainer()) {
-      gatherError({
-        product: 'home',
-        actionKey: 'home_no_360_value_present',
-        errorType: 'No360Value',
-        errorName: 'No 360 Value',
-        errorText: 'SKIPPED/NO 360 VALUE',
-        headerText: header,
-        source: 'iv360-container-present',
-        resultField: 'Done?',
-        resultValue: 'SKIPPED/NO 360 VALUE'
-      });
-      return;
-    }
-
-    if (ageMs < CFG.timeoutMs) return;
-
-    if (product === 'home') {
-      const hasIv360 = hasVisibleIv360ValuationContainer();
-      const errorText = hasIv360 && normalizeText(header).toLowerCase() === 'dwelling'
-        ? 'No 360 Value'
-        : `Header "${header}" did not change for 120 seconds`;
-
-      gatherError({
-        product: 'home',
-        actionKey: 'home_timeout',
-        errorType: hasIv360 && normalizeText(header).toLowerCase() === 'dwelling' ? 'No360Value' : 'HeaderTimeout',
-        errorName: hasIv360 && normalizeText(header).toLowerCase() === 'dwelling' ? 'No 360 Value' : 'HOME timeout',
-        errorText,
-        headerText: header,
-        source: 'header-timeout'
-      });
-      return;
-    }
-
-    if (product === 'auto') {
-      gatherError({
-        product: 'auto',
-        actionKey: 'auto_timeout',
-        errorType: 'HeaderTimeout',
-        errorName: 'AUTO timeout',
-        errorText: `Header "${header}" did not change for 120 seconds`,
-        headerText: header,
-        source: 'header-timeout'
-      });
-    }
+  function safeJsonParse(value, fallback = null) {
+    try { return JSON.parse(value); } catch { return fallback; }
   }
 
-  function gatherError(details) {
-    if (state.saving) return;
+  function deepClone(value) {
+    try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+  }
 
-    const context = buildErrorContext(details);
-    if (!context.ok) {
-      log(context.reason, 'error');
-      return;
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function timeNow() {
+    try { return new Date().toLocaleTimeString(); }
+    catch { return nowIso(); }
+  }
+
+  function normalizeText(value) {
+    return String(value == null ? '' : value)
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function normalizeCompare(value) {
+    return normalizeText(value)
+      .toLowerCase()
+      .replace(/[\.,#]/g, ' ')
+      .replace(/\bstreet\b/g, 'st')
+      .replace(/\bavenue\b/g, 'ave')
+      .replace(/\broad\b/g, 'rd')
+      .replace(/\bdrive\b/g, 'dr')
+      .replace(/\bcircle\b/g, 'cir')
+      .replace(/\bboulevard\b/g, 'blvd')
+      .replace(/\blane\b/g, 'ln')
+      .replace(/\bplace\b/g, 'pl')
+      .replace(/\bcourt\b/g, 'ct')
+      .replace(/\bhighway\b/g, 'hwy')
+      .replace(/\btrail\b/g, 'trl')
+      .replace(/\bterrace\b/g, 'ter')
+      .replace(/\bnorth\b/g, 'n')
+      .replace(/\bsouth\b/g, 's')
+      .replace(/\beast\b/g, 'e')
+      .replace(/\bwest\b/g, 'w')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function namesLikelySame(a, b) {
+    const aa = normalizeCompare(a);
+    const bb = normalizeCompare(b);
+    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  }
+
+  function addressesLikelySame(a, b) {
+    const aa = normalizeCompare(a);
+    const bb = normalizeCompare(b);
+    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
+  }
+
+  function hashString(str) {
+    let h = 0;
+    const input = String(str || '');
+    for (let i = 0; i < input.length; i += 1) {
+      h = ((h << 5) - h) + input.charCodeAt(i);
+      h |= 0;
     }
+    return `h${Math.abs(h)}`;
+  }
 
-    const event = buildErrorEvent(context.job, context.identity, details);
-    if (alreadySavedEvent(event.id)) return;
+  function createEventId() {
+    return `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
 
-    state.saving = true;
-    renderStatus();
+  function cssEscape(value) {
+    const input = String(value || '');
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(input);
+    }
+    return input.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+  }
 
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function isVisible(el) {
+    if (!(el instanceof Element)) return false;
     try {
-      saveErrorToPayload(context.productPayloadKey, context.product, context.job, event);
-      saveErrorToBundle(context.product, context.job, event);
-      markSavedEvent(event.id);
-      requestForceSend(details.actionKey || 'header-timeout-error');
-      log(`Saved ${details.product.toUpperCase()} error: ${event.errorName}`);
-      setStatusText(`Saved ${details.product.toUpperCase()} error`);
-    } catch (err) {
-      log(`Save failed: ${err?.message || err}`, 'error');
-      setStatusText('Save failed');
-    } finally {
-      state.saving = false;
-      renderStatus();
-    }
-  }
-
-  function buildErrorContext(details) {
-    const job = readCurrentJob();
-    if (!job['AZ ID']) {
-      return { ok: false, reason: 'Missing tm_pc_current_job_v1 / AZ ID' };
-    }
-
-    const identity = getPageIdentity();
-    if (job['Name'] && identity.name && !namesLikelySame(job['Name'], identity.name)) {
-      return { ok: false, reason: `Blocked error save: current job Name mismatch | job=${job['Name']} | page=${identity.name}` };
-    }
-    if (job['Mailing Address'] && identity.mailingAddress && !addressesLikelySame(job['Mailing Address'], identity.mailingAddress)) {
-      return { ok: false, reason: 'Blocked error save: current job address mismatch' };
-    }
-
-    return {
-      ok: true,
-      job,
-      identity,
-      product: details.product === 'home' ? 'home' : 'auto',
-      productPayloadKey: details.product === 'home' ? KEYS.homePayload : KEYS.autoPayload
-    };
-  }
-
-  function buildErrorEvent(job, identity, details) {
-    const errorText = normalizeText(details.errorText || '');
-    const headerText = normalizeText(details.headerText || '');
-    const submissionNumber = normalizeText(identity.submissionNumber || state.lastSubmission || '');
-    const selectorRuleId = normalizeText(details.selectorRuleId || '');
-    const actionKey = normalizeText(details.actionKey || 'gwpc_error');
-    const baseId = [
-      job['AZ ID'],
-      details.product,
-      actionKey,
-      details.errorType || '',
-      selectorRuleId || '',
-      errorText || headerText
-    ].join('|');
-
-    return {
-      id: hashString(baseId),
-      actionKey,
-      product: details.product,
-      errorType: normalizeText(details.errorType || 'GuidewireError'),
-      errorName: normalizeText(details.errorName || details.errorType || 'Guidewire error'),
-      errorMessage: errorText || headerText || 'Unknown Guidewire error',
-      errorText: errorText || headerText || 'Unknown Guidewire error',
-      postMode: normalizeText(details.postMode || 'visible_text'),
-      ruleKind: normalizeText(details.ruleKind || 'error'),
-      resultField: normalizeText(details.resultField || 'Done?'),
-      resultValue: normalizeText(details.resultValue || errorText || headerText || 'Unknown Guidewire error'),
-      headerText,
-      submissionNumber,
-      selectorRuleId,
-      customMessage: normalizeText(details.customMessage || ''),
-      capturedElementHtml: normalizeText(details.capturedElementHtml || ''),
-      capturedText: normalizeText(details.capturedText || ''),
-      detectedAt: nowIso(),
-      source: normalizeText(details.source || SCRIPT_NAME),
-      sourceScript: SCRIPT_NAME,
-      sourceVersion: VERSION,
-      page: {
-        url: location.href,
-        title: document.title
-      },
-      identity: {
-        'AZ ID': job['AZ ID'],
-        'Name': job['Name'] || identity.name || '',
-        'Mailing Address': job['Mailing Address'] || identity.mailingAddress || '',
-        'SubmissionNumber': job['SubmissionNumber'] || submissionNumber || ''
-      }
-    };
-  }
-
-  function saveErrorToPayload(payloadKey, product, job, event) {
-    const current = safeJsonParse(localStorage.getItem(payloadKey), null);
-    const next = isPlainObject(current) ? deepClone(current) : {
-      script: SCRIPT_NAME,
-      version: VERSION,
-      event: 'gwpc_error_gathered',
-      product,
-      'AZ ID': job['AZ ID'],
-      currentJob: normalizeCurrentJob(job),
-      savedAt: nowIso(),
-      page: {
-        url: location.href,
-        title: document.title
-      }
-    };
-
-    const payloadAzId = normalizeText(next['AZ ID'] || next?.currentJob?.['AZ ID'] || '');
-    if (payloadAzId && payloadAzId !== job['AZ ID']) {
-      throw new Error(`Payload AZ ID mismatch (${payloadAzId} != ${job['AZ ID']})`);
-    }
-
-    next.script = SCRIPT_NAME;
-    next.version = VERSION;
-    next.product = product;
-    next['AZ ID'] = job['AZ ID'];
-    next.currentJob = normalizeCurrentJob({
-      ...(isPlainObject(next.currentJob) ? next.currentJob : {}),
-      ...job
-    });
-    next.savedAt = nowIso();
-    next.page = { url: location.href, title: document.title };
-    next.errors = mergeEventList(next.errors, event);
-    next.latestError = deepClone(event);
-    if (event.resultField && event.resultValue) next[event.resultField] = event.resultValue;
-
-    localStorage.setItem(payloadKey, JSON.stringify(next, null, 2));
-  }
-
-  function saveErrorToBundle(product, job, event) {
-    const bundle = ensureBundleForJob(job);
-    if (!bundle) throw new Error('Missing current AZ job for bundle save');
-
-    const next = deepClone(bundle);
-    next.timeout = isPlainObject(next.timeout) ? next.timeout : {};
-    next.timeout.ready = true;
-    next.timeout.events = mergeEventList(next.timeout.events, event);
-    next.timeout.lastEvent = deepClone(event);
-
-    const section = isPlainObject(next[product]) ? next[product] : {};
-    section.ready = section.ready === true;
-    section.savedAt = nowIso();
-    section.script = SCRIPT_NAME;
-    section.version = VERSION;
-    section.data = isPlainObject(section.data) ? section.data : {};
-    section.data.errors = mergeEventList(section.data.errors, event);
-    section.data.latestError = deepClone(event);
-    if (event.resultField && event.resultValue) section.data[event.resultField] = event.resultValue;
-    next[product] = section;
-
-    next['AZ ID'] = job['AZ ID'];
-    next['Name'] = next['Name'] || normalizeText(job['Name']);
-    next['Mailing Address'] = next['Mailing Address'] || normalizeText(job['Mailing Address']);
-    next['SubmissionNumber'] = next['SubmissionNumber'] || normalizeText(job['SubmissionNumber']);
-    next.meta = isPlainObject(next.meta) ? next.meta : {};
-    next.meta.updatedAt = nowIso();
-    next.meta.lastWriter = SCRIPT_NAME;
-    next.meta.version = VERSION;
-
-    localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2));
-  }
-
-  function ensureBundleForJob(job) {
-    const azId = normalizeText(job && job['AZ ID']);
-    if (!azId) return null;
-
-    const current = safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
-    if (!isPlainObject(current) || !normalizeText(current['AZ ID'])) {
-      return writeBundle(emptyBundleForJob(job));
-    }
-
-    if (normalizeText(current['AZ ID']) !== azId) {
-      return writeBundle(emptyBundleForJob(job));
-    }
-
-    current['Name'] = current['Name'] || normalizeText(job['Name']);
-    current['Mailing Address'] = current['Mailing Address'] || normalizeText(job['Mailing Address']);
-    current['SubmissionNumber'] = current['SubmissionNumber'] || normalizeText(job['SubmissionNumber']);
-    current.timeout = isPlainObject(current.timeout) ? current.timeout : { ready: false, events: [] };
-    if (!Array.isArray(current.timeout.events)) current.timeout.events = [];
-    current.meta = isPlainObject(current.meta) ? current.meta : {};
-    current.meta.updatedAt = nowIso();
-    current.meta.lastWriter = SCRIPT_NAME;
-    current.meta.version = VERSION;
-    return writeBundle(current);
-  }
-
-  function emptyBundleForJob(job) {
-    return {
-      'AZ ID': normalizeText(job && job['AZ ID']),
-      'Name': normalizeText(job && job['Name']),
-      'Mailing Address': normalizeText(job && job['Mailing Address']),
-      'SubmissionNumber': normalizeText(job && job['SubmissionNumber']),
-      home: {},
-      auto: {},
-      timeout: {
-        ready: false,
-        events: []
-      },
-      meta: {
-        updatedAt: nowIso(),
-        lastWriter: SCRIPT_NAME,
-        version: VERSION
-      }
-    };
-  }
-
-  function writeBundle(bundle) {
-    localStorage.setItem(BUNDLE_KEY, JSON.stringify(bundle, null, 2));
-    return bundle;
-  }
-
-  function mergeEventList(list, event) {
-    const out = Array.isArray(list) ? list.map(deepClone) : [];
-    const idx = out.findIndex((item) => normalizeText(item?.id) === event.id);
-    if (idx >= 0) out[idx] = deepClone(event);
-    else out.push(deepClone(event));
-    return out;
-  }
-
-  function alreadySavedEvent(id) {
-    return !!state.savedEventIds[id];
-  }
-
-  function markSavedEvent(id) {
-    state.savedEventIds[id] = true;
-  }
-
-  function requestForceSend(reason) {
-    const request = {
-      requestedAt: nowIso(),
-      reason: normalizeText(reason || 'header-timeout-error'),
-      source: SCRIPT_NAME
-    };
-
-    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
-    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
-    log(`Force send requested: ${request.reason}`);
-  }
-
-  function hasForceSendRequest() {
-    const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
-    return !!(request && typeof request === 'object' && request.requestedAt);
-  }
-
-  function clearStaleSharedPause() {
-    if (hasForceSendRequest()) return;
-    try {
-      if (localStorage.getItem(GLOBAL_PAUSE_KEY) === '1') {
-        localStorage.removeItem(GLOBAL_PAUSE_KEY);
-      }
-    } catch {}
-  }
-
-  function resetSubmissionState(submission, product, header) {
-    state.lastSubmission = submission || '';
-    state.lastProduct = product || '';
-    state.lastHeader = header || '';
-    state.lastHeaderAt = header ? Date.now() : 0;
-    state.autoVehiclesIssueSince = 0;
-    state.savedEventIds = Object.create(null);
-  }
-
-  function getHeaderElapsedMs() {
-    return state.lastHeaderAt ? Math.max(0, Date.now() - state.lastHeaderAt) : 0;
-  }
-
-  function renderLiveUi() {
-    ensurePanelMounted();
-    if (!state.enabled) return;
-    const currentSubmission = normalizeText(getSubmissionNumber()) || state.lastSubmission || '';
-    const currentHeader = normalizeText(getGuidewireHeader()) || state.lastHeader || '';
-    setUiValues(currentSubmission, currentHeader, getHeaderElapsedMs());
-  }
-
-  function getAutoVehiclesState() {
-    const root = findAutoVehiclesRoot();
-    if (!root) return 'missing';
-
-    const emptyCell = $$('.gw-ListView--empty-info-cell', root)
-      .find((el) => isVisible(el) && normalizeText(el.textContent) === AUTO_VEHICLES_EMPTY_TEXT);
-    if (emptyCell) return 'empty';
-
-    const bodyRows = $$('tbody tr', root).filter(isVisible);
-    if (!bodyRows.length) {
-      const anyText = normalizeText(root.textContent);
-      if (anyText.includes(AUTO_VEHICLES_EMPTY_TEXT)) return 'empty';
-      return 'missing';
-    }
-
-    return 'present';
-  }
-
-  function findAutoVehiclesRoot() {
-    for (const doc of getDocs()) {
-      const root = doc.getElementById(AUTO_VEHICLES_LV_ID) || queryByCssId(doc, AUTO_VEHICLES_LV_ID);
-      if (root && isVisible(root)) return root;
-    }
-    return null;
-  }
-
-  function hasVisibleIv360ValuationContainer() {
-    for (const doc of getDocs()) {
-      const el = doc.getElementById(HOME_IV360_CONTAINER_ID) || queryByCssId(doc, HOME_IV360_CONTAINER_ID);
-      if (el && isVisible(el)) return true;
-    }
-    return false;
-  }
-
-  function queryByCssId(root, id) {
-    try {
-      return root.querySelector(`#${cssEscape(id)}`);
+      const style = (el.ownerDocument?.defaultView || window).getComputedStyle(el);
+      if (!style) return false;
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
     } catch {
-      return null;
+      return false;
     }
   }
 
-  function getPageIdentity() {
-    const submissionNumber = normalizeText(getSubmissionNumber());
-    const cache = getIdentityCache();
-    const cached = isPlainObject(cache[submissionNumber]) ? cache[submissionNumber] : {};
-
-    const name = normalizeText(getAccountNameFromPage()) || normalizeText(cached['Name'] || '');
-    const mailingAddress = normalizeText(getMailingAddressFromPage()) || normalizeText(cached['Mailing Address'] || '');
-
-    return {
-      name,
-      mailingAddress,
-      submissionNumber
-    };
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return '00:00';
+    const total = Math.floor(ms / 1000);
+    const min = Math.floor(total / 60);
+    const sec = total % 60;
+    return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
-  function updateIdentityCache(submission) {
-    const sub = normalizeText(submission);
-    if (!sub) return;
-
-    const name = normalizeText(getAccountNameFromPage());
-    const mailingAddress = normalizeText(getMailingAddressFromPage());
-    if (!name || !mailingAddress) return;
-
-    const cache = getIdentityCache();
-    cache[sub] = {
-      'Name': name,
-      'Mailing Address': mailingAddress,
-      'SubmissionNumber': sub,
-      seenAt: nowIso()
-    };
-    setIdentityCache(cache);
+  function truncateText(value, max = CFG.maxRuleText) {
+    const text = normalizeText(value);
+    if (text.length <= max) return text;
+    return `${text.slice(0, max - 1)}...`;
   }
 
-  function getIdentityCache() {
-    return safeJsonParse(sessionStorage.getItem(KEYS.identityCache), {}) || {};
+  function log(message) {
+    const line = `[${timeNow()}] ${message}`;
+    state.logs.unshift(line);
+    state.logs = state.logs.slice(0, CFG.maxLogLines);
+    if (state.els.logs) {
+      state.els.logs.value = state.logs.join('\n');
+      state.els.logs.scrollTop = 0;
+    }
+    console.log(`[${SCRIPT_NAME}] ${message}`);
   }
 
-  function setIdentityCache(cache) {
-    try { sessionStorage.setItem(KEYS.identityCache, JSON.stringify(cache)); } catch {}
+  function logWait(key, message) {
+    if (state.lastWaitLogKey === key) return;
+    state.lastWaitLogKey = key;
+    log(message);
   }
 
-  function readCurrentJob() {
-    let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
-    let job = normalizeCurrentJob(raw);
-    if (job['AZ ID']) return job;
-
-    raw = safeJsonParse(localStorage.getItem(LEGACY_SHARED_JOB_KEY), null);
-    job = normalizeCurrentJob(raw);
-    return job;
+  function clearWaitLog() {
+    state.lastWaitLogKey = '';
   }
 
-  function normalizeCurrentJob(raw) {
-    const out = {
-      'AZ ID': '',
-      'Name': '',
-      'Mailing Address': '',
-      'SubmissionNumber': '',
-      'updatedAt': ''
-    };
-
-    if (!isPlainObject(raw)) return out;
-
-    out['AZ ID'] = normalizeText(raw['AZ ID'] || raw.ticketId || raw.masterId || raw.id || '');
-    out['Name'] = normalizeText(raw['Name'] || raw.name || '');
-    out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || '');
-    out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
-    out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || '');
-    return out;
+  function setStatus(text) {
+    state.lastStatus = normalizeText(text);
+    if (state.els.status) state.els.status.textContent = state.lastStatus || 'Idle';
   }
 
-  function detectProduct() {
-    const isAuto = hasLabelExactAnyDoc('Personal Auto');
-    const isHome = hasLabelExactAnyDoc('Homeowners');
-    if (isAuto) return 'auto';
-    if (isHome) return 'home';
+  function getAllDocs() {
+    const docs = [];
+    const seen = new Set();
+
+    function walk(win) {
+      try {
+        if (!win || seen.has(win)) return;
+        seen.add(win);
+        if (win.document) docs.push(win.document);
+        for (let i = 0; i < win.frames.length; i += 1) walk(win.frames[i]);
+      } catch {}
+    }
+
+    walk(window);
+    return docs;
+  }
+
+  function firstVisibleTextBySelectors(selectors) {
+    for (const doc of getAllDocs()) {
+      for (const selector of selectors) {
+        const el = $(selector, doc);
+        if (!el || !isVisible(el)) continue;
+        const text = normalizeText(el.textContent);
+        if (text) return text;
+      }
+    }
     return '';
-  }
-
-  function hasLabelExactAnyDoc(labelText) {
-    const wanted = normalizeText(labelText);
-    if (!wanted) return false;
-    for (const doc of getDocs()) {
-      const hit = $$('.gw-label', doc).some((el) => isVisible(el) && normalizeText(el.textContent) === wanted);
-      if (hit) return true;
-    }
-    return false;
-  }
-
-  function getSubmissionNumber() {
-    const titleText = firstVisibleTextBySelectors([
-      '.gw-Wizard--Title',
-      '.gw-TitleBar--title[role="heading"]',
-      '.gw-TitleBar--title',
-      '.gw-WizardScreen-title',
-      '[role="heading"][aria-level="1"]'
-    ]);
-    const match = titleText.match(/Submission\s+(\d{6,})/i);
-    return match ? match[1] : '';
   }
 
   function getGuidewireHeader() {
@@ -705,10 +386,41 @@
     ]);
   }
 
+  function getSubmissionNumber() {
+    const titleText = firstVisibleTextBySelectors([
+      '.gw-Wizard--Title',
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '[role="heading"][aria-level="1"]'
+    ]);
+    const match = titleText.match(/Submission\s+(\d{6,})/i);
+    return match ? match[1] : '';
+  }
+
+  function hasLabelExactAnyDoc(labelText) {
+    const wanted = normalizeText(labelText);
+    if (!wanted) return false;
+    for (const doc of getAllDocs()) {
+      const hits = $$('.gw-label, .gw-LabelWidget, .gw-vw--value, .gw-infoValue', doc)
+        .some((el) => isVisible(el) && normalizeText(el.textContent) === wanted);
+      if (hits) return true;
+    }
+    return false;
+  }
+
+  function detectProduct() {
+    const hasAuto = hasLabelExactAnyDoc('Personal Auto');
+    const hasHome = hasLabelExactAnyDoc('Homeowners');
+    if (hasAuto) return { product: 'auto', label: 'Personal Auto' };
+    if (hasHome) return { product: 'home', label: 'Homeowners' };
+    return { product: '', label: '' };
+  }
+
   function getAccountNameFromPage() {
-    for (const doc of getDocs()) {
+    for (const doc of getAllDocs()) {
       const exact = $('div#SubmissionWizard-JobWizardInfoBar-AccountName > div.gw-label.gw-infoValue:nth-of-type(2)', doc);
-      const exactText = normalizeText(exact && exact.textContent);
+      const exactText = normalizeText(exact?.textContent || '');
       if (exactText) return exactText;
 
       const wrap = $('#SubmissionWizard-JobWizardInfoBar-AccountName', doc);
@@ -724,6 +436,10 @@
     return '';
   }
 
+  function looksLikeAddress(value) {
+    return /\d{1,6}\s+.+,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?/.test(normalizeText(value));
+  }
+
   function getMailingAddressFromPage() {
     const selectors = [
       'div#SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HODwellingLocationHOEInputSet-HODwellingLocationInput > div.gw-vw--value.gw-align-h--left:nth-of-type(1)',
@@ -732,21 +448,20 @@
       '#SubmissionWizard-JobWizardInfoBar-PolicyAddress .gw-label.gw-infoValue'
     ];
 
-    for (const doc of getDocs()) {
+    for (const doc of getAllDocs()) {
       for (const selector of selectors) {
         const el = $(selector, doc);
-        const text = normalizeText(el && el.textContent);
+        const text = normalizeText(el?.textContent || '');
         if (text && looksLikeAddress(text)) return text;
       }
     }
 
-    for (const doc of getDocs()) {
+    for (const doc of getAllDocs()) {
       const nodes = [
         ...$$('.gw-infoValue', doc),
         ...$$('.gw-label.gw-infoValue', doc),
         ...$$('.gw-vw--value', doc)
       ];
-
       for (const el of nodes) {
         if (!isVisible(el)) continue;
         const text = normalizeText(el.textContent);
@@ -757,724 +472,921 @@
     return '';
   }
 
-  function looksLikeAddress(value) {
-    return /\d{1,6}\s+.+,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?/.test(normalizeText(value));
+  function getIdentityCache() {
+    return safeJsonParse(sessionStorage.getItem(KEYS.identityCache), {}) || {};
   }
 
-  function getDocs() {
-    const docs = [];
-    try { docs.push(document); } catch {}
-    for (const frame of $$('iframe, frame', document)) {
-      try {
-        if (frame.contentDocument) docs.push(frame.contentDocument);
-      } catch {}
+  function setIdentityCache(cache) {
+    try { sessionStorage.setItem(KEYS.identityCache, JSON.stringify(cache)); } catch {}
+  }
+
+  function updateIdentityCache(submission) {
+    const sub = normalizeText(submission);
+    if (!sub) return;
+    const name = normalizeText(getAccountNameFromPage());
+    const mailingAddress = normalizeText(getMailingAddressFromPage());
+    if (!name || !mailingAddress) return;
+
+    const cache = getIdentityCache();
+    cache[sub] = {
+      'Name': name,
+      'Mailing Address': mailingAddress,
+      'SubmissionNumber': sub,
+      seenAt: nowIso()
+    };
+    setIdentityCache(cache);
+  }
+
+  function getPageIdentity(submission) {
+    const sub = normalizeText(submission);
+    const cache = getIdentityCache();
+    const cached = isPlainObject(cache[sub]) ? cache[sub] : {};
+    return {
+      name: normalizeText(getAccountNameFromPage()) || normalizeText(cached['Name'] || ''),
+      mailingAddress: normalizeText(getMailingAddressFromPage()) || normalizeText(cached['Mailing Address'] || ''),
+      submissionNumber: sub || normalizeText(cached['SubmissionNumber'] || '')
+    };
+  }
+
+  function normalizeCurrentJob(raw) {
+    const out = {
+      'AZ ID': '',
+      'Name': '',
+      'Mailing Address': '',
+      'SubmissionNumber': '',
+      'updatedAt': ''
+    };
+
+    if (!isPlainObject(raw)) return out;
+
+    const az = isPlainObject(raw.az) ? raw.az : {};
+    const legacyName = [az['AZ Name'], az['AZ Last']]
+      .map((v) => normalizeText(v))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    const legacyAddress = [
+      normalizeText(az['AZ Street Address']),
+      normalizeText(az['AZ City']),
+      normalizeText(az['AZ State']),
+      normalizeText(az['AZ Postal Code'])
+    ].filter(Boolean).join(', ');
+
+    out['AZ ID'] = normalizeText(raw['AZ ID'] || raw.ticketId || raw.masterId || raw.id || az['AZ ID'] || '');
+    out['Name'] = normalizeText(raw['Name'] || raw.name || legacyName || '');
+    out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
+    out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
+    out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.updatedAt || '');
+    return out;
+  }
+
+  function readCurrentJob() {
+    const candidates = [
+      safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null),
+      safeJsonParse(localStorage.getItem(LEGACY_SHARED_JOB_KEY), null),
+      safeJsonParse(localStorage.getItem(BUNDLE_KEY), null),
+      safeJsonParse(localStorage.getItem(KEYS.homePayload), null)?.currentJob,
+      safeJsonParse(localStorage.getItem(KEYS.autoPayload), null)?.currentJob
+    ];
+
+    for (const candidate of candidates) {
+      const job = normalizeCurrentJob(candidate);
+      if (job['AZ ID']) return job;
     }
-    return docs;
+    return normalizeCurrentJob(null);
   }
 
-  function firstVisibleTextBySelectors(selectors) {
-    for (const doc of getDocs()) {
-      for (const selector of selectors) {
-        const el = $(selector, doc);
-        if (!el || !isVisible(el)) continue;
-        const text = normalizeText(el.textContent);
-        if (text) return text;
+  function writeCurrentJob(job) {
+    const next = normalizeCurrentJob(job);
+    if (!next['AZ ID']) return next;
+    next.updatedAt = nowIso();
+    try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
+
+  function mergeCurrentJob(update) {
+    const current = readCurrentJob();
+    const incoming = normalizeCurrentJob(update || {});
+    if (current['AZ ID'] && incoming['AZ ID'] && current['AZ ID'] !== incoming['AZ ID']) {
+      return current;
+    }
+
+    const next = {
+      'AZ ID': incoming['AZ ID'] || current['AZ ID'] || '',
+      'Name': incoming['Name'] || current['Name'] || '',
+      'Mailing Address': incoming['Mailing Address'] || current['Mailing Address'] || '',
+      'SubmissionNumber': incoming['SubmissionNumber'] || current['SubmissionNumber'] || '',
+      'updatedAt': nowIso()
+    };
+    return writeCurrentJob(next);
+  }
+
+  function readBundle() {
+    return safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
+  }
+
+  function writeBundle(bundle) {
+    localStorage.setItem(BUNDLE_KEY, JSON.stringify(bundle, null, 2));
+    return bundle;
+  }
+
+  function emptyBundleForJob(job) {
+    return {
+      'AZ ID': normalizeText(job?.['AZ ID']),
+      'Name': normalizeText(job?.['Name']),
+      'Mailing Address': normalizeText(job?.['Mailing Address']),
+      'SubmissionNumber': normalizeText(job?.['SubmissionNumber']),
+      home: {},
+      auto: {},
+      timeout: {
+        ready: false,
+        events: []
+      },
+      meta: {
+        updatedAt: nowIso(),
+        lastWriter: SCRIPT_NAME,
+        version: VERSION
+      }
+    };
+  }
+
+  function ensureBundleForJob(job) {
+    const azId = normalizeText(job?.['AZ ID']);
+    if (!azId) return null;
+
+    const current = readBundle();
+    if (!isPlainObject(current) || normalizeText(current['AZ ID']) !== azId) {
+      return writeBundle(emptyBundleForJob(job));
+    }
+
+    current['Name'] = normalizeText(job['Name']) || current['Name'] || '';
+    current['Mailing Address'] = normalizeText(job['Mailing Address']) || current['Mailing Address'] || '';
+    current['SubmissionNumber'] = normalizeText(job['SubmissionNumber']) || current['SubmissionNumber'] || '';
+    current.timeout = isPlainObject(current.timeout) ? current.timeout : { ready: false, events: [] };
+    if (!Array.isArray(current.timeout.events)) current.timeout.events = [];
+    current.meta = isPlainObject(current.meta) ? current.meta : {};
+    current.meta.updatedAt = nowIso();
+    current.meta.lastWriter = SCRIPT_NAME;
+    current.meta.version = VERSION;
+    return writeBundle(current);
+  }
+
+  function emptyPayloadForJob(product, job) {
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      event: 'gwpc_timeout_gathered',
+      product,
+      ready: false,
+      'AZ ID': normalizeText(job?.['AZ ID']),
+      currentJob: normalizeCurrentJob(job),
+      savedAt: nowIso(),
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      errors: [],
+      latestError: null
+    };
+
+    if (product === 'home') {
+      payload.row = {
+        'Done?': '',
+        'Result': ''
+      };
+      payload['Done?'] = '';
+      payload['Result'] = '';
+    } else {
+      payload.row = {
+        'Auto': ''
+      };
+      payload['Auto'] = '';
+    }
+
+    return payload;
+  }
+
+  function readProductPayload(product) {
+    const key = product === 'home' ? KEYS.homePayload : KEYS.autoPayload;
+    return {
+      key,
+      value: safeJsonParse(localStorage.getItem(key), null)
+    };
+  }
+
+  function ensurePayloadForJob(product, job) {
+    const { key, value } = readProductPayload(product);
+    const azId = normalizeText(job?.['AZ ID']);
+    const payload = isPlainObject(value) ? deepClone(value) : null;
+    if (!payload || normalizeText(payload['AZ ID'] || payload?.currentJob?.['AZ ID'] || '') !== azId) {
+      return { key, payload: emptyPayloadForJob(product, job) };
+    }
+    return { key, payload };
+  }
+
+  function mergeEventList(list, event) {
+    const next = Array.isArray(list) ? list.map((item) => deepClone(item)) : [];
+    const idx = next.findIndex((item) => normalizeText(item?.eventId || item?.id) === normalizeText(event.eventId));
+    if (idx >= 0) next[idx] = deepClone(event);
+    else next.push(deepClone(event));
+    return next;
+  }
+
+  function saveEventToPayload(product, job, event) {
+    const { key, payload } = ensurePayloadForJob(product, job);
+    payload.script = SCRIPT_NAME;
+    payload.version = VERSION;
+    payload.event = 'gwpc_timeout_gathered';
+    payload.product = product;
+    payload['AZ ID'] = job['AZ ID'];
+    payload.currentJob = normalizeCurrentJob({
+      ...(isPlainObject(payload.currentJob) ? payload.currentJob : {}),
+      ...job
+    });
+    payload.savedAt = nowIso();
+    payload.page = { url: location.href, title: document.title };
+    payload.errors = mergeEventList(payload.errors, event);
+    payload.latestError = deepClone(event);
+    payload.ready = payload.ready === true;
+
+    payload.row = isPlainObject(payload.row) ? payload.row : {};
+
+    if (product === 'home') {
+      payload.row['Done?'] = event.resultValue;
+      payload.row['Result'] = event.errorText;
+      payload['Done?'] = event.resultValue;
+      payload['Result'] = event.errorText;
+    } else {
+      payload.row['Auto'] = event.resultValue;
+      payload['Auto'] = event.resultValue;
+    }
+
+    localStorage.setItem(key, JSON.stringify(payload, null, 2));
+    return payload;
+  }
+
+  function saveEventToBundle(product, job, event) {
+    const bundle = ensureBundleForJob(job);
+    if (!bundle) throw new Error('Missing current AZ job');
+
+    const next = deepClone(bundle);
+    next.timeout = isPlainObject(next.timeout) ? next.timeout : { ready: false, events: [] };
+    next.timeout.ready = true;
+    next.timeout.events = mergeEventList(next.timeout.events, event);
+    next.timeout.lastEvent = deepClone(event);
+
+    const section = isPlainObject(next[product]) ? deepClone(next[product]) : {};
+    section.ready = section.ready === true;
+    section.savedAt = nowIso();
+    section.script = SCRIPT_NAME;
+    section.version = VERSION;
+    section.data = isPlainObject(section.data) ? section.data : {};
+    section.data.errors = mergeEventList(section.data.errors, event);
+    section.data.latestError = deepClone(event);
+
+    if (product === 'home') {
+      section.data['Done?'] = event.resultValue;
+      section.data['Result'] = event.errorText;
+      if (isPlainObject(section.data.row)) {
+        section.data.row['Done?'] = event.resultValue;
+        section.data.row['Result'] = event.errorText;
+      }
+    } else {
+      section.data['Auto'] = event.resultValue;
+      if (isPlainObject(section.data.row)) {
+        section.data.row['Auto'] = event.resultValue;
       }
     }
-    return '';
+
+    next[product] = section;
+    next['AZ ID'] = job['AZ ID'];
+    next['Name'] = normalizeText(job['Name']) || next['Name'] || '';
+    next['Mailing Address'] = normalizeText(job['Mailing Address']) || next['Mailing Address'] || '';
+    next['SubmissionNumber'] = normalizeText(job['SubmissionNumber']) || next['SubmissionNumber'] || '';
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.updatedAt = nowIso();
+    next.meta.lastWriter = SCRIPT_NAME;
+    next.meta.version = VERSION;
+
+    localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2));
+    return next;
   }
 
-  function buildUi() {
-    if (!document.documentElement) return false;
-    const existing = $('#tm-pc-header-timeout-panel');
-    if (existing) {
-      bindUi(existing);
-      return true;
+  function buildSignatureJobBundle(job, bundle) {
+    const sigObj = {
+      'AZ ID': job['AZ ID'] || '',
+      currentJob: deepClone(job),
+      home: bundle?.home?.data || null,
+      auto: bundle?.auto?.data || null,
+      timeout: Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events : []
+    };
+    return hashString(JSON.stringify(sigObj));
+  }
+
+  function readSentMeta() {
+    return safeJsonParse(localStorage.getItem(SENT_META_KEY), null);
+  }
+
+  function readRuntimeState() {
+    const runtime = safeJsonParse(localStorage.getItem(KEYS.runtime), null);
+    return isPlainObject(runtime) ? runtime : {};
+  }
+
+  function writeRuntimeState(runtime) {
+    localStorage.setItem(KEYS.runtime, JSON.stringify(runtime, null, 2));
+    return runtime;
+  }
+
+  function readPendingPost() {
+    const pending = safeJsonParse(localStorage.getItem(KEYS.pendingPost), null);
+    return isPlainObject(pending) ? pending : null;
+  }
+
+  function writePendingPost(pending) {
+    state.pending = isPlainObject(pending) ? deepClone(pending) : null;
+    if (state.pending) localStorage.setItem(KEYS.pendingPost, JSON.stringify(state.pending, null, 2));
+    else localStorage.removeItem(KEYS.pendingPost);
+    renderButtons();
+    return state.pending;
+  }
+
+  function readSentEventsStore() {
+    const current = safeJsonParse(localStorage.getItem(KEYS.sentEvents), null);
+    if (!isPlainObject(current)) {
+      return { byId: {}, byDedupeKey: {}, order: [] };
     }
-
-    const panel = document.createElement('div');
-    panel.id = 'tm-pc-header-timeout-panel';
-    Object.assign(panel.style, {
-      position: 'fixed',
-      right: '12px',
-      bottom: '12px',
-      width: '390px',
-      zIndex: 2147483647,
-      background: 'rgba(17,24,39,0.96)',
-      color: '#f9fafb',
-      border: '1px solid rgba(255,255,255,0.12)',
-      borderRadius: '12px',
-      boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
-      font: '12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-      overflow: 'hidden'
-    });
-
-    panel.innerHTML = `
-      <div id="tm-pc-header-timeout-handle" style="padding:8px 10px;background:rgba(255,255,255,0.06);cursor:move;display:flex;align-items:center;justify-content:space-between;">
-        <div style="font-weight:700;">${SCRIPT_NAME}</div>
-        <div style="opacity:.75;">v${VERSION}</div>
-      </div>
-      <div style="padding:10px;">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
-          <button id="tm-pc-header-timeout-toggle" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer;background:#16a34a;color:#fff;font-weight:700;">STOP</button>
-          <button id="tm-pc-header-timeout-selector" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer;background:#0891b2;color:#fff;font-weight:700;">ERROR SELECTOR</button>
-          <div id="tm-pc-header-timeout-status" style="font-weight:700;color:#86efac;">RUNNING</div>
-        </div>
-        <div style="display:grid;grid-template-columns:92px 1fr;gap:4px 8px;margin-bottom:8px;">
-          <div style="opacity:.8;">Submission</div>
-          <div id="tm-pc-header-timeout-submission">—</div>
-          <div style="opacity:.8;">Header</div>
-          <div id="tm-pc-header-timeout-header" style="word-break:break-word;">—</div>
-          <div style="opacity:.8;">No change</div>
-          <div id="tm-pc-header-timeout-age">—</div>
-          <div style="opacity:.8;">Action in</div>
-          <div id="tm-pc-header-timeout-deadline">—</div>
-        </div>
-        <div id="tm-pc-header-timeout-logs" style="max-height:190px;overflow:auto;background:rgba(0,0,0,0.22);border-radius:8px;padding:8px;white-space:pre-wrap;"></div>
-      </div>
-    `;
-
-    document.documentElement.appendChild(panel);
-    loadPanelPos(panel);
-    makeDraggable(panel, $('#tm-pc-header-timeout-handle', panel));
-    bindUi(panel);
-
-    state.els.toggle.addEventListener('click', () => {
-      state.enabled = !state.enabled;
-      renderStatus();
-      log(state.enabled ? 'Manual START.' : 'Manual STOP for this page session.');
-    });
-
-    state.els.selector.addEventListener('click', () => {
-      if (state.selectorMode) cancelSelectorMode('Selector canceled');
-      else enterSelectorMode();
-    });
-
-    renderStatus();
-    renderLogs();
-    return true;
+    current.byId = isPlainObject(current.byId) ? current.byId : {};
+    current.byDedupeKey = isPlainObject(current.byDedupeKey) ? current.byDedupeKey : {};
+    current.order = Array.isArray(current.order) ? current.order : [];
+    return current;
   }
 
-  function bindUi(panel) {
-    state.panel = panel;
-    state.els.toggle = $('#tm-pc-header-timeout-toggle', panel);
-    state.els.selector = $('#tm-pc-header-timeout-selector', panel);
-    state.els.status = $('#tm-pc-header-timeout-status', panel);
-    state.els.submission = $('#tm-pc-header-timeout-submission', panel);
-    state.els.header = $('#tm-pc-header-timeout-header', panel);
-    state.els.age = $('#tm-pc-header-timeout-age', panel);
-    state.els.deadline = $('#tm-pc-header-timeout-deadline', panel);
-    state.els.logs = $('#tm-pc-header-timeout-logs', panel);
+  function writeSentEventsStore(store) {
+    localStorage.setItem(KEYS.sentEvents, JSON.stringify(store, null, 2));
+    return store;
   }
 
-  function ensurePanelMounted() {
-    if (state.panel && document.contains(state.panel)) return;
-    buildUi();
-    renderStatus();
-    renderLogs();
+  function pruneSentEventsStore(store) {
+    const next = deepClone(store);
+    while (next.order.length > CFG.maxSentEvents) {
+      const oldestId = next.order.shift();
+      const record = next.byId[oldestId];
+      delete next.byId[oldestId];
+      if (record?.dedupeKey && next.byDedupeKey[record.dedupeKey] === oldestId) {
+        delete next.byDedupeKey[record.dedupeKey];
+      }
+    }
+    return next;
   }
 
-  function enterSelectorMode() {
-    state.selectorMode = true;
-    publishGlobalPause(true);
-    updateSelectorButton();
-    log('Selector mode started. Hover an error and click to save rule. Press Esc to cancel.');
-
-    document.addEventListener('mousemove', onSelectorMove, true);
-    document.addEventListener('click', onSelectorClick, true);
-    document.addEventListener('keydown', onSelectorKeydown, true);
+  function rememberSentEvent(pending, sentMeta) {
+    const store = readSentEventsStore();
+    const record = {
+      eventId: pending.eventId,
+      dedupeKey: pending.dedupeKey,
+      azId: pending.azId,
+      product: pending.product,
+      ruleId: normalizeText(pending.ruleId || ''),
+      signature: normalizeText(pending.signature || ''),
+      requestAt: normalizeText(pending.requestedAt || ''),
+      sentAt: normalizeText(sentMeta?.sentAt || nowIso()),
+      source: normalizeText(pending.source || SCRIPT_NAME)
+    };
+    store.byId[pending.eventId] = record;
+    if (pending.dedupeKey) store.byDedupeKey[pending.dedupeKey] = pending.eventId;
+    store.order = Array.isArray(store.order) ? store.order.filter((id) => id !== pending.eventId) : [];
+    store.order.push(pending.eventId);
+    writeSentEventsStore(pruneSentEventsStore(store));
   }
 
-  function cancelSelectorMode(message = 'Selector mode ended') {
-    cleanupSelectorMode();
-    log(message);
+  function hasSentOrPendingDedupe(dedupeKey) {
+    const normalized = normalizeText(dedupeKey);
+    if (!normalized) return false;
+    if (normalizeText(state.pending?.dedupeKey || '') === normalized) return true;
+    const store = readSentEventsStore();
+    return !!normalizeText(store.byDedupeKey[normalized] || '');
   }
 
-  function cleanupSelectorMode() {
-    if (!state.selectorMode && !state.selectorDialogOpen) return;
-    state.selectorMode = false;
-    state.selectorDialogOpen = false;
-    state.selectorTargetEl = null;
-    publishGlobalPause(false);
-    clearHoveredHighlight();
-    updateSelectorButton();
-    document.removeEventListener('mousemove', onSelectorMove, true);
-    document.removeEventListener('click', onSelectorClick, true);
-    document.removeEventListener('keydown', onSelectorKeydown, true);
-    removeSelectorDialog();
+  function findSentRecordByEventId(eventId) {
+    const store = readSentEventsStore();
+    return isPlainObject(store.byId[eventId]) ? store.byId[eventId] : null;
   }
 
-  function updateSelectorButton() {
-    if (!state.els.selector) return;
-    state.els.selector.textContent = state.selectorMode ? 'EXIT SELECTOR' : 'ERROR SELECTOR';
-    state.els.selector.style.background = state.selectorMode ? '#dc2626' : '#0891b2';
+  function hasForceSendRequest() {
+    const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    return !!(request && typeof request === 'object' && request.requestedAt);
   }
 
-  function onSelectorMove(event) {
-    const rawEl = event.target instanceof Element ? event.target : null;
-    if (!rawEl || (state.panel && state.panel.contains(rawEl))) return;
-    const usableEl = getUsableSelectorTarget(rawEl) || rawEl;
-    if (state.panel && state.panel.contains(usableEl)) return;
-    setHoveredElement(usableEl);
+  function requestForceSend(reason) {
+    const request = {
+      requestedAt: nowIso(),
+      reason: normalizeText(reason || 'header-timeout'),
+      source: SCRIPT_NAME
+    };
+    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
+    log(`Force send requested: ${request.reason}`);
+    return request;
   }
 
-  function onSelectorClick(event) {
-    const rawEl = event.target instanceof Element ? event.target : null;
-    if (!rawEl || (state.panel && state.panel.contains(rawEl))) return;
-    const usableEl = getUsableSelectorTarget(rawEl) || rawEl;
-    if (state.panel && state.panel.contains(usableEl)) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-
-    state.selectorMode = false;
-    state.selectorDialogOpen = true;
-    state.selectorTargetEl = usableEl;
-    clearHoveredHighlight();
-    document.removeEventListener('mousemove', onSelectorMove, true);
-    document.removeEventListener('click', onSelectorClick, true);
-    document.removeEventListener('keydown', onSelectorKeydown, true);
-    openSelectorDialog(rawEl, usableEl, detectProduct() || state.lastProduct || 'home');
+  function handleBeforeUnload() {
+    if (state.selectorMode || state.modalOpen) {
+      restoreSelectorPause();
+    }
+    persistPanelPos();
   }
 
-  function onSelectorKeydown(event) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      cancelSelectorMode('Selector canceled');
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'visible') {
+      scheduleObserve();
+      scheduleScan('visible');
     }
   }
 
-  function setHoveredElement(el) {
-    if (state.hoveredEl === el) return;
-    clearHoveredHighlight();
-    state.hoveredEl = el;
-    if (!el) return;
-    state.hoveredPrevOutline = el.style.outline || '';
-    state.hoveredPrevOffset = el.style.outlineOffset || '';
-    el.style.outline = `${CFG.selectorOutlineWidth}px solid ${CFG.selectorOutlineColor}`;
-    el.style.outlineOffset = '2px';
-    paintHoverBox(el);
+  function scheduleObserve() {
+    if (state.observeScheduled || state.destroyed) return;
+    state.observeScheduled = true;
+    setTimeout(() => {
+      state.observeScheduled = false;
+      installMutationObserver();
+    }, 0);
   }
 
-  function clearHoveredHighlight() {
-    if (state.hoveredEl) {
-      state.hoveredEl.style.outline = state.hoveredPrevOutline;
-      state.hoveredEl.style.outlineOffset = state.hoveredPrevOffset;
+  function installMutationObserver() {
+    if (state.destroyed || !document.documentElement) return;
+    try { state.mutationObserver?.disconnect(); } catch {}
+    state.mutationObserver = new MutationObserver(() => {
+      if (state.destroyed) return;
+      if (state.scanQueued) return;
+      state.scanQueued = true;
+      setTimeout(() => {
+        state.scanQueued = false;
+        scheduleScan('mutation');
+      }, CFG.observerThrottleMs);
+    });
+    try {
+      state.mutationObserver.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'aria-hidden', 'aria-label']
+      });
+    } catch {}
+  }
+
+  function scheduleScan(reason) {
+    if (state.destroyed) return;
+    try {
+      scanPage(reason);
+    } catch (err) {
+      log(`Scan failed: ${err?.message || err}`);
+      setStatus('Scan failed');
     }
-    state.hoveredEl = null;
-    state.hoveredPrevOutline = '';
-    state.hoveredPrevOffset = '';
-    if (state.hoverBoxEl) state.hoverBoxEl.style.display = 'none';
   }
 
-  function paintHoverBox(el) {
-    if (!(el instanceof Element)) return;
-    const rect = el.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) return;
-    const box = ensureHoverBox();
-    Object.assign(box.style, {
-      display: 'block',
-      left: `${Math.max(0, rect.left + window.scrollX)}px`,
-      top: `${Math.max(0, rect.top + window.scrollY)}px`,
-      width: `${Math.max(0, rect.width)}px`,
-      height: `${Math.max(0, rect.height)}px`
+  function scanPage(reason) {
+    state.lastScanAt = Date.now();
+
+    const job = readCurrentJob();
+    const productInfo = detectProduct();
+    const header = normalizeText(getGuidewireHeader());
+    const submission = normalizeText(getSubmissionNumber());
+
+    updateIdentityCache(submission);
+    const pageIdentity = getPageIdentity(submission);
+
+    if (submission && job['AZ ID']) {
+      mergeCurrentJob({
+        'AZ ID': job['AZ ID'],
+        'Name': job['Name'] || pageIdentity.name,
+        'Mailing Address': job['Mailing Address'] || pageIdentity.mailingAddress,
+        'SubmissionNumber': submission || job['SubmissionNumber']
+      });
+    }
+
+    syncCurrentContext({
+      job: readCurrentJob(),
+      product: productInfo.product,
+      productLabel: productInfo.label,
+      header,
+      submission,
+      pageIdentity
     });
+
+    processPendingSend();
+
+    if (!state.running || state.selectorMode || state.modalOpen) {
+      renderAll();
+      return;
+    }
+
+    if (!state.current.product && state.current.header) {
+      const key = `${state.current.header}|${state.current.azId || ''}`;
+      if (state.lastUnknownStageKey !== key) {
+        state.lastUnknownStageKey = key;
+        log(`Unknown stage for header "${state.current.header}"`);
+      }
+    } else {
+      state.lastUnknownStageKey = '';
+    }
+
+    processSelectorMatches();
+    processHeaderTimeout();
+    renderAll();
   }
 
-  function ensureHoverBox() {
-    if (state.hoverBoxEl && document.contains(state.hoverBoxEl)) return state.hoverBoxEl;
-    const box = document.createElement('div');
-    box.id = 'tm-pc-header-timeout-hover-box';
-    Object.assign(box.style, {
-      position: 'absolute',
-      zIndex: 2147483646,
-      pointerEvents: 'none',
-      border: `${CFG.selectorOutlineWidth}px solid ${CFG.selectorOutlineColor}`,
-      background: 'rgba(34,211,238,0.14)',
-      boxSizing: 'border-box',
-      borderRadius: '4px',
-      display: 'none'
+  function syncCurrentContext(context) {
+    const nextAzId = normalizeText(context.job?.['AZ ID'] || '');
+    const nextSubmission = normalizeText(context.submission || context.job?.['SubmissionNumber'] || '');
+    const nextProduct = normalizeText(context.product || '');
+    const nextProductLabel = normalizeText(context.productLabel || '');
+    const nextHeader = normalizeText(context.header || '');
+    const pageName = normalizeText(context.pageIdentity?.name || '');
+    const pageAddress = normalizeText(context.pageIdentity?.mailingAddress || '');
+
+    const stored = readRuntimeState();
+    const runtimeKey = nextAzId && nextProduct && nextHeader ? [nextAzId, nextProduct, nextHeader].join('|') : '';
+    let headerSinceMs = nextHeader ? Date.now() : 0;
+
+    if (runtimeKey && normalizeText(stored.key || '') === runtimeKey && Number.isFinite(Number(stored.headerSinceMs))) {
+      headerSinceMs = Number(stored.headerSinceMs) || headerSinceMs;
+    }
+
+    if (runtimeKey && normalizeText(state.lastRuntimePersistKey) !== runtimeKey) {
+      headerSinceMs = normalizeText(stored.key || '') === runtimeKey ? headerSinceMs : Date.now();
+      writeRuntimeState({
+        key: runtimeKey,
+        azId: nextAzId,
+        product: nextProduct,
+        productLabel: nextProductLabel,
+        header: nextHeader,
+        submissionNumber: nextSubmission,
+        headerSinceMs,
+        updatedAt: nowIso(),
+        source: SCRIPT_NAME,
+        version: VERSION
+      });
+      state.lastRuntimePersistKey = runtimeKey;
+    } else if (runtimeKey) {
+      const maybeUpdate = !stored.updatedAt || (Date.now() - Date.parse(stored.updatedAt || '')) > 5000 || normalizeText(stored.submissionNumber || '') !== nextSubmission;
+      if (maybeUpdate) {
+        writeRuntimeState({
+          ...stored,
+          key: runtimeKey,
+          azId: nextAzId,
+          product: nextProduct,
+          productLabel: nextProductLabel,
+          header: nextHeader,
+          submissionNumber: nextSubmission,
+          headerSinceMs,
+          updatedAt: nowIso(),
+          source: SCRIPT_NAME,
+          version: VERSION
+        });
+      }
+      state.lastRuntimePersistKey = runtimeKey;
+    } else {
+      state.lastRuntimePersistKey = '';
+    }
+
+    const headerLogKey = [nextAzId, nextProduct, nextHeader, headerSinceMs].join('|');
+    if (nextHeader && state.lastHeaderLogKey !== headerLogKey) {
+      state.lastHeaderLogKey = headerLogKey;
+      log(`Header change: ${nextHeader}`);
+    }
+
+    const stageLogKey = [nextAzId, nextProduct, nextProductLabel].join('|');
+    if (nextProductLabel && state.lastStageLogKey !== stageLogKey) {
+      state.lastStageLogKey = stageLogKey;
+      log(`Stage: ${nextProductLabel}`);
+    }
+
+    state.current = {
+      azId: nextAzId,
+      submission: nextSubmission,
+      product: nextProduct,
+      productLabel: nextProductLabel,
+      header: nextHeader,
+      headerSinceMs,
+      pageName,
+      pageAddress
+    };
+  }
+
+  function buildEventContext() {
+    const job = readCurrentJob();
+    if (!job['AZ ID']) {
+      return { ok: false, reason: 'Waiting for tm_pc_current_job_v1 / AZ ID' };
+    }
+
+    if (!state.current.product) {
+      return { ok: false, reason: 'Unknown stage' };
+    }
+    if (!state.current.header) {
+      return { ok: false, reason: 'Waiting for Guidewire header' };
+    }
+
+    const identity = getPageIdentity(state.current.submission);
+    if (job['Name'] && identity.name && !namesLikelySame(job['Name'], identity.name)) {
+      return { ok: false, reason: `Blocked save: current job Name mismatch | job=${job['Name']} | page=${identity.name}` };
+    }
+    if (job['Mailing Address'] && identity.mailingAddress && !addressesLikelySame(job['Mailing Address'], identity.mailingAddress)) {
+      return { ok: false, reason: 'Blocked save: current job address mismatch' };
+    }
+
+    const mergedJob = mergeCurrentJob({
+      'AZ ID': job['AZ ID'],
+      'Name': job['Name'] || identity.name,
+      'Mailing Address': job['Mailing Address'] || identity.mailingAddress,
+      'SubmissionNumber': state.current.submission || job['SubmissionNumber']
     });
-    document.documentElement.appendChild(box);
-    state.hoverBoxEl = box;
-    return box;
-  }
-
-  function buildSelectorRule(el, product) {
-    const textSample = normalizeText(el.innerText || el.textContent || '').slice(0, 180);
-    const selector = buildStableSelector(el);
-    const errorName = textSample || normalizeText(el.getAttribute('aria-label') || `${el.tagName.toLowerCase()} error`);
-    const id = hashString([product, selector, textSample].join('|'));
 
     return {
-      id,
-      product,
-      selector,
-      textSample,
-      errorName,
-      targetMode: 'clicked',
-      ruleKind: 'error',
-      postMode: 'visible_text',
-      customMessage: '',
-      resultField: product === 'auto' ? 'Auto' : 'Done?',
-      resultValue: '',
-      createdAt: nowIso()
+      ok: true,
+      job: mergedJob,
+      identity,
+      product: state.current.product,
+      productLabel: state.current.productLabel,
+      header: state.current.header,
+      headerSinceMs: Number(state.current.headerSinceMs) || Date.now(),
+      submission: state.current.submission || mergedJob['SubmissionNumber'] || ''
     };
   }
 
-  function getUsableSelectorTarget(el) {
-    if (!(el instanceof Element)) return null;
+  function buildTimeoutEvent(context) {
+    const resultValue = `Header "${context.header}" did not change for 120 seconds`;
+    const eventId = createEventId();
+    const dedupeKey = [
+      'timeout',
+      context.job['AZ ID'],
+      context.product,
+      context.header,
+      String(context.headerSinceMs)
+    ].join('|');
 
-    const coveringGuidewireTarget = findGuidewireCoveringTarget(el);
-    if (coveringGuidewireTarget) return coveringGuidewireTarget;
-
-    const direct = normalizeInteractiveTarget(el, true);
-    if (direct) return direct;
-
-    const wrapperUpgraded = upgradeFrameworkWrapperTarget(el);
-    if (wrapperUpgraded) return wrapperUpgraded;
-
-    const wrapper = findTargetWrapper(el) || el;
-    const upgraded = findPreferredTargetIn(wrapper);
-    return normalizeInteractiveTarget(upgraded || wrapper || el, false) || upgraded || wrapper || el;
-  }
-
-  function findGuidewireCoveringTarget(el) {
-    if (!(el instanceof Element)) return null;
-
-    const coveringSelectors = [
-      '.gw-WebMessage',
-      '.gw-message--displayable',
-      '.gw-MessagesWidget--severity-sub-group',
-      '.gw-MessagesWidget--destination-group',
-      '.gw-MessagesWidget'
-    ];
-
-    for (const selector of coveringSelectors) {
-      const hit = el.closest(selector);
-      if (hit && isVisible(hit)) return hit;
-    }
-
-    return null;
-  }
-
-  function upgradeFrameworkWrapperTarget(el) {
-    const wrapper = findTargetWrapper(el);
-    if (!wrapper) return null;
-
-    const preferred = [
-      'input[type="radio"]',
-      'input[type="checkbox"]',
-      'input:not([type="hidden"])',
-      'textarea',
-      'select',
-      'button',
-      'a[href]',
-      'a[role="link"]',
-      'label[for]',
-      'label',
-      '[role="button"]',
-      '[role="link"]'
-    ];
-
-    for (const selector of preferred) {
-      const match = $$(selector, wrapper).find(isVisible);
-      if (match) return normalizeInteractiveTarget(match, false);
-    }
-
-    const clickableWrapper = findClickableIv360Container(wrapper);
-    if (clickableWrapper) return clickableWrapper;
-
-    let current = wrapper;
-    for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
-      for (const selector of preferred) {
-        const siblingMatch = $$(selector, current).find((node) => isVisible(node) && (node === wrapper || node.contains(wrapper) || wrapper.contains(node) || node.closest?.('mat-radio-button, mat-radio-group, iv360-question-row, iv360-widget-integer, iv360-page-link, iv360-quality-section, iv360-page-area, iv360-quality-no-slider') === wrapper));
-        if (siblingMatch) return normalizeInteractiveTarget(siblingMatch, false);
-      }
-      const clickableParent = findClickableIv360Container(current);
-      if (clickableParent) return clickableParent;
-    }
-
-    return null;
-  }
-
-  function findTargetWrapper(el) {
-    let current = el;
-    while (current && current.nodeType === 1) {
-      const tag = String(current.tagName || '').toLowerCase();
-      if (tag.startsWith('iv360-') || tag.startsWith('mat-')) return current;
-      current = current.parentElement;
-    }
-    return null;
-  }
-
-  function findPreferredTargetIn(root) {
-    if (!(root instanceof Element)) return null;
-
-    const selectors = [
-      'input[type="radio"]',
-      'input[type="checkbox"]',
-      'input:not([type="hidden"])',
-      'textarea',
-      'select',
-      'button',
-      'a[href]',
-      'a[role="link"]',
-      'label[for]',
-      'label',
-      '[role="button"]',
-      '[role="link"]'
-    ];
-
-    for (const selector of selectors) {
-      const match = $$(selector, root).find(isVisible);
-      if (match) return normalizeInteractiveTarget(match, false);
-    }
-
-    const labelled = root.closest?.('label[for]');
-    if (labelled) return normalizeInteractiveTarget(labelled, false);
-
-    const clickableWrapper = findClickableIv360Container(root);
-    if (clickableWrapper) return clickableWrapper;
-
-    return null;
-  }
-
-  function normalizeInteractiveTarget(el, strict = false) {
-    if (!(el instanceof Element)) return null;
-
-    if (el.matches?.('label[for]')) {
-      const forId = normalizeText(el.getAttribute('for') || '');
-      const linked = forId ? el.ownerDocument.getElementById(forId) : null;
-      return linked && isVisible(linked) ? linked : el;
-    }
-
-    if (el.matches?.('mat-radio-button')) {
-      const radio = el.querySelector('input[type="radio"]');
-      if (radio && isVisible(radio)) return radio;
-    }
-
-    if (el.matches?.('input:not([type="hidden"]), textarea, select, button, a[href], a[role="link"], [role="button"], [role="link"], label')) {
-      return el;
-    }
-
-    const clickableWrapper = findClickableIv360Container(el);
-    if (clickableWrapper) return clickableWrapper;
-
-    const inner = el.querySelector?.('input[type="radio"], input[type="checkbox"], input:not([type="hidden"]), textarea, select, button, a[href], a[role="link"], [role="button"], [role="link"], label[for], label');
-    if (inner instanceof Element && isVisible(inner)) {
-      return normalizeInteractiveTarget(inner, false);
-    }
-
-    const radioWrapper = el.closest?.('mat-radio-button');
-    if (radioWrapper) {
-      const radio = radioWrapper.querySelector('input[type="radio"]');
-      if (radio && isVisible(radio)) return radio;
-    }
-
-    return strict ? null : el;
-  }
-
-  function findClickableIv360Container(el) {
-    let current = el instanceof Element ? el : null;
-    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
-      if (!isVisible(current)) continue;
-      const tag = String(current.tagName || '').toLowerCase();
-      const classText = Array.from(current.classList || []).join(' ');
-      const ariaExpanded = current.getAttribute?.('aria-expanded');
-      const role = normalizeText(current.getAttribute?.('role') || '');
-      const cursor = getElementCursor(current);
-      const looksIv360Clickable = /iv360-(page-link|quality-section-title-container|quality-section-controls|section-heading|pageArea|page-area)/i.test(classText) ||
-        /iv360-quality-section-title/i.test(classText) ||
-        /iv360-link-text/i.test(classText) ||
-        /iv360-.*quality-section/i.test(current.id || '');
-
-      if (tag === 'div' && (
-        role === 'button' ||
-        role === 'link' ||
-        ariaExpanded === 'true' ||
-        ariaExpanded === 'false' ||
-        cursor === 'pointer' ||
-        looksIv360Clickable
-      )) {
-        return current;
-      }
-    }
-    return null;
-  }
-
-  function getElementCursor(el) {
-    try { return String(window.getComputedStyle(el).cursor || '').toLowerCase(); }
-    catch { return ''; }
-  }
-
-  function openSelectorDialog(clickedEl, upgradedEl, product) {
-    removeSelectorDialog();
-
-    const clickedRule = buildSelectorRule(clickedEl, product);
-    const upgradedRule = upgradedEl && upgradedEl !== clickedEl ? buildSelectorRule(upgradedEl, product) : null;
-    const baseRule = upgradedRule || clickedRule;
-    const overlay = document.createElement('div');
-    overlay.id = 'tm-pc-header-timeout-selector-dialog';
-    Object.assign(overlay.style, {
-      position: 'fixed',
-      inset: '0',
-      zIndex: 2147483647,
-      background: 'rgba(15,23,42,0.82)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '18px'
-    });
-
-    overlay.innerHTML = `
-      <div style="width:min(520px,100%);background:#0f172a;color:#e5e7eb;border:1px solid rgba(255,255,255,0.12);border-radius:14px;box-shadow:0 16px 40px rgba(0,0,0,.35);padding:16px;">
-        <div style="font-weight:700;font-size:15px;margin-bottom:10px;">Save Selector Rule</div>
-        <div style="font-size:12px;opacity:.85;margin-bottom:12px;white-space:pre-wrap;max-height:88px;overflow:auto;">${escapeHtml(baseRule.textSample || baseRule.selector || '(no text found)')}</div>
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Rule Name</label>
-        <input id="tm-pc-rule-name" type="text" value="${escapeAttr(baseRule.errorName || '')}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Rule Type</label>
-        <select id="tm-pc-rule-kind" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
-          <option value="error">Error</option>
-          <option value="blocker">Blocker / stop condition</option>
-        </select>
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Selection target</label>
-        <select id="tm-pc-rule-target" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
-          <option value="clicked">Exact clicked element</option>
-          ${upgradedRule ? '<option value="upgraded" selected>Upgraded inner/native target</option>' : ''}
-        </select>
-        <label style="display:block;font-size:12px;margin-bottom:4px;">What to post</label>
-        <select id="tm-pc-rule-post-mode" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">
-          <option value="visible_text">Visible text</option>
-          <option value="full_element">Full element HTML</option>
-          <option value="presence_only">Element present only</option>
-          <option value="custom_text">Custom text</option>
-        </select>
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Save into column</label>
-        <input id="tm-pc-rule-result-field" type="text" value="${escapeAttr(product === 'auto' ? 'Auto' : 'Done?')}" readonly style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#cbd5e1;">
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Value to save in that column</label>
-        <textarea id="tm-pc-rule-result-value" rows="3" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">${escapeHtml(baseRule.textSample || '')}</textarea>
-        <label style="display:block;font-size:12px;margin-bottom:4px;">Custom text override</label>
-        <textarea id="tm-pc-rule-custom" rows="2" style="width:100%;margin-bottom:12px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;"></textarea>
-        <div style="display:flex;gap:8px;justify-content:flex-end;">
-          <button id="tm-pc-rule-cancel" style="border:0;border-radius:8px;padding:8px 12px;background:#475569;color:#fff;font-weight:700;cursor:pointer;">Cancel</button>
-          <button id="tm-pc-rule-save" style="border:0;border-radius:8px;padding:8px 12px;background:#0891b2;color:#fff;font-weight:700;cursor:pointer;">Save Rule</button>
-        </div>
-      </div>
-    `;
-
-    document.documentElement.appendChild(overlay);
-
-    const nameEl = $('#tm-pc-rule-name', overlay);
-    const targetEl = $('#tm-pc-rule-target', overlay);
-    const postModeEl = $('#tm-pc-rule-post-mode', overlay);
-    const resultFieldEl = $('#tm-pc-rule-result-field', overlay);
-    const resultValueEl = $('#tm-pc-rule-result-value', overlay);
-    const customEl = $('#tm-pc-rule-custom', overlay);
-    const cancelEl = $('#tm-pc-rule-cancel', overlay);
-    const saveEl = $('#tm-pc-rule-save', overlay);
-
-    const updateCustomHint = () => {
-      const mode = normalizeText(postModeEl?.value || 'visible_text');
-      if (customEl) {
-        customEl.placeholder = mode === 'presence_only'
-          ? 'Optional text to save when the element is present'
-          : mode === 'custom_text'
-            ? 'Text to save instead of the element content'
-            : 'Optional override text';
-      }
-      if (resultValueEl) {
-        resultValueEl.placeholder = mode === 'full_element'
-          ? 'Leave blank to save the full element HTML'
-          : mode === 'presence_only'
-            ? 'Leave blank to save a default presence message'
-            : mode === 'custom_text'
-              ? 'Leave blank to reuse the custom text override'
-              : 'Leave blank to save the visible text';
+    return {
+      eventId,
+      id: eventId,
+      dedupeKey,
+      actionKey: `${context.product}_header_timeout`,
+      triggerType: 'timeout',
+      product: context.product,
+      productLabel: context.productLabel,
+      errorType: 'HeaderTimeout',
+      errorName: context.product === 'home' ? 'HOME timeout' : 'AUTO timeout',
+      errorMessage: resultValue,
+      errorText: resultValue,
+      resultField: context.product === 'home' ? 'Done?' : 'Auto',
+      resultValue,
+      headerText: context.header,
+      submissionNumber: context.submission,
+      selectorRuleId: '',
+      detectedAt: nowIso(),
+      source: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      identity: {
+        'AZ ID': context.job['AZ ID'],
+        'Name': context.job['Name'] || context.identity.name || '',
+        'Mailing Address': context.job['Mailing Address'] || context.identity.mailingAddress || '',
+        'SubmissionNumber': context.submission || context.job['SubmissionNumber'] || ''
       }
     };
+  }
 
-    postModeEl?.addEventListener('change', updateCustomHint);
-    updateCustomHint();
-    try { nameEl?.focus(); nameEl?.select(); } catch {}
+  function buildSelectorEvent(context, rule, matchEl) {
+    const savedErrorText = normalizeText(rule.savedErrorText || rule.errorText || '');
+    const eventId = createEventId();
+    const dedupeKey = [
+      'selector',
+      context.job['AZ ID'],
+      context.product,
+      normalizeText(rule.ruleId || rule.id || '')
+    ].join('|');
 
-    cancelEl?.addEventListener('click', () => cancelSelectorMode('Selector canceled'));
-    overlay.addEventListener('click', (event) => {
-      if (event.target === overlay) cancelSelectorMode('Selector canceled');
+    return {
+      eventId,
+      id: eventId,
+      dedupeKey,
+      actionKey: `${context.product}_saved_selector_error`,
+      triggerType: 'selector',
+      product: context.product,
+      productLabel: context.productLabel,
+      errorType: 'SavedSelectorMatch',
+      errorName: normalizeText(rule.label || 'Saved selector error'),
+      errorMessage: savedErrorText,
+      errorText: savedErrorText,
+      resultField: context.product === 'home' ? 'Done?' : 'Auto',
+      resultValue: savedErrorText,
+      headerText: context.header,
+      submissionNumber: context.submission,
+      selectorRuleId: normalizeText(rule.ruleId || rule.id || ''),
+      selector: normalizeText(rule.selector || ''),
+      detectedAt: nowIso(),
+      source: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      capturedElementHtml: truncateText(matchEl?.outerHTML || '', 4000),
+      capturedText: truncateText(matchEl?.innerText || matchEl?.textContent || '', 600),
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      identity: {
+        'AZ ID': context.job['AZ ID'],
+        'Name': context.job['Name'] || context.identity.name || '',
+        'Mailing Address': context.job['Mailing Address'] || context.identity.mailingAddress || '',
+        'SubmissionNumber': context.submission || context.job['SubmissionNumber'] || ''
+      }
+    };
+  }
+
+  function dispatchEvent(event) {
+    const context = buildEventContext();
+    if (!context.ok) {
+      log(context.reason);
+      return false;
+    }
+
+    if (hasSentOrPendingDedupe(event.dedupeKey)) {
+      return false;
+    }
+
+    try {
+      saveEventToPayload(context.product, context.job, event);
+      const bundle = saveEventToBundle(context.product, context.job, event);
+      const signature = buildSignatureJobBundle(context.job, bundle);
+      const forceRequest = requestForceSend(event.actionKey || 'header-timeout');
+
+      writePendingPost({
+        eventId: event.eventId,
+        dedupeKey: event.dedupeKey,
+        azId: context.job['AZ ID'],
+        product: context.product,
+        ruleId: normalizeText(event.selectorRuleId || ''),
+        signature,
+        requestedAt: normalizeText(forceRequest.requestedAt || nowIso()),
+        status: 'waiting',
+        source: normalizeText(event.triggerType || 'timeout'),
+        errorText: normalizeText(event.errorText || ''),
+        headerText: normalizeText(event.headerText || ''),
+        submissionNumber: normalizeText(event.submissionNumber || ''),
+        attempts: 1
+      });
+
+      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event`);
+      setStatus(`Waiting for sender (${context.product.toUpperCase()})`);
+      clearWaitLog();
+      renderAll();
+      return true;
+    } catch (err) {
+      log(`Save failed: ${err?.message || err}`);
+      setStatus('Save failed');
+      renderAll();
+      return false;
+    }
+  }
+
+  function processHeaderTimeout() {
+    const context = buildEventContext();
+    if (!context.ok) {
+      logWait(`timeout:${context.reason}`, context.reason);
+      return;
+    }
+
+    clearWaitLog();
+
+    const ageMs = Date.now() - Number(context.headerSinceMs || Date.now());
+    if (ageMs < CFG.timeoutMs) return;
+
+    const event = buildTimeoutEvent(context);
+    if (hasSentOrPendingDedupe(event.dedupeKey)) return;
+    dispatchEvent(event);
+  }
+
+  function processPendingSend() {
+    const pending = readPendingPost();
+    state.pending = pending;
+    if (!pending) {
+      state.lastFailedWaitLogKey = '';
+      renderButtons();
+      return;
+    }
+
+    const sentMeta = readSentMeta();
+    const pendingAzId = normalizeText(pending.azId || '');
+    const pendingSig = normalizeText(pending.signature || '');
+    const requestMs = Date.parse(pending.requestedAt || '') || 0;
+    const sentAtMs = Date.parse(sentMeta?.sentAt || '') || 0;
+    const sentAzId = normalizeText(sentMeta?.azId || '');
+    const sentSig = normalizeText(sentMeta?.signature || '');
+
+    if (pending.status === 'waiting') {
+      if (pendingAzId && pendingSig && sentAzId === pendingAzId && sentSig === pendingSig && sentAtMs >= requestMs) {
+        rememberSentEvent(pending, sentMeta);
+        writePendingPost(null);
+        log(`Sender success confirmed for ${pending.eventId}`);
+        setStatus('Posted successfully');
+        attemptCloseAfterSuccess();
+        return;
+      }
+
+      const ageMs = Date.now() - requestMs;
+      if (requestMs > 0 && ageMs >= CFG.sendWaitMs) {
+        const next = {
+          ...pending,
+          status: 'failed',
+          failedAt: nowIso(),
+          lastError: 'Sender success marker was not seen before the wait window expired'
+        };
+        writePendingPost(next);
+        log(next.lastError);
+        setStatus('Post failed / waiting retry');
+        state.lastFailedWaitLogKey = '';
+        return;
+      }
+
+      logWait(`pending:${pending.eventId}`, `Waiting for sender success for ${pending.eventId}`);
+      return;
+    }
+
+    if (pending.status === 'failed' && state.lastFailedWaitLogKey !== pending.eventId) {
+      state.lastFailedWaitLogKey = pending.eventId;
+      log(`Pending post failed: ${normalizeText(pending.lastError || 'Unknown send failure')}`);
+    }
+  }
+
+  function retryPendingPost() {
+    const pending = readPendingPost();
+    if (!pending) {
+      log('Retry skipped: no pending post');
+      return;
+    }
+
+    const context = buildEventContext();
+    if (!context.ok) {
+      log(`Retry blocked: ${context.reason}`);
+      return;
+    }
+
+    const bundle = ensureBundleForJob(context.job);
+    if (!bundle) {
+      log('Retry blocked: missing bundle');
+      return;
+    }
+
+    const signature = buildSignatureJobBundle(context.job, bundle);
+    const forceRequest = requestForceSend(`retry:${pending.eventId}`);
+    writePendingPost({
+      ...pending,
+      azId: context.job['AZ ID'],
+      signature,
+      requestedAt: normalizeText(forceRequest.requestedAt || nowIso()),
+      status: 'waiting',
+      lastError: '',
+      attempts: Number(pending.attempts || 0) + 1,
+      retriedAt: nowIso()
     });
-    saveEl?.addEventListener('click', () => {
-      const kindEl = $('#tm-pc-rule-kind', overlay);
-      const selectedMode = normalizeText(targetEl?.value || (upgradedRule ? 'upgraded' : 'clicked'));
-      const selectedBase = selectedMode === 'clicked' || !upgradedRule ? clickedRule : upgradedRule;
-      const rule = {
-        ...selectedBase,
-        targetMode: selectedMode,
-        errorName: normalizeText(nameEl?.value || selectedBase.errorName || 'Selected rule'),
-        ruleKind: normalizeText(kindEl?.value || 'error'),
-        postMode: normalizeText(postModeEl?.value || 'visible_text'),
-        customMessage: normalizeText(customEl?.value || ''),
-        resultField: normalizeText(resultFieldEl?.value || (product === 'auto' ? 'Auto' : 'Done?')),
-        resultValue: normalizeText(resultValueEl?.value || '')
-      };
-      const idBase = [
-        rule.product,
-        rule.selector,
-        rule.errorName,
-        rule.ruleKind,
-        rule.postMode,
-        rule.textSample
-      ].join('|');
-      rule.id = hashString(idBase);
-
-      const rules = getSelectorRules();
-      const existingIdx = rules.findIndex((item) => item.id === rule.id || (item.selector === rule.selector && item.product === rule.product));
-      if (existingIdx >= 0) rules[existingIdx] = rule;
-      else rules.push(rule);
-      setSelectorRules(rules);
-      state.capturedRuleId = rule.id;
-      cleanupSelectorMode();
-      log(`Selector rule saved: ${rule.errorName}`);
-    });
+    log(`Retry requested for ${pending.eventId}`);
+    setStatus('Waiting for sender retry');
+    clearWaitLog();
   }
 
-  function removeSelectorDialog() {
-    const dialog = $('#tm-pc-header-timeout-selector-dialog');
-    if (dialog) dialog.remove();
+  function attemptCloseAfterSuccess() {
+    log('Attempting to close tab after successful post');
+    try { window.close(); } catch {}
+    try { clearTimeout(state.closeCheckTimer); } catch {}
+    state.closeCheckTimer = setTimeout(() => {
+      if (!state.destroyed) {
+        log('Close blocked after successful post');
+      }
+    }, CFG.closeBlockCheckMs);
   }
 
-  function buildStableSelector(el) {
-    if (el.id) return `#${cssEscape(el.id)}`;
-
-    const gwMessageWrapper = el.closest?.('.gw-WebMessage, .gw-message--displayable, .gw-MessagesWidget--severity-sub-group, .gw-MessagesWidget--destination-group, .gw-MessagesWidget');
-    if (gwMessageWrapper?.id) return `#${cssEscape(gwMessageWrapper.id)}`;
-
-    if (el.matches?.('label[for]')) {
-      const forId = normalizeText(el.getAttribute('for') || '');
-      if (forId) {
-        const selector = `label[for="${cssEscapeAttr(forId)}"]`;
-        if (isUniqueSelector(selector, el.ownerDocument)) return selector;
-      }
-    }
-
-    if (el.matches?.('input, textarea, select, button') && el.id) {
-      return `#${cssEscape(el.id)}`;
-    }
-
-    const labelledBy = normalizeText(el.getAttribute?.('aria-labelledby') || '');
-    if (labelledBy) {
-      const selector = `${el.tagName.toLowerCase()}[aria-labelledby="${cssEscapeAttr(labelledBy)}"]`;
-      if (isUniqueSelector(selector, el.ownerDocument)) return selector;
-    }
-
-    const aria = normalizeText(el.getAttribute('aria-label') || '');
-    if (aria) {
-      const attrSelector = `${el.tagName.toLowerCase()}[aria-label="${cssEscapeAttr(aria)}"]`;
-      if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
-    }
-
-    const dataAttrs = ['data-gw-id', 'data-testid', 'name', 'role', 'type', 'value'];
-    for (const attr of dataAttrs) {
-      const value = normalizeText(el.getAttribute(attr) || '');
-      if (!value) continue;
-      const attrSelector = `${el.tagName.toLowerCase()}[${attr}="${cssEscapeAttr(value)}"]`;
-      if (isUniqueSelector(attrSelector, el.ownerDocument)) return attrSelector;
-    }
-
-    const radioWrapper = el.closest?.('mat-radio-button');
-    if (radioWrapper?.id) {
-      const input = radioWrapper.querySelector('input[type="radio"]');
-      if (input?.id) return `#${cssEscape(input.id)}`;
-      return `#${cssEscape(radioWrapper.id)}`;
-    }
-
-    let current = el;
-    while (current && current.nodeType === 1 && current !== document.body) {
-      if (current.id) {
-        const withinId = buildScopedSelectorFromAncestor(current, el);
-        if (withinId) return withinId;
-        break;
-      }
-      current = current.parentElement;
-    }
-
-    const parts = [];
-    current = el;
-    while (current && current.nodeType === 1 && current !== document.body && parts.length < 6) {
-      let part = current.tagName.toLowerCase();
-      if (current.id) {
-        part += `#${cssEscape(current.id)}`;
-        parts.unshift(part);
-        break;
-      }
-
-      const stableClasses = Array.from(current.classList || [])
-        .filter((name) => /^iv360-|^mat-|^mdc-|^gw-/.test(name))
-        .slice(0, 2);
-      if (stableClasses.length) part += `.${stableClasses.map(cssEscape).join('.')}`;
-
-      const siblings = current.parentElement
-        ? Array.from(current.parentElement.children).filter((node) => node.tagName === current.tagName)
-        : [];
-      if (siblings.length > 1 && !stableClasses.length) {
-        const idx = siblings.indexOf(current) + 1;
-        part += `:nth-of-type(${idx})`;
-      }
-
-      parts.unshift(part);
-      const selector = parts.join(' > ');
-      if (isUniqueSelector(selector, el.ownerDocument)) return selector;
-      current = current.parentElement;
-    }
-
-    return parts.join(' > ');
+  function buildRuleId(selector, textFingerprint) {
+    return `rule_${hashString([normalizeText(selector), normalizeText(textFingerprint)].join('|'))}`;
   }
 
-  function buildScopedSelectorFromAncestor(ancestor, target) {
-    if (!(ancestor instanceof Element) || !(target instanceof Element) || !ancestor.id) return '';
-    if (ancestor === target) return `#${cssEscape(ancestor.id)}`;
+  function getStableClassTokens(el) {
+    return Array.from(el.classList || [])
+      .filter((name) => /^gw-|^iv360-|^mat-|^mdc-/.test(name))
+      .slice(0, 4);
+  }
 
-    const steps = [];
-    let current = target;
-    while (current && current !== ancestor && current.nodeType === 1 && steps.length < 4) {
-      let step = current.tagName.toLowerCase();
-
-      if (current.id) {
-        steps.unshift(`#${cssEscape(current.id)}`);
-        break;
-      }
-
-      const forId = normalizeText(current.getAttribute?.('for') || '');
-      if (forId && current.matches?.('label')) {
-        step += `[for="${cssEscapeAttr(forId)}"]`;
-        steps.unshift(step);
-        current = current.parentElement;
-        continue;
-      }
-
-      const aria = normalizeText(current.getAttribute?.('aria-label') || '');
-      if (aria) {
-        step += `[aria-label="${cssEscapeAttr(aria)}"]`;
-        steps.unshift(step);
-        current = current.parentElement;
-        continue;
-      }
-
-      const stableClasses = Array.from(current.classList || [])
-        .filter((name) => /^iv360-|^mat-|^mdc-|^gw-/.test(name))
-        .slice(0, 2);
-      if (stableClasses.length) {
-        step += `.${stableClasses.map(cssEscape).join('.')}`;
-      }
-
-      steps.unshift(step);
-      current = current.parentElement;
-    }
-
-    if (current !== ancestor) return '';
-    const selector = `#${cssEscape(ancestor.id)} > ${steps.join(' > ')}`;
-    return isUniqueSelector(selector, target.ownerDocument) ? selector : '';
+  function buildElementFingerprint(el) {
+    if (!(el instanceof Element)) return {};
+    return {
+      tag: String(el.tagName || '').toLowerCase(),
+      id: normalizeText(el.id || ''),
+      name: normalizeText(el.getAttribute('name') || ''),
+      role: normalizeText(el.getAttribute('role') || ''),
+      ariaLabel: normalizeText(el.getAttribute('aria-label') || ''),
+      classTokens: getStableClassTokens(el),
+      textFingerprint: truncateText(el.innerText || el.textContent || '', 160)
+    };
   }
 
   function isUniqueSelector(selector, doc) {
@@ -1485,260 +1397,793 @@
     }
   }
 
+  function buildStableSelector(el) {
+    if (!(el instanceof Element)) return '';
+    const doc = el.ownerDocument || document;
+
+    if (el.id) return `#${cssEscape(el.id)}`;
+
+    const name = normalizeText(el.getAttribute('name') || '');
+    if (name) {
+      const selector = `${el.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
+      if (isUniqueSelector(selector, doc)) return selector;
+    }
+
+    const aria = normalizeText(el.getAttribute('aria-label') || '');
+    if (aria) {
+      const selector = `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
+      if (isUniqueSelector(selector, doc)) return selector;
+    }
+
+    const role = normalizeText(el.getAttribute('role') || '');
+    if (role && aria) {
+      const selector = `${el.tagName.toLowerCase()}[role="${cssEscape(role)}"][aria-label="${cssEscape(aria)}"]`;
+      if (isUniqueSelector(selector, doc)) return selector;
+    }
+
+    let current = el;
+    const parts = [];
+    while (current && current.nodeType === 1 && current !== doc.body && parts.length < 6) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += `#${cssEscape(current.id)}`;
+        parts.unshift(part);
+        break;
+      }
+
+      const classes = getStableClassTokens(current);
+      if (classes.length) {
+        part += `.${classes.map(cssEscape).join('.')}`;
+      } else if (current.parentElement) {
+        const siblings = Array.from(current.parentElement.children)
+          .filter((node) => node.tagName === current.tagName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+
+      parts.unshift(part);
+      const candidate = parts.join(' > ');
+      if (isUniqueSelector(candidate, doc)) return candidate;
+      current = current.parentElement;
+    }
+
+    return parts.join(' > ');
+  }
+
+  function normalizeRule(raw) {
+    if (!isPlainObject(raw)) return null;
+    const selector = normalizeText(raw.selector || raw.cssSelector || '');
+    if (!selector) return null;
+
+    const savedErrorText = normalizeText(
+      raw.savedErrorText ||
+      raw.errorText ||
+      raw.customMessage ||
+      raw.resultValue ||
+      raw.textSample ||
+      raw.errorName ||
+      ''
+    );
+    if (!savedErrorText) return null;
+
+    const textFingerprint = truncateText(
+      raw.fingerprint?.textFingerprint ||
+      raw.textFingerprint ||
+      raw.textSample ||
+      '',
+      160
+    );
+
+    const fingerprint = isPlainObject(raw.fingerprint)
+      ? {
+          tag: normalizeText(raw.fingerprint.tag || ''),
+          id: normalizeText(raw.fingerprint.id || ''),
+          name: normalizeText(raw.fingerprint.name || ''),
+          role: normalizeText(raw.fingerprint.role || ''),
+          ariaLabel: normalizeText(raw.fingerprint.ariaLabel || ''),
+          classTokens: Array.isArray(raw.fingerprint.classTokens)
+            ? raw.fingerprint.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
+            : [],
+          textFingerprint
+        }
+      : {
+          tag: '',
+          id: '',
+          name: '',
+          role: '',
+          ariaLabel: '',
+          classTokens: [],
+          textFingerprint
+        };
+
+    return {
+      ruleId: normalizeText(raw.ruleId || raw.id || buildRuleId(selector, textFingerprint)),
+      selector,
+      label: normalizeText(raw.label || raw.errorName || 'Saved selector error'),
+      savedErrorText,
+      fingerprint,
+      createdAt: normalizeText(raw.createdAt || nowIso()),
+      updatedAt: normalizeText(raw.updatedAt || raw.createdAt || nowIso())
+    };
+  }
+
   function getSelectorRules() {
-    return safeJsonParse(localStorage.getItem(KEYS.selectorRules), []) || [];
+    const parsed = safeJsonParse(localStorage.getItem(KEYS.selectorRules), []);
+    const list = Array.isArray(parsed) ? parsed : [];
+    const normalized = list.map(normalizeRule).filter(Boolean);
+    return normalized;
   }
 
-  function setSelectorRules(rules) {
+  function saveSelectorRules(rules) {
     localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
+    renderAll();
   }
 
-  function detectSavedSelectorErrors(product, submission) {
-    if (!submission || !product) return;
-    for (const rule of getSelectorRules()) {
-      if (normalizeText(rule.product) && normalizeText(rule.product) !== product) continue;
-      const match = findRuleMatch(rule);
-      if (!match) continue;
+  function isScriptUiElement(el) {
+    return !!(el instanceof Element && el.closest(`[${UI_MARKER_ATTR}="1"]`));
+  }
 
-      gatherError({
-        product,
-        actionKey: 'selected_error',
-        errorType: normalizeText(rule.ruleKind === 'blocker' ? 'SelectedPresenceBlocker' : 'SelectedError'),
-        errorName: normalizeText(rule.errorName || 'Selected error'),
-        errorText: getRulePostText(rule, match),
-        headerText: normalizeText(getGuidewireHeader()),
-        selectorRuleId: rule.id,
-        source: 'selector-rule',
-        postMode: normalizeText(rule.postMode || 'visible_text'),
-        ruleKind: normalizeText(rule.ruleKind || 'error'),
-        resultField: normalizeText(rule.resultField || (product === 'auto' ? 'Auto' : 'Done?')),
-        resultValue: normalizeText(rule.resultValue || ''),
-        customMessage: normalizeText(rule.customMessage || ''),
-        capturedElementHtml: normalizeText((match.outerHTML || '').slice(0, 4000)),
-        capturedText: normalizeText(match.innerText || match.textContent || '')
-      });
+  function resolveSelectableElementAtPoint(clientX, clientY) {
+    const stack = typeof document.elementsFromPoint === 'function'
+      ? document.elementsFromPoint(clientX, clientY)
+      : [];
+
+    for (const node of stack) {
+      if (!(node instanceof Element)) continue;
+      if (isScriptUiElement(node)) return null;
+      if (!isVisible(node)) continue;
+      if (node === document.documentElement || node === document.body) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function ensureHoverBox() {
+    if (state.hoverBoxEl && document.contains(state.hoverBoxEl)) return state.hoverBoxEl;
+    const box = document.createElement('div');
+    box.setAttribute(UI_MARKER_ATTR, '1');
+    Object.assign(box.style, {
+      position: 'fixed',
+      zIndex: String(CFG.zIndex - 1),
+      pointerEvents: 'none',
+      border: `2px solid ${CFG.selectorOutlineColor}`,
+      background: CFG.selectorFillColor,
+      boxSizing: 'border-box',
+      borderRadius: '6px',
+      display: 'none'
+    });
+    document.documentElement.appendChild(box);
+    state.hoverBoxEl = box;
+    return box;
+  }
+
+  function hideHoverBox() {
+    state.hoveredEl = null;
+    if (state.hoverBoxEl) state.hoverBoxEl.style.display = 'none';
+  }
+
+  function updateHoverBox(target) {
+    if (!(target instanceof Element) || !isVisible(target) || isScriptUiElement(target)) {
+      hideHoverBox();
       return;
     }
+    const box = ensureHoverBox();
+    const rect = target.getBoundingClientRect();
+    state.hoveredEl = target;
+    Object.assign(box.style, {
+      display: 'block',
+      top: `${Math.max(0, rect.top)}px`,
+      left: `${Math.max(0, rect.left)}px`,
+      width: `${Math.max(0, rect.width)}px`,
+      height: `${Math.max(0, rect.height)}px`
+    });
   }
 
-  function getRulePostText(rule, match) {
-    const mode = normalizeText(rule?.postMode || 'visible_text');
-    const customMessage = normalizeText(rule?.customMessage || '');
-    const visibleText = normalizeText(match?.innerText || match?.textContent || rule?.textSample || '');
-    const fullElement = normalizeText((match?.outerHTML || '').slice(0, 4000));
+  function bindSelectorListeners() {
+    unbindSelectorListeners();
 
-    if (mode === 'presence_only') {
-      return customMessage || `Element present: ${normalizeText(rule?.errorName || 'Selected rule')}`;
+    const onMove = (event) => {
+      if (!state.selectorMode) return;
+      if (isScriptUiElement(event.target)) {
+        hideHoverBox();
+        return;
+      }
+      updateHoverBox(resolveSelectableElementAtPoint(event.clientX, event.clientY));
+    };
+
+    const onClick = (event) => {
+      if (!state.selectorMode) return;
+      if (isScriptUiElement(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      const target = resolveSelectableElementAtPoint(event.clientX, event.clientY);
+      if (!target) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      openSaveRuleModal(target);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSelectorSession('Selector canceled');
+      }
+    };
+
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKeyDown, true);
+
+    state.selectorListeners = [
+      () => document.removeEventListener('mousemove', onMove, true),
+      () => document.removeEventListener('click', onClick, true),
+      () => document.removeEventListener('keydown', onKeyDown, true)
+    ];
+  }
+
+  function unbindSelectorListeners() {
+    for (const cleanupFn of state.selectorListeners) {
+      try { cleanupFn(); } catch {}
     }
-    if (mode === 'custom_text') {
-      return customMessage || visibleText || normalizeText(rule?.errorName || 'Selected rule');
+    state.selectorListeners = [];
+  }
+
+  function publishSelectorPause() {
+    const alreadyPaused = localStorage.getItem(GLOBAL_PAUSE_KEY) === '1';
+    const pauseState = {
+      active: true,
+      createdPause: !alreadyPaused,
+      previousPause: alreadyPaused,
+      savedAt: nowIso(),
+      source: SCRIPT_NAME
+    };
+
+    try {
+      localStorage.setItem(KEYS.selectorPauseState, JSON.stringify(pauseState, null, 2));
+      localStorage.setItem(GLOBAL_PAUSE_KEY, '1');
+    } catch {}
+  }
+
+  function restoreSelectorPause() {
+    const pauseState = safeJsonParse(localStorage.getItem(KEYS.selectorPauseState), null);
+    if (!isPlainObject(pauseState)) return;
+
+    try {
+      if (pauseState.createdPause && !hasForceSendRequest()) {
+        localStorage.removeItem(GLOBAL_PAUSE_KEY);
+      }
+    } catch {}
+
+    try { localStorage.removeItem(KEYS.selectorPauseState); } catch {}
+  }
+
+  function restoreStaleSelectorPause() {
+    const pauseState = safeJsonParse(localStorage.getItem(KEYS.selectorPauseState), null);
+    if (!isPlainObject(pauseState)) return;
+    if (!pauseState.active) {
+      try { localStorage.removeItem(KEYS.selectorPauseState); } catch {}
+      return;
     }
-    if (mode === 'full_element') {
-      return fullElement || customMessage || visibleText || normalizeText(rule?.errorName || 'Selected rule');
+    restoreSelectorPause();
+  }
+
+  function startSelectorMode() {
+    if (state.selectorMode || state.modalOpen) return;
+    if (state.pending?.status === 'waiting') {
+      log('Selector mode blocked while sender is still posting');
+      return;
     }
-    return customMessage || visibleText || fullElement || normalizeText(rule?.errorName || 'Selected rule');
+
+    publishSelectorPause();
+    state.selectorMode = true;
+    state.modalOpen = false;
+    bindSelectorListeners();
+    hideHoverBox();
+    setStatus('Selector mode');
+    log('Selector mode enabled');
+    renderButtons();
+    renderAll();
+  }
+
+  function closeSelectorSession(message, options = {}) {
+    state.selectorMode = false;
+    state.modalOpen = false;
+    unbindSelectorListeners();
+    hideHoverBox();
+    removeSaveRuleModal();
+    if (options.restorePause !== false) restoreSelectorPause();
+    if (options.logIt !== false && normalizeText(message)) log(message);
+    if (!state.destroyed) setStatus(state.pending ? 'Waiting for sender' : (state.running ? 'Watching header' : 'Stopped'));
+    renderButtons();
+    renderAll();
+  }
+
+  function openSaveRuleModal(target) {
+    if (!(target instanceof Element)) return;
+
+    state.selectorMode = false;
+    state.modalOpen = true;
+    unbindSelectorListeners();
+    hideHoverBox();
+
+    const draft = {
+      selector: buildStableSelector(target),
+      fingerprint: buildElementFingerprint(target),
+      previewText: truncateText(target.innerText || target.textContent || '', 400),
+      previewHtml: truncateText(target.outerHTML || '', 1200)
+    };
+
+    if (!draft.selector) {
+      closeSelectorSession('Selector save failed: could not build a stable selector');
+      return;
+    }
+
+    removeSaveRuleModal();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'tm-timeout-save-rule-overlay';
+    overlay.setAttribute(UI_MARKER_ATTR, '1');
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: String(CFG.zIndex),
+      background: 'rgba(2, 6, 23, 0.78)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px'
+    });
+
+    overlay.innerHTML = `
+      <div ${UI_MARKER_ATTR}="1" style="width:min(560px,100%);background:#0f172a;color:#e5e7eb;border:1px solid rgba(255,255,255,0.12);border-radius:16px;box-shadow:0 22px 60px rgba(0,0,0,.45);padding:18px;">
+        <div ${UI_MARKER_ATTR}="1" style="font-size:16px;font-weight:800;margin-bottom:10px;">Save the error message for this element</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;opacity:.85;margin-bottom:8px;">Selector</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;line-height:1.45;background:#111827;border:1px solid #243041;border-radius:10px;padding:10px;margin-bottom:10px;word-break:break-all;">${escapeHtml(draft.selector)}</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;opacity:.85;margin-bottom:8px;">Element preview</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;line-height:1.45;background:#111827;border:1px solid #243041;border-radius:10px;padding:10px;max-height:110px;overflow:auto;margin-bottom:12px;white-space:pre-wrap;">${escapeHtml(draft.previewText || '(no visible text found)')}</div>
+        <label ${UI_MARKER_ATTR}="1" for="tm-timeout-saved-error-text" style="display:block;font-size:12px;font-weight:700;margin-bottom:6px;">Saved error text</label>
+        <textarea ${UI_MARKER_ATTR}="1" id="tm-timeout-saved-error-text" rows="4" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#111827;color:#e5e7eb;resize:vertical;"></textarea>
+        <div ${UI_MARKER_ATTR}="1" id="tm-timeout-save-rule-error" style="display:none;color:#fca5a5;font-size:12px;margin-top:8px;">Error text is required.</div>
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-save-rule-cancel" type="button" style="border:0;border-radius:10px;padding:8px 12px;background:#475569;color:#fff;font-weight:700;cursor:pointer;">Cancel</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-save-rule-save" type="button" style="border:0;border-radius:10px;padding:8px 12px;background:#16a34a;color:#fff;font-weight:700;cursor:pointer;">Save Rule</button>
+        </div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
+
+    const textarea = $('#tm-timeout-saved-error-text', overlay);
+    const errorEl = $('#tm-timeout-save-rule-error', overlay);
+    const cancelBtn = $('#tm-timeout-save-rule-cancel', overlay);
+    const saveBtn = $('#tm-timeout-save-rule-save', overlay);
+
+    try { textarea?.focus(); } catch {}
+
+    const closeModal = (message) => closeSelectorSession(message);
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        closeModal('Selector canceled');
+      }
+    });
+
+    cancelBtn?.addEventListener('click', () => closeModal('Selector canceled'));
+
+    saveBtn?.addEventListener('click', () => {
+      const savedErrorText = normalizeText(textarea?.value || '');
+      if (!savedErrorText) {
+        if (errorEl) errorEl.style.display = 'block';
+        return;
+      }
+
+      const rules = getSelectorRules();
+      const ruleId = buildRuleId(draft.selector, draft.fingerprint.textFingerprint || draft.previewText || '');
+      const nextRule = {
+        ruleId,
+        selector: draft.selector,
+        label: savedErrorText,
+        savedErrorText,
+        fingerprint: draft.fingerprint,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+
+      const existingIdx = rules.findIndex((rule) => normalizeText(rule.ruleId) === ruleId || normalizeText(rule.selector) === draft.selector);
+      if (existingIdx >= 0) {
+        nextRule.createdAt = normalizeText(rules[existingIdx].createdAt || nowIso());
+        rules[existingIdx] = nextRule;
+      } else {
+        rules.push(nextRule);
+      }
+
+      saveSelectorRules(rules);
+      closeSelectorSession('Selector rule saved');
+      scheduleScan('rule-saved');
+    });
+
+    setStatus('Selector config');
+    renderButtons();
+    renderAll();
+  }
+
+  function removeSaveRuleModal() {
+    const overlay = $('#tm-timeout-save-rule-overlay');
+    if (overlay) overlay.remove();
+  }
+
+  function matchRuleToElement(rule, el) {
+    if (!(el instanceof Element) || isScriptUiElement(el) || !isVisible(el)) return false;
+    const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
+    const current = buildElementFingerprint(el);
+
+    if (fingerprint.id && current.id && fingerprint.id === current.id) return true;
+
+    let required = 0;
+    let score = 0;
+
+    if (fingerprint.tag) {
+      required += 1;
+      if (fingerprint.tag === current.tag) score += 1;
+    }
+    if (fingerprint.name) {
+      required += 1;
+      if (fingerprint.name === current.name) score += 1;
+    }
+    if (fingerprint.role) {
+      required += 1;
+      if (fingerprint.role === current.role) score += 1;
+    }
+    if (fingerprint.ariaLabel) {
+      required += 1;
+      if (fingerprint.ariaLabel === current.ariaLabel) score += 1;
+    }
+    if (Array.isArray(fingerprint.classTokens) && fingerprint.classTokens.length) {
+      required += 1;
+      const currentSet = new Set(current.classTokens || []);
+      const allFound = fingerprint.classTokens.every((token) => currentSet.has(token));
+      if (allFound) score += 1;
+    }
+    if (fingerprint.textFingerprint) {
+      required += 1;
+      const savedText = normalizeText(fingerprint.textFingerprint);
+      const currentText = normalizeText(current.textFingerprint);
+      if (savedText && currentText && (currentText.includes(savedText) || savedText.includes(currentText))) {
+        score += 1;
+      }
+    }
+
+    if (required === 0) return true;
+    if (required === 1) return score === 1;
+    return score >= 2;
   }
 
   function findRuleMatch(rule) {
-    const selector = normalizeText(rule.selector);
+    const selector = normalizeText(rule.selector || '');
     if (!selector) return null;
-    for (const doc of getDocs()) {
+
+    for (const doc of getAllDocs()) {
       let nodes = [];
       try { nodes = Array.from(doc.querySelectorAll(selector)); } catch {}
       for (const node of nodes) {
-        if (!isVisible(node)) continue;
-        const text = normalizeText(node.innerText || node.textContent || '');
-        if (rule.textSample && text && !text.includes(normalizeText(rule.textSample))) continue;
-        return node;
+        if (matchRuleToElement(rule, node)) return node;
       }
     }
     return null;
   }
 
-  function publishGlobalPause(value) {
-    try {
-      if (value) localStorage.setItem(GLOBAL_PAUSE_KEY, '1');
-      else localStorage.removeItem(GLOBAL_PAUSE_KEY);
-    } catch {}
-  }
+  function processSelectorMatches() {
+    if (state.pending?.status === 'waiting') return;
 
-  function renderStatus() {
-    if (!state.els.status || !state.els.toggle) return;
-    const running = state.enabled && !state.saving && !state.selectorMode && !state.selectorDialogOpen;
-    state.els.status.textContent =
-      state.selectorDialogOpen ? 'SELECTOR CONFIG' :
-      state.selectorMode ? 'SELECTOR MODE' :
-      state.saving ? 'SAVING...' :
-      running ? 'RUNNING' : 'STOPPED';
-    state.els.status.style.color =
-      state.selectorDialogOpen ? '#93c5fd' :
-      state.selectorMode ? '#67e8f9' :
-      state.saving ? '#facc15' :
-      running ? '#86efac' : '#fca5a5';
-    state.els.toggle.textContent = running ? 'STOP' : 'START';
-    state.els.toggle.style.background = running ? '#16a34a' : '#6b7280';
-  }
+    const context = buildEventContext();
+    if (!context.ok) return;
 
-  function setStatusText(text) {
-    if (state.els.status) state.els.status.textContent = text;
-  }
-
-  function setUiValues(submission, header, ageMs) {
-    const displayHeader = header || state.lastHeader || '-';
-    if (state.els.submission) state.els.submission.textContent = submission || '-';
-    if (state.els.header) state.els.header.textContent = displayHeader;
-    if (state.els.age) state.els.age.textContent = state.lastHeaderAt ? `${Math.max(0, Math.floor(ageMs / 1000))}s` : '-';
-    if (state.els.deadline) {
-      const remainingMs = state.lastHeaderAt ? Math.max(0, CFG.timeoutMs - ageMs) : 0;
-      state.els.deadline.textContent = state.lastHeaderAt ? `${Math.ceil(remainingMs / 1000)}s` : '-';
+    for (const rule of getSelectorRules()) {
+      const dedupeKey = ['selector', context.job['AZ ID'], context.product, normalizeText(rule.ruleId || '')].join('|');
+      if (hasSentOrPendingDedupe(dedupeKey)) continue;
+      const match = findRuleMatch(rule);
+      if (!match) continue;
+      const event = buildSelectorEvent(context, rule, match);
+      dispatchEvent(event);
+      return;
     }
   }
 
-  function log(message, type = 'info') {
-    const line = `[${new Date().toLocaleTimeString()}] ${message}`;
-    state.logs.unshift(line);
-    if (state.logs.length > CFG.maxLogLines) state.logs.length = CFG.maxLogLines;
-    renderLogs();
-    if (type === 'error') console.error(`[${SCRIPT_NAME}] ${message}`);
-    else console.log(`[${SCRIPT_NAME}] ${message}`);
+  function buildUi() {
+    if (!document.documentElement) return false;
+
+    const existing = $('#tm-pc-header-timeout-panel');
+    if (existing) {
+      state.panel = existing;
+      bindUi(existing);
+      return true;
+    }
+
+    const panel = document.createElement('div');
+    panel.id = 'tm-pc-header-timeout-panel';
+    panel.setAttribute(UI_MARKER_ATTR, '1');
+    Object.assign(panel.style, {
+      position: 'fixed',
+      right: '12px',
+      bottom: '12px',
+      width: `${CFG.panelWidth}px`,
+      zIndex: String(CFG.zIndex),
+      background: 'rgba(15, 23, 42, 0.97)',
+      color: '#e5e7eb',
+      border: '1px solid rgba(255,255,255,0.12)',
+      borderRadius: '16px',
+      boxShadow: '0 18px 48px rgba(0,0,0,0.42)',
+      font: '12px/1.45 Segoe UI, Tahoma, Arial, sans-serif',
+      overflow: 'hidden',
+      backdropFilter: 'blur(10px)'
+    });
+
+    panel.innerHTML = `
+      <div ${UI_MARKER_ATTR}="1" id="tm-pc-header-timeout-handle" style="padding:10px 12px;background:linear-gradient(90deg,#0f172a,#1e293b);cursor:move;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div ${UI_MARKER_ATTR}="1">
+          <div ${UI_MARKER_ATTR}="1" style="font-weight:800;letter-spacing:.2px;">${SCRIPT_NAME}</div>
+          <div ${UI_MARKER_ATTR}="1" style="font-size:11px;opacity:.72;">Live header timeout monitor</div>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:11px;opacity:.7;">v${VERSION}</div>
+      </div>
+      <div ${UI_MARKER_ATTR}="1" style="padding:12px;">
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">STOP</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-retry" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">RETRY POST</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
+        <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:120px 1fr;gap:5px 8px;margin-bottom:10px;">
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Current Stage</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-stage">-</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Current Header</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-header" style="word-break:break-word;">-</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Live Timer</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-live-timer">00:00</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Timeout At</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-deadline">02:00</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">AZ ID</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-azid">-</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Submission</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-submission">-</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Pending Post</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-pending">None</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Saved Rules</div>
+          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-rule-count">0</div>
+        </div>
+        <textarea ${UI_MARKER_ATTR}="1" id="tm-timeout-logs" readonly style="width:100%;min-height:180px;max-height:220px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
+      </div>
+    `;
+
+    document.documentElement.appendChild(panel);
+    state.panel = panel;
+    loadPanelPos();
+    makeDraggable(panel, $('#tm-pc-header-timeout-handle', panel));
+    bindUi(panel);
+    return true;
   }
 
-  function renderLogs() {
-    if (state.els.logs) state.els.logs.textContent = state.logs.join('\n');
+  function bindUi(panel) {
+    state.panel = panel;
+    state.els.toggle = $('#tm-timeout-toggle', panel);
+    state.els.selector = $('#tm-timeout-selector', panel);
+    state.els.retry = $('#tm-timeout-retry', panel);
+    state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
+    state.els.status = $('#tm-timeout-status', panel);
+    state.els.stage = $('#tm-timeout-stage', panel);
+    state.els.header = $('#tm-timeout-header', panel);
+    state.els.liveTimer = $('#tm-timeout-live-timer', panel);
+    state.els.deadline = $('#tm-timeout-deadline', panel);
+    state.els.azId = $('#tm-timeout-azid', panel);
+    state.els.submission = $('#tm-timeout-submission', panel);
+    state.els.pending = $('#tm-timeout-pending', panel);
+    state.els.ruleCount = $('#tm-timeout-rule-count', panel);
+    state.els.logs = $('#tm-timeout-logs', panel);
+
+    state.els.toggle.onclick = () => {
+      state.running = !state.running;
+      if (!state.running) {
+        closeSelectorSession('', { logIt: false, restorePause: true });
+        setStatus('Stopped');
+        log('Monitoring stopped');
+      } else {
+        setStatus('Watching header');
+        log('Monitoring started');
+        scheduleScan('manual-start');
+      }
+      renderButtons();
+      renderAll();
+    };
+
+    state.els.selector.onclick = () => {
+      if (state.selectorMode || state.modalOpen) {
+        closeSelectorSession('Selector canceled');
+      } else {
+        startSelectorMode();
+      }
+    };
+
+    state.els.retry.onclick = () => retryPendingPost();
+    state.els.copyLogs.onclick = () => copyLogsToClipboard();
+
+    renderButtons();
+    renderAll();
   }
 
-  function savePanelPos() {
+  function renderButtons() {
+    if (!state.els.toggle) return;
+    state.els.toggle.textContent = state.running ? 'STOP' : 'START';
+    state.els.toggle.style.background = state.running ? '#dc2626' : '#16a34a';
+
+    if (state.els.selector) {
+      state.els.selector.textContent = state.selectorMode || state.modalOpen ? 'CANCEL SELECTOR' : 'SELECTOR MODE';
+      state.els.selector.style.background = state.selectorMode || state.modalOpen ? '#f59e0b' : '#0891b2';
+      state.els.selector.disabled = !!(state.pending?.status === 'waiting');
+      state.els.selector.style.opacity = state.els.selector.disabled ? '0.55' : '1';
+      state.els.selector.style.cursor = state.els.selector.disabled ? 'not-allowed' : 'pointer';
+    }
+
+    if (state.els.retry) {
+      const enabled = !!state.pending;
+      state.els.retry.disabled = !enabled;
+      state.els.retry.style.opacity = enabled ? '1' : '0.5';
+      state.els.retry.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    }
+  }
+
+  function renderAll() {
+    if (!state.panel) return;
+
+    const liveMs = state.current.header ? Math.max(0, Date.now() - Number(state.current.headerSinceMs || Date.now())) : 0;
+
+    if (state.els.status) {
+      const statusText =
+        state.modalOpen ? 'Selector config' :
+        state.selectorMode ? 'Selector mode' :
+        state.pending?.status === 'waiting' ? 'Waiting for sender' :
+        state.pending?.status === 'failed' ? 'Post failed / retry ready' :
+        state.running ? (state.lastStatus || 'Watching header') :
+        'Stopped';
+
+      state.els.status.textContent = statusText;
+      state.els.status.style.color =
+        state.pending?.status === 'failed' ? '#fca5a5' :
+        state.pending?.status === 'waiting' ? '#facc15' :
+        state.selectorMode || state.modalOpen ? '#67e8f9' :
+        state.running ? '#86efac' : '#fca5a5';
+    }
+
+    if (state.els.stage) {
+      state.els.stage.textContent = state.current.productLabel
+        ? `${state.current.productLabel} (${state.current.product.toUpperCase()})`
+        : 'Unknown';
+    }
+    if (state.els.header) state.els.header.textContent = state.current.header || '-';
+    if (state.els.liveTimer) state.els.liveTimer.textContent = state.current.header ? formatDuration(liveMs) : '--:--';
+    if (state.els.deadline) state.els.deadline.textContent = formatDuration(CFG.timeoutMs);
+    if (state.els.azId) state.els.azId.textContent = state.current.azId || '-';
+    if (state.els.submission) state.els.submission.textContent = state.current.submission || '-';
+    if (state.els.pending) {
+      if (!state.pending) state.els.pending.textContent = 'None';
+      else if (state.pending.status === 'waiting') state.els.pending.textContent = `Waiting (${state.pending.eventId})`;
+      else state.els.pending.textContent = `Failed (${state.pending.eventId})`;
+    }
+    if (state.els.ruleCount) state.els.ruleCount.textContent = String(getSelectorRules().length);
+    if (state.els.logs) state.els.logs.value = state.logs.join('\n');
+    renderButtons();
+  }
+
+  function copyLogsToClipboard() {
+    const text = state.logs.join('\n');
+    if (!text) return;
+
+    const fallbackCopy = () => {
+      const ta = document.createElement('textarea');
+      ta.setAttribute(UI_MARKER_ATTR, '1');
+      ta.value = text;
+      Object.assign(ta.style, {
+        position: 'fixed',
+        left: '-9999px',
+        top: '0'
+      });
+      document.documentElement.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch {}
+      ta.remove();
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => log('Logs copied'))
+        .catch(() => {
+          fallbackCopy();
+          log('Logs copied');
+        });
+      return;
+    }
+
+    fallbackCopy();
+    log('Logs copied');
+  }
+
+  function loadPanelPos() {
+    const saved = safeJsonParse(localStorage.getItem(KEYS.panelPos), null);
+    if (!isPlainObject(saved) || !state.panel) return;
+    if (saved.left) state.panel.style.left = saved.left;
+    if (saved.top) state.panel.style.top = saved.top;
+    if (saved.right) state.panel.style.right = saved.right;
+    if (saved.bottom) state.panel.style.bottom = saved.bottom;
+    keepPanelInView();
+  }
+
+  function persistPanelPos() {
     if (!state.panel) return;
     localStorage.setItem(KEYS.panelPos, JSON.stringify({
       left: state.panel.style.left || '',
       top: state.panel.style.top || '',
       right: state.panel.style.right || '',
       bottom: state.panel.style.bottom || ''
-    }));
+    }, null, 2));
   }
 
-  function loadPanelPos(panel) {
-    const raw = safeJsonParse(localStorage.getItem(KEYS.panelPos), null);
-    if (!raw || !isPlainObject(raw)) return;
-    if (raw.left) panel.style.left = raw.left;
-    if (raw.top) panel.style.top = raw.top;
-    if (raw.right) panel.style.right = raw.right;
-    if (raw.bottom) panel.style.bottom = raw.bottom;
+  function keepPanelInView() {
+    if (!state.panel) return;
+    const rect = state.panel.getBoundingClientRect();
+    let nextLeft = rect.left;
+    let nextTop = rect.top;
+
+    if (rect.right > window.innerWidth) nextLeft = Math.max(0, window.innerWidth - rect.width - 8);
+    if (rect.bottom > window.innerHeight) nextTop = Math.max(0, window.innerHeight - rect.height - 8);
+    if (rect.left < 0) nextLeft = 8;
+    if (rect.top < 0) nextTop = 8;
+
+    state.panel.style.left = `${nextLeft}px`;
+    state.panel.style.top = `${nextTop}px`;
+    state.panel.style.right = 'auto';
+    state.panel.style.bottom = 'auto';
+    persistPanelPos();
   }
 
   function makeDraggable(panel, handle) {
-    let dragging = false;
-    let startX = 0;
-    let startY = 0;
-    let startLeft = 0;
-    let startTop = 0;
+    if (!panel || !handle) return;
+    let drag = null;
 
-    handle.addEventListener('mousedown', (event) => {
+    handle.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
-      dragging = true;
-      const rect = panel.getBoundingClientRect();
-      startX = event.clientX;
-      startY = event.clientY;
-      startLeft = rect.left;
-      startTop = rect.top;
-      panel.style.left = `${rect.left}px`;
-      panel.style.top = `${rect.top}px`;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-      document.body.style.userSelect = 'none';
+      drag = {
+        startX: event.clientX,
+        startY: event.clientY,
+        left: panel.getBoundingClientRect().left,
+        top: panel.getBoundingClientRect().top
+      };
+      handle.setPointerCapture?.(event.pointerId);
       event.preventDefault();
     });
 
-    window.addEventListener('mousemove', (event) => {
-      if (!dragging) return;
-      panel.style.left = `${Math.max(4, startLeft + (event.clientX - startX))}px`;
-      panel.style.top = `${Math.max(4, startTop + (event.clientY - startY))}px`;
+    handle.addEventListener('pointermove', (event) => {
+      if (!drag) return;
+      const nextLeft = drag.left + (event.clientX - drag.startX);
+      const nextTop = drag.top + (event.clientY - drag.startY);
+      panel.style.left = `${Math.max(0, nextLeft)}px`;
+      panel.style.top = `${Math.max(0, nextTop)}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
     });
 
-    window.addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      document.body.style.userSelect = '';
-      savePanelPos();
-    });
-  }
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      keepPanelInView();
+      persistPanelPos();
+    };
 
-  function normalizeText(value) {
-    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
-  }
-
-  function namesLikelySame(a, b) {
-    const aa = normalizeCompare(a);
-    const bb = normalizeCompare(b);
-    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
-  }
-
-  function addressesLikelySame(a, b) {
-    const aa = normalizeCompare(a);
-    const bb = normalizeCompare(b);
-    return !!aa && !!bb && (aa === bb || aa.includes(bb) || bb.includes(aa));
-  }
-
-  function normalizeCompare(value) {
-    return normalizeText(value)
-      .toLowerCase()
-      .replace(/[\.,#]/g, '')
-      .replace(/\bstreet\b/g, 'st')
-      .replace(/\bavenue\b/g, 'ave')
-      .replace(/\broad\b/g, 'rd')
-      .replace(/\bdrive\b/g, 'dr')
-      .replace(/\bcircle\b/g, 'cir')
-      .replace(/\blane\b/g, 'ln')
-      .replace(/\bplace\b/g, 'pl')
-      .replace(/\bcourt\b/g, 'ct')
-      .replace(/\bsouth\b/g, 's')
-      .replace(/\bnorth\b/g, 'n')
-      .replace(/\beast\b/g, 'e')
-      .replace(/\bwest\b/g, 'w')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function deepClone(value) {
-    try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
-  }
-
-  function safeJsonParse(text, fallback = null) {
-    try { return JSON.parse(text); } catch { return fallback; }
-  }
-
-  function isPlainObject(value) {
-    return !!value && typeof value === 'object' && !Array.isArray(value);
-  }
-
-  function hashString(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) - hash) + str.charCodeAt(i);
-      hash |= 0;
-    }
-    return `e${Math.abs(hash)}`;
-  }
-
-  function cssEscape(value) {
-    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
-    return String(value).replace(/([ #;?%&,.+*~':"!^$[\]()=>|/@])/g, '\\$1');
-  }
-
-  function cssEscapeAttr(value) {
-    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  }
-
-  function escapeHtml(value) {
-    return String(value || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function escapeAttr(value) {
-    return escapeHtml(value).replace(/`/g, '&#96;');
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
   }
 })();
