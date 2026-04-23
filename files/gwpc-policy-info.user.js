@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Policy Info
 // @namespace    homebot.gwpc-policy-info
-// @version      2.2
+// @version      2.3
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Policy Info';
-  const VERSION = '2.2';
+  const VERSION = '2.3';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -202,8 +202,10 @@
   }
 
   function getActiveFlow() {
-    if (matchesStage('home', 'policy_info') && hasHomeownersLabel() && !isPersonalAutoMode()) return 'home';
     if (matchesStage('auto', 'policy_info') && isPersonalAutoMode()) return 'auto';
+    if (matchesStage('home', 'policy_info') && !isPersonalAutoMode()) return 'home';
+    if (titleIsPolicyInfoAnyDoc() && isPersonalAutoMode()) return 'auto';
+    if (titleIsPolicyInfoAnyDoc()) return 'home';
     return '';
   }
 
@@ -577,6 +579,10 @@
     if (hasQuotedLabel()) {
       hardStopAndFinish();
       return;
+    }
+    const stage = readFlowStage();
+    if (!normText(stage.product) && titleIsPolicyInfoAnyDoc()) {
+      writeFlowStage(isPersonalAutoMode() ? 'auto' : 'home', 'policy_info');
     }
     if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_SETTLE_MS) return;
     if (nudgePolicyInfoTabIfNeeded()) return;

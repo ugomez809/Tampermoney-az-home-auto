@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.3.1
+// @version      1.3.2
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -140,7 +140,11 @@
       setWaiting('Waiting for Coverages tab to load...');
       return;
     }
-    if (!matchesStage('home', 'coverages') || !hasVisibleExactLabel('Homeowners')) {
+    const stage = readFlowStage();
+    if (!normalizeText(stage.product) && getHeaderText() === IDS.coveragesHeader && hasVisibleExactLabel('Homeowners')) {
+      writeFlowStage('home', 'coverages');
+    }
+    if ((!matchesStage('home', 'coverages') && getHeaderText() !== IDS.coveragesHeader) || !hasVisibleExactLabel('Homeowners')) {
       setWaiting('Waiting for HOME coverages trigger...');
       return;
     }

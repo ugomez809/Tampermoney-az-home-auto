@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.4
+// @version      3.5
 // @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.4';
+  const VERSION = '3.5';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -196,7 +196,8 @@
   }
 
   function stageReadyForDwelling() {
-    return matchesStage('home', 'dwelling') && REQUIRED_LABELS.every(hasLabelExact);
+    if (!REQUIRED_LABELS.every(hasLabelExact)) return false;
+    return matchesStage('home', 'dwelling') || getTitleBarText() === 'Dwelling';
   }
 
   function scrollFocus(el) {
