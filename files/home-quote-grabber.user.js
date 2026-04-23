@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.6
-// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, clicks the Quote action after auto discount, retries in-tab after failures, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      3.9
+// @description  Triggered Home quote driver. Waits for the Dwelling Water Rule trigger, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits for the Quote action to become clickable after auto discount, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.6';
+  const VERSION = '3.9';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -46,6 +46,7 @@
     maxQuoteAttempts: 6,
     quoteTransitionTimeoutMs: 8000,
     betweenQuoteAttemptsMs: 500,
+    quoteActionReadyTimeoutMs: 12000,
     triggerStableMs: 1000,
     tabNudgeCooldownMs: 1500,
     tabNudgeSettleMs: 2500,
@@ -401,7 +402,7 @@
     log(`Origin: ${location.origin}`);
     log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}, GM_deleteValue=${typeof GM_deleteValue}`);
     log('Auto-run armed');
-    setStatus('Waiting for Coverages page or HOME quote-grabber trigger');
+    setStatus('Waiting for Dwelling Water Rule trigger');
     setInterval(() => {
       try { tick(); } catch (err) {
         log(`tick() crashed: ${err?.message || err}`);
@@ -445,35 +446,6 @@
     if (state.doneThisLoad) { announceSkipReason('doneThisLoad=true (reload tab for another quote)'); return; }
     state.announcedSkipReason = '';
 
-    if (!state.flowStartedThisLoad && isOnCoverageEditPage()) {
-      if (!state.coverageTriggerSince) {
-        state.coverageTriggerSince = Date.now();
-        setStatus('Coverages detected, stabilizing...');
-        log('Coverages detected, stabilizing...');
-        return;
-      }
-      if ((Date.now() - state.coverageTriggerSince) < CFG.triggerStableMs) {
-        setStatus('Coverages stable...');
-        return;
-      }
-      state.flowStartedThisLoad = true;
-      state.busy = true;
-      log(`Starting full flow on ${location.origin}${location.pathname}`);
-      runGrab({ fullFlow: true })
-        .catch((err) => {
-          log(`Full flow failed: ${err?.message || err}`);
-          setStatus('Failed');
-          state.flowStartedThisLoad = false;
-          state.coverageTriggerSince = 0;
-          log('Full flow unlocked for same-tab retry');
-        })
-        .finally(() => {
-          state.busy = false;
-        });
-      return;
-    }
-    state.coverageTriggerSince = 0;
-
     if (state.flowStartedThisLoad) {
       announceSkipReason('flowStartedThisLoad=true (run in progress)');
       return;
@@ -481,12 +453,13 @@
 
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
-    const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
+    const stage = readFlowStage();
+    const stageReady = matchesStage('home', 'coverages', currentJob['AZ ID']);
 
     if (!handoff && !stageReady) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = '';
-      setWaiting('Waiting for Coverages page or HOME quote-grabber trigger');
+      setWaiting('Waiting for Dwelling Water Rule trigger');
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
         state.lastSnapshotTick = state.tickCount;
         logTriggerSnapshot(currentJob);
@@ -495,9 +468,9 @@
     }
 
     if (handoff && !stageReady) {
-      writeFlowStage('home', 'quote_grabber', currentJob['AZ ID']);
+      writeFlowStage('home', 'coverages', currentJob['AZ ID']);
       const src = state.lastTriggerSource || '?';
-      log(`Recovered quote-grabber stage from direct handoff (source=${src})`);
+      log(`Recovered coverages stage from direct handoff (source=${src})`);
     }
 
     if (hasVisibleExactLabel('Personal Auto')) {
@@ -506,17 +479,21 @@
       return;
     }
 
-    const currentRequestedAt = normalizeText(handoff?.requestedAt || '');
-    if (currentRequestedAt && currentRequestedAt !== state.activeHandoffRequestedAt) {
+    const triggerMarker = normalizeText(handoff?.requestedAt || stage.updatedAt || '');
+    if (triggerMarker && triggerMarker !== state.activeHandoffRequestedAt) {
       state.triggerSince = 0;
-      state.activeHandoffRequestedAt = currentRequestedAt;
+      state.activeHandoffRequestedAt = triggerMarker;
       const src = state.lastTriggerSource || '?';
-      log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')} (source=${src})`);
+      if (handoff) {
+        log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')} (source=${src})`);
+      } else {
+        log('Dwelling Water Rule trigger detected from flow stage');
+      }
     }
 
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found: HOME quote-grabber handoff');
+      log('Trigger found: Dwelling Water Rule -> home/coverages');
       setStatus('Trigger found, waiting 3 seconds');
       return;
     }
@@ -529,14 +506,14 @@
 
     state.flowStartedThisLoad = true;
     state.busy = true;
-    log(`Starting legacy grab on ${location.origin}${location.pathname}`);
-    runGrab({ fullFlow: false })
+    log(`Starting full flow from Dwelling Water Rule trigger on ${location.origin}${location.pathname}`);
+    runGrab({ fullFlow: true })
       .catch((err) => {
-        log(`Legacy grab failed: ${err?.message || err}`);
+        log(`Full flow failed: ${err?.message || err}`);
         setStatus('Failed');
         state.flowStartedThisLoad = false;
         state.triggerSince = 0;
-        log('Legacy grab unlocked for same-tab retry');
+        log('Full flow unlocked for same-tab retry');
       })
       .finally(() => {
         state.busy = false;
@@ -751,6 +728,17 @@
   async function clickQuoteActionToOpenQuote() {
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote action (${attempt}/${CFG.maxQuoteAttempts})`);
+      const clickableReady = await waitFor(
+        () => !!getClickableQuoteTarget(),
+        CFG.quoteActionReadyTimeoutMs,
+        `Quote action clickable (attempt ${attempt})`
+      );
+      if (!clickableReady) {
+        log(`Quote action never became clickable on attempt ${attempt}`);
+        if (attempt < CFG.maxQuoteAttempts) await sleep(CFG.betweenQuoteAttemptsMs);
+        continue;
+      }
+
       const clicked = clickQuoteOnce();
       if (!clicked) {
         await sleep(CFG.betweenQuoteAttemptsMs);
@@ -790,18 +778,25 @@
     return isVisibleEl(el) ? el : null;
   }
 
-  function clickQuoteOnce() {
-    if (quoteRecentlyClicked()) return false;
+  function getClickableQuoteTarget() {
     const candidates = findQuoteCandidates();
     for (const el of candidates) {
       const target = upgradeToClickable(el);
-      if (target && strongClick(target)) {
-        markQuoteClicked();
-        log('Quote clicked');
-        return true;
-      }
+      if (target) return target;
     }
-    log('Quote target not found');
+    return null;
+  }
+
+  function clickQuoteOnce() {
+    if (quoteRecentlyClicked()) return false;
+    const target = getClickableQuoteTarget();
+    if (target && strongClick(target)) {
+      markQuoteClicked();
+      log('Quote clicked');
+      return true;
+    }
+    const candidates = findQuoteCandidates();
+    log(candidates.length ? 'Quote target found but not clickable yet' : 'Quote target not found');
     return false;
   }
 
