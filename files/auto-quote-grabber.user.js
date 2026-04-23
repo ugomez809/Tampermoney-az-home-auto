@@ -627,8 +627,6 @@
       'Policy Info',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.policyInfoTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('Policy Info'),
-        () => findTabActionByExactText('Policy Info'),
         () => findActionByText('Policy Info')
       ],
       () => !!findByIdInDocs(IDS.policyInfoNameWrap) || !!findByIdInDocs(IDS.secondaryWrap)
@@ -640,8 +638,6 @@
       'Auto Data Prefill',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoDataPrefillTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('Auto Data Prefill'),
-        () => findTabActionByExactText('Auto Data Prefill'),
         () => findActionByText('Auto Data Prefill')
       ],
       () => isTitleStartsWith('Auto Data Prefill')
@@ -653,8 +649,6 @@
       'Drivers',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.driversTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('Drivers'),
-        () => findTabActionByExactText('Drivers'),
         () => findActionByText('Drivers')
       ],
       () => !!findByIdInDocs(IDS.driversRoot)
@@ -666,8 +660,6 @@
       'Vehicles',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.vehiclesTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('Vehicles'),
-        () => findTabActionByExactText('Vehicles'),
         () => findActionByText('Vehicles')
       ],
       () => !!findByIdInDocs(IDS.vehiclesRoot)
@@ -679,8 +671,6 @@
       'PA Coverages',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.paCoveragesTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('PA Coverages'),
-        () => findTabActionByExactText('PA Coverages'),
         () => findActionByText('PA Coverages')
       ],
       () => !!findByIdStartsWithInDocs(IDS.paCoveragesRootPrefix)
@@ -692,8 +682,6 @@
       'Quote',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`)),
-        () => findTabActionByVisibleLabel('Quote'),
-        () => findTabActionByExactText('Quote'),
         () => findActionByText('Quote')
       ],
       () => isQuoteReady()
