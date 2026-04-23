@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.1
-// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
+// @version      1.5.2
+// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver from the Accepted driver row, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -15,6 +15,8 @@
 
 (function () {
   'use strict';
+
+  const SCRIPT_NAME = 'AQB Vehicles';
 
   /************* CONFIG *************/
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
@@ -78,9 +80,13 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Vehicles',
-      version: '1.5.1'
+      version: '1.5.2'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
+
+  function log(message) {
+    try { console.log(`[${SCRIPT_NAME}] ${message}`); } catch {}
   }
 
   // ---------- Minimal START/STOP ----------
@@ -198,6 +204,14 @@
     return -1;
   }
 
+  function getColumnIndexByNames(table, wantedList) {
+    for (const wanted of wantedList) {
+      const idx = getColumnIndexByName(table, wanted);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+
   function getCellValue(cell) {
     if (!cell) return '';
 
@@ -271,6 +285,57 @@
     return Array.from(bodyRows).filter(tr =>
       tr.querySelector('input[name*="PAVehiclesExtPanelSet-VehiclesLV-"],select[name*="PAVehiclesExtPanelSet-VehiclesLV-"]')
     );
+  }
+
+  function findDriversTable() {
+    const any = document.querySelector(
+      'select[name*="PADriversExtPanelSet-DriversLV-"][name$="-maritalStatus"],' +
+      'select[name*="PADriversExtPanelSet-DriversLV-"][name$="-acceptReason"],' +
+      '[id$="PADriversExtPanelSet-DriversLV"]'
+    );
+    const root = any?.closest?.('[id$="PADriversExtPanelSet-DriversLV"]') || any;
+    return root?.closest?.('table') || any?.closest?.('table') || null;
+  }
+
+  function getDriverRows(table) {
+    if (!table) return [];
+    const bodyRows = table.querySelectorAll('tbody tr').length
+      ? table.querySelectorAll('tbody tr')
+      : table.querySelectorAll('tr');
+
+    return Array.from(bodyRows).filter(tr =>
+      tr.querySelector('select[name*="PADriversExtPanelSet-DriversLV-"],[id$="-Name"]')
+    );
+  }
+
+  function readDriverNameFromRow(tr, nameIdx) {
+    const tds = tr.querySelectorAll('td,th');
+    const fromCell = nameIdx >= 0 ? getCellValue(tds[nameIdx]) : '';
+    if (fromCell) return fromCell;
+
+    const byId = tr.querySelector('[id$="-Name"]');
+    return getCellValue(byId) || '';
+  }
+
+  function findAcceptedDriverName() {
+    const table = findDriversTable();
+    if (!table) return '';
+
+    const reasonIdx = getColumnIndexByNames(table, ['Accept/Reject Reason', 'Accept Reject Reason', 'Accept / Reject Reason']);
+    const nameIdx = getColumnIndexByNames(table, ['Driver Name', 'Name', 'Driver']);
+    if (reasonIdx < 0) return '';
+
+    const rows = getDriverRows(table);
+    for (const tr of rows) {
+      const tds = tr.querySelectorAll('td,th');
+      const reason = getCellValue(tds[reasonIdx]);
+      if (String(reason || '').trim() !== 'Accepted') continue;
+
+      const name = readDriverNameFromRow(tr, nameIdx).replace(/\s+/g, ' ').trim();
+      if (name) return name;
+    }
+
+    return '';
   }
 
   function findRemoveVehicleClickable() {
@@ -369,28 +434,36 @@
 
   function setPrimaryDriverAll() {
     if (isGloballyPaused()) return;
+    const acceptedDriverName = findAcceptedDriverName();
+    if (!acceptedDriverName) {
+      log('Stopped: no Accepted driver found in Drivers table.');
+      return { ok: false, reason: 'no-accepted-driver' };
+    }
+
     const table = findVehiclesTable();
-    if (!table) return;
+    if (!table) return { ok: false, reason: 'vehicles-table-missing' };
 
     const rows = getVehicleRows(table);
     for (const tr of rows) {
       const sel = tr.querySelector(`select[name$="${VEH_PRIMARY_DRIVER_SUFFIX}"]`);
       if (!sel || sel.disabled) continue;
 
-      const curText = (sel.selectedOptions?.[0]?.textContent || '').trim();
-      if (curText && curText !== '<none>') continue;
-
       const opts = Array.from(sel.options || []);
-      const pick = opts.find(o => {
-        const t = (o.textContent || '').trim();
-        return t !== '' && t !== '<none>';
-      });
+      const pick = opts.find(o => (o.textContent || '').replace(/\s+/g, ' ').trim() === acceptedDriverName);
+      if (!pick) {
+        log(`Stopped: accepted driver "${acceptedDriverName}" not found in vehicle Primary Driver dropdown.`);
+        return { ok: false, reason: 'accepted-driver-dropdown-mismatch', acceptedDriverName };
+      }
 
-      if (!pick) continue;
-
-      sel.value = pick.value;
-      dispatchAll(sel);
+      const curText = (sel.selectedOptions?.[0]?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (curText !== acceptedDriverName) {
+        sel.value = pick.value;
+        dispatchAll(sel);
+      }
     }
+
+    log(`Primary Driver set from Accepted driver: ${acceptedDriverName}`);
+    return { ok: true, acceptedDriverName };
   }
 
   // ---------- Main ----------
@@ -412,7 +485,11 @@
       await sleep(WAIT_BEFORE_PRIMARY_DRIVER_MS);
       if (!armed || isGloballyPaused()) return;
 
-      setPrimaryDriverAll();
+      const primaryDriverResult = setPrimaryDriverAll();
+      if (!primaryDriverResult?.ok) {
+        finished = true;
+        return;
+      }
 
       await sleep(WAIT_BEFORE_SPECIALTY_TRIGGER_MS);
       if (!armed || isGloballyPaused()) return;
