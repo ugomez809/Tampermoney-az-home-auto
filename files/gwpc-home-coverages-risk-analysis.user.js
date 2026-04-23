@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.2.0
+// @version      1.3.0
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -33,6 +33,7 @@
     quoteTransitionTimeoutMs: 25000,
     betweenQuoteAttemptsMs: 1500,
     triggerStableMs: 1000,
+    tabNudgeCooldownMs: 1500,
     maxLogLines: 14,
     panelRight: 12,
     panelBottom: 12,
@@ -84,7 +85,8 @@
     lastWait: '',
     logs: [],
     ui: null,
-    lastQuoteClickAt: 0
+    lastQuoteClickAt: 0,
+    lastTabNudgeAt: 0
   };
 
   function safeJsonParse(text, fallback = null) {
@@ -140,7 +142,11 @@
 
     if (!isOnTriggerPage()) {
       state.triggerSince = 0;
-      setWaiting('Waiting for exact Coverages page...');
+      if (nudgeCoveragesTabIfNeeded()) {
+        setWaiting('Opening Coverages tab...');
+      } else {
+        setWaiting('Waiting for exact Coverages page...');
+      }
       return;
     }
 
@@ -500,6 +506,42 @@
     try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
 
+    return true;
+  }
+
+  function findActionByText(text) {
+    const want = normalizeText(text).toLowerCase();
+    if (!want) return null;
+
+    const candidates = Array.from(document.querySelectorAll('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, .gw-label'));
+    for (const el of candidates) {
+      if (!isVisible(el)) continue;
+      const value = normalizeText(el.getAttribute?.('aria-label') || el.textContent || '').toLowerCase();
+      if (!value || !value.includes(want)) continue;
+
+      let cur = el;
+      for (let i = 0; i < 8 && cur; i++, cur = cur.parentElement) {
+        if (!isVisible(cur)) continue;
+        if (cur.matches?.('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, button, a')) {
+          return cur;
+        }
+      }
+
+      return el;
+    }
+
+    return null;
+  }
+
+  function nudgeCoveragesTabIfNeeded() {
+    if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeCooldownMs) return false;
+
+    const target = findActionByText('Coverages');
+    if (!target) return false;
+
+    state.lastTabNudgeAt = Date.now();
+    strongClick(target);
+    log('Clicked Coverages tab helper');
     return true;
   }
 

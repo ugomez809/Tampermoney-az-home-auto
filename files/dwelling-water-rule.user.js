@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.2
+// @version      3.3
 // @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.2';
+  const VERSION = '3.3';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -34,6 +34,7 @@
     garageErrorWaitMs: 7000,
     maxCreateAttempts: 3,
     maxQuoteAttempts: 3,
+    tabNudgeCooldownMs: 1500,
     maxLogLines: 14,
     panelRight: 12,
     panelBottom: 12,
@@ -86,7 +87,8 @@
     statusEl: null,
     logEl: null,
     btn: null,
-    styleEl: null
+    styleEl: null,
+    lastTabNudgeAt: 0
   };
 
   function safeJsonParse(text, fallback = null) {
@@ -192,6 +194,10 @@
     return matchesStage('home', 'dwelling') && REQUIRED_LABELS.every(hasLabelExact) && isDwellingHere();
   }
 
+  function stageReadyForDwelling() {
+    return matchesStage('home', 'dwelling') && REQUIRED_LABELS.every(hasLabelExact);
+  }
+
   function scrollFocus(el) {
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {
@@ -212,6 +218,43 @@
     } catch {
       return false;
     }
+  }
+
+  function findActionByText(text) {
+    const want = normalizeText(text).toLowerCase();
+    if (!want) return null;
+
+    const candidates = Array.from(document.querySelectorAll('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, .gw-label'));
+    for (const el of candidates) {
+      if (!isVisible(el)) continue;
+      const value = normalizeText(el.getAttribute?.('aria-label') || el.textContent || '').toLowerCase();
+      if (!value || !value.includes(want)) continue;
+
+      let cur = el;
+      for (let i = 0; i < 8 && cur; i++, cur = cur.parentElement) {
+        if (!isVisible(cur)) continue;
+        if (cur.matches?.('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, button, a')) {
+          return cur;
+        }
+      }
+
+      return el;
+    }
+
+    return null;
+  }
+
+  function nudgeDwellingTabIfNeeded() {
+    if (!stageReadyForDwelling() || isDwellingHere()) return false;
+    if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeCooldownMs) return false;
+
+    const target = findActionByText('Dwelling');
+    if (!target) return false;
+
+    state.lastTabNudgeAt = Date.now();
+    strongClick(target);
+    log('Clicked Dwelling tab helper');
+    return true;
   }
 
   function dispatchChange(el) {
@@ -660,8 +703,17 @@
   async function tick() {
     if (!state.running || state.busy || state.done) return;
 
-    if (!gateOk()) {
+    if (!stageReadyForDwelling()) {
       setStatus('Waiting for Submission (Draft) + Dwelling');
+      return;
+    }
+
+    if (!isDwellingHere()) {
+      if (nudgeDwellingTabIfNeeded()) {
+        setStatus('Opening Dwelling tab');
+      } else {
+        setStatus('Waiting for Dwelling tab');
+      }
       return;
     }
 

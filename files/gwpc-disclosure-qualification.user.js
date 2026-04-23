@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.0
+// @version      2.1
 // @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,7 +19,7 @@
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Disclosure Qualification';
-  const VERSION = '2.0';
+  const VERSION = '2.1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -28,6 +28,8 @@
   const PERSONAL_AUTO_LABEL = 'Personal Auto';
   const HARD_STOP_LABEL_QUOTED = 'Submission (Quoted)';
   const TRIGGER_TITLE_STARTS_WITH = 'Disclosure & Qualification';
+  const TAB_NUDGE_COOLDOWN_MS = 1500;
+  const DISCLOSURE_TAB_TEXT = 'Disclosure & Qualification';
 
   const PRIMARY_YES_INPUT_ID =
     'SubmissionWizard-SubmissionWizard_PreQualificationScreen-PreQualQuestionSetsDV-QuestionSetsDV-7-QuestionSetLV-0-QuestionModalInput-BooleanRadioInput_0';
@@ -54,6 +56,7 @@
   let startTimer = null;
   let retryTimer = null;
   let stuckTimer = null;
+  let lastTabNudgeAt = 0;
 
   function safeJsonParse(text, fallback = null) {
     try { return JSON.parse(text); } catch { return fallback; }
@@ -340,6 +343,65 @@
     }));
   }
 
+  function clickLikeUser(target) {
+    if (!target || !isVisible(target)) return false;
+
+    try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    try { target.focus({ preventScroll: true }); } catch {
+      try { target.focus(); } catch {}
+    }
+
+    fireMouse(target, 'pointerover');
+    fireMouse(target, 'mouseover');
+    fireMouse(target, 'pointerdown');
+    fireMouse(target, 'mousedown');
+    fireMouse(target, 'pointerup');
+    fireMouse(target, 'mouseup');
+    fireMouse(target, 'click');
+
+    try { target.click(); } catch {}
+    return true;
+  }
+
+  function findActionByTextAnyDoc(text) {
+    const want = norm(text).toLowerCase();
+    if (!want) return null;
+
+    for (const doc of allDocs()) {
+      const candidates = Array.from(doc.querySelectorAll('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, .gw-label'));
+      for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        const value = norm(el.getAttribute?.('aria-label') || el.textContent || '').toLowerCase();
+        if (!value || !value.includes(want)) continue;
+
+        let cur = el;
+        for (let i = 0; i < 8 && cur; i++, cur = cur.parentElement) {
+          if (!isVisible(cur)) continue;
+          if (cur.matches?.('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, button, a')) {
+            return cur;
+          }
+        }
+
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  function nudgeDisclosureTabIfNeeded() {
+    const flow = getActiveFlow();
+    if (!flow || titleIsDisclosureAnyDoc()) return false;
+    if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_COOLDOWN_MS) return false;
+
+    const target = findActionByTextAnyDoc(DISCLOSURE_TAB_TEXT);
+    if (!target) return false;
+
+    lastTabNudgeAt = Date.now();
+    clickLikeUser(target);
+    return true;
+  }
+
   function getNextTarget(doc) {
     const host = doc.getElementById(NEXT_HOST_ID);
     if (!host || !isVisible(host)) return null;
@@ -356,22 +418,7 @@
     for (const doc of allDocs()) {
       const target = getNextTarget(doc);
       if (!target || !isVisible(target)) continue;
-
-      try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-      try { target.focus({ preventScroll: true }); } catch {
-        try { target.focus(); } catch {}
-      }
-
-      fireMouse(target, 'pointerover');
-      fireMouse(target, 'mouseover');
-      fireMouse(target, 'pointerdown');
-      fireMouse(target, 'mousedown');
-      fireMouse(target, 'pointerup');
-      fireMouse(target, 'mouseup');
-      fireMouse(target, 'click');
-
-      try { target.click(); } catch {}
-
+      clickLikeUser(target);
       await sleep(120);
       return true;
     }
@@ -511,6 +558,7 @@
     if (!norm(stage.product) && hasHomeownersAnyDoc() && titleIsDisclosureAnyDoc()) {
       writeFlowStage('home', 'disclosure');
     }
+    if (nudgeDisclosureTabIfNeeded()) return;
     runSequence();
   }
 

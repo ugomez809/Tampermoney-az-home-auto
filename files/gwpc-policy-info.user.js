@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Policy Info
 // @namespace    homebot.gwpc-policy-info
-// @version      2.0
+// @version      2.1
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Policy Info';
-  const VERSION = '2.0';
+  const VERSION = '2.1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -26,6 +26,8 @@
   const TRIGGER_TITLE_STARTS_WITH = 'Policy Info';
   const PERSONAL_AUTO_LABEL = 'Personal Auto';
   const HARD_STOP_LABEL = 'Submission (Quoted)';
+  const POLICY_INFO_TAB_TEXT = 'Policy Info';
+  const TAB_NUDGE_COOLDOWN_MS = 1500;
 
   // ----- HOME MODE -----
   const SEL_GENDER =
@@ -68,6 +70,7 @@
   let workTimer = null;
   let nextTimer = null;
   let stuckTimer = null;
+  let lastTabNudgeAt = 0;
 
   let nextAttempts = 0;
 
@@ -372,6 +375,65 @@
     }));
   }
 
+  function clickLikeUser(target) {
+    if (!target || !isVisible(target)) return false;
+
+    try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    try { target.focus({ preventScroll: true }); } catch {
+      try { target.focus(); } catch {}
+    }
+
+    fireMouse(target, 'pointerover');
+    fireMouse(target, 'mouseover');
+    fireMouse(target, 'pointerdown');
+    fireMouse(target, 'mousedown');
+    fireMouse(target, 'pointerup');
+    fireMouse(target, 'mouseup');
+    fireMouse(target, 'click');
+
+    try { target.click(); } catch {}
+    return true;
+  }
+
+  function findActionByTextAnyDoc(text) {
+    const want = normText(text).toLowerCase();
+    if (!want) return null;
+
+    for (const doc of allDocs()) {
+      const candidates = Array.from(doc.querySelectorAll('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, .gw-label'));
+      for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        const value = normText(el.getAttribute?.('aria-label') || el.textContent || '').toLowerCase();
+        if (!value || !value.includes(want)) continue;
+
+        let cur = el;
+        for (let i = 0; i < 8 && cur; i++, cur = cur.parentElement) {
+          if (!isVisible(cur)) continue;
+          if (cur.matches?.('.gw-action--inner, [role="tab"], [role="menuitem"], .gw-TabWidget, button, a')) {
+            return cur;
+          }
+        }
+
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  function nudgePolicyInfoTabIfNeeded() {
+    const flow = getActiveFlow();
+    if (!flow || titleIsPolicyInfoAnyDoc()) return false;
+    if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_COOLDOWN_MS) return false;
+
+    const target = findActionByTextAnyDoc(POLICY_INFO_TAB_TEXT);
+    if (!target) return false;
+
+    lastTabNudgeAt = Date.now();
+    clickLikeUser(target);
+    return true;
+  }
+
   function getNextTarget(doc) {
     const host = deepGetElementById(doc, NEXT_HOST_ID);
     if (!host || !isVisible(host)) return null;
@@ -388,22 +450,7 @@
     for (const doc of allDocs()) {
       const target = getNextTarget(doc);
       if (!target || !isVisible(target)) continue;
-
-      try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-      try { target.focus({ preventScroll: true }); } catch {
-        try { target.focus(); } catch {}
-      }
-
-      fireMouse(target, 'pointerover');
-      fireMouse(target, 'mouseover');
-      fireMouse(target, 'pointerdown');
-      fireMouse(target, 'mousedown');
-      fireMouse(target, 'pointerup');
-      fireMouse(target, 'mouseup');
-      fireMouse(target, 'click');
-
-      try { target.click(); } catch {}
-
+      clickLikeUser(target);
       return true;
     }
 
@@ -530,6 +577,7 @@
       hardStopAndFinish();
       return;
     }
+    if (nudgePolicyInfoTabIfNeeded()) return;
     runSequence();
   }
 
