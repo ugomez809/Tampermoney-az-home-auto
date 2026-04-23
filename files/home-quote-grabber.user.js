@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.3
+// @version      2.4
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,11 +19,12 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.3';
+  const VERSION = '2.4';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const HOME_QUOTE_GRABBER_TRIGGER_KEY = 'tm_pc_home_quote_grabber_trigger_v1';
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
@@ -105,6 +106,27 @@
     };
     localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2));
     return next;
+  }
+
+  function readHomeQuoteGrabberTrigger() {
+    const trigger = safeJsonParse(localStorage.getItem(HOME_QUOTE_GRABBER_TRIGGER_KEY), null);
+    return isPlainObject(trigger) ? trigger : {};
+  }
+
+  function hasDirectHomeQuoteGrabberTrigger(azId = '') {
+    const trigger = readHomeQuoteGrabberTrigger();
+    const triggerAt = normalizeText(trigger.requestedAt || '');
+    if (!triggerAt) return false;
+    const triggerAzId = normalizeText(trigger.azId || '');
+    if (!triggerAzId || !normalizeText(azId)) return true;
+    return triggerAzId === normalizeText(azId);
+  }
+
+  function clearDirectHomeQuoteGrabberTrigger(azId = '') {
+    const trigger = readHomeQuoteGrabberTrigger();
+    const triggerAzId = normalizeText(trigger.azId || '');
+    if (triggerAzId && normalizeText(azId) && triggerAzId !== normalizeText(azId)) return;
+    try { localStorage.removeItem(HOME_QUOTE_GRABBER_TRIGGER_KEY); } catch {}
   }
 
   function deepClone(value) {
@@ -278,10 +300,18 @@
     if (!state.running || state.busy || state.doneThisLoad) return;
 
     const currentJob = readCurrentJob();
-    if (!matchesStage('home', 'quote_grabber', currentJob['AZ ID'])) {
+    const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
+    const directTriggerReady = hasDirectHomeQuoteGrabberTrigger(currentJob['AZ ID']);
+
+    if (!stageReady && !directTriggerReady) {
       state.triggerSince = 0;
       setWaiting('Waiting for HOME quote-grabber trigger');
       return;
+    }
+
+    if (!stageReady && directTriggerReady) {
+      writeFlowStage('home', 'quote_grabber', currentJob['AZ ID']);
+      log('Recovered quote-grabber stage from direct trigger');
     }
 
     if (hasVisibleExactLabel('Personal Auto')) {
@@ -434,6 +464,7 @@
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.home');
     writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
+    clearDirectHomeQuoteGrabberTrigger((mergeJob.next || currentJob)['AZ ID']);
     setStatus('Grab complete');
     state.doneThisLoad = true;
   }

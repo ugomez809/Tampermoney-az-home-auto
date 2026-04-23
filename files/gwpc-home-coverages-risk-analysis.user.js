@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.3.2
+// @version      1.3.3
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,9 +17,10 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const HOME_QUOTE_GRABBER_TRIGGER_KEY = 'tm_pc_home_quote_grabber_trigger_v1';
 
   const CFG = {
     tickMs: 900,
@@ -123,6 +124,31 @@
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
 
+  function writeHomeQuoteGrabberTrigger() {
+    const azId = readCurrentAzId();
+    const next = {
+      azId,
+      requestedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, JSON.stringify(next, null, 2)); } catch {}
+    log(`Home Quote Grabber trigger saved${azId ? ` | AZ ID ${azId}` : ''}`);
+  }
+
+  function fanOutHomeQuoteGrabberTrigger() {
+    writeFlowStage('home', 'quote_grabber');
+    writeHomeQuoteGrabberTrigger();
+
+    const delays = [1500, 4000, 8000];
+    for (const delayMs of delays) {
+      setTimeout(() => {
+        writeFlowStage('home', 'quote_grabber');
+        writeHomeQuoteGrabberTrigger();
+      }, delayMs);
+    }
+  }
+
   init();
 
   function init() {
@@ -176,7 +202,7 @@
 
     runFlow()
       .then(() => {
-        writeFlowStage('home', 'quote_grabber');
+        fanOutHomeQuoteGrabberTrigger();
         state.doneThisLoad = true;
         setStatus('Done');
         log('Flow complete');
