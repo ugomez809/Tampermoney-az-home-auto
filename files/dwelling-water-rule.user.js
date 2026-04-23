@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.1
+// @version      3.2
 // @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.1';
+  const VERSION = '3.2';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -93,9 +93,13 @@
     try { return JSON.parse(text); } catch { return fallback; }
   }
 
+  function normalizeText(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
   function readCurrentAzId() {
     const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
-    return norm(job?.['AZ ID'] || '');
+    return normalizeText(job?.['AZ ID'] || '');
   }
 
   function readFlowStage() {
@@ -105,9 +109,9 @@
 
   function matchesStage(product, step) {
     const stage = readFlowStage();
-    if (norm(stage.product) !== product || norm(stage.step) !== step) return false;
-    if (!norm(stage.azId)) return true;
-    return norm(stage.azId) === readCurrentAzId();
+    if (normalizeText(stage.product) !== product || normalizeText(stage.step) !== step) return false;
+    if (!normalizeText(stage.azId)) return true;
+    return normalizeText(stage.azId) === readCurrentAzId();
   }
 
   function writeFlowStage(product, step) {
