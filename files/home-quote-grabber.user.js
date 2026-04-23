@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      4.0.2
+// @version      4.1
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -91,6 +91,7 @@
 
     name: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
     mailingAddress: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-PolicyAddressDisplayInputSet-PolicyAddress_Ext_Input',
+    riskAddressPolicyInfo: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-HODwellingLocationHOEInputSet-HODwellingLocationInput_Input',
 
     fireCode: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HOFirelineCode_Input',
     fireBlock: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-7',
@@ -274,7 +275,16 @@
       'Name': '',
       'Mailing Address': '',
       'SubmissionNumber': '',
-      'updatedAt': ''
+      'updatedAt': '',
+      'First Name': '',
+      'Last Name': '',
+      'Email': '',
+      'Phone': '',
+      'DOB': '',
+      'Street Address': '',
+      'City': '',
+      'State': '',
+      'Zip': ''
     };
 
     if (!isPlainObject(raw)) return out;
@@ -288,6 +298,15 @@
     out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
     out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
     out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.lastUpdatedAt || raw?.meta?.createdAt || '');
+    out['First Name'] = normalizeText(raw['First Name'] || raw.firstName || az['First Name'] || az['AZ Name'] || '');
+    out['Last Name'] = normalizeText(raw['Last Name'] || raw.lastName || az['Last Name'] || az['AZ Last'] || '');
+    out['Email'] = normalizeText(raw['Email'] || raw.email || az['Email'] || az['AZ Email'] || '');
+    out['Phone'] = normalizeText(raw['Phone'] || raw.phone || az['Phone'] || az['AZ Phone'] || '');
+    out['DOB'] = normalizeText(raw['DOB'] || raw.dob || az['DOB'] || az['AZ DOB'] || '');
+    out['Street Address'] = normalizeText(raw['Street Address'] || raw.streetAddress || az['Street Address'] || az['AZ Street Address'] || '');
+    out['City'] = normalizeText(raw['City'] || raw.city || az['City'] || az['AZ City'] || '');
+    out['State'] = normalizeText(raw['State'] || raw.state || az['State'] || az['AZ State'] || '');
+    out['Zip'] = normalizeText(raw['Zip'] || raw.zip || raw.zipCode || az['Zip'] || az['AZ Postal Code'] || '');
     return out;
   }
 
@@ -321,7 +340,16 @@
       'Name': incoming['Name'] || current['Name'] || '',
       'Mailing Address': incoming['Mailing Address'] || current['Mailing Address'] || '',
       'SubmissionNumber': incoming['SubmissionNumber'] || current['SubmissionNumber'] || '',
-      'updatedAt': new Date().toISOString()
+      'updatedAt': new Date().toISOString(),
+      'First Name': incoming['First Name'] || current['First Name'] || '',
+      'Last Name': incoming['Last Name'] || current['Last Name'] || '',
+      'Email': incoming['Email'] || current['Email'] || '',
+      'Phone': incoming['Phone'] || current['Phone'] || '',
+      'DOB': incoming['DOB'] || current['DOB'] || '',
+      'Street Address': incoming['Street Address'] || current['Street Address'] || '',
+      'City': incoming['City'] || current['City'] || '',
+      'State': incoming['State'] || current['State'] || '',
+      'Zip': incoming['Zip'] || current['Zip'] || ''
     };
 
     return { ok: true, current, next: writeCurrentJob(next) };
@@ -357,6 +385,7 @@
     return {
       'Name': '',
       'Mailing Address': '',
+      'Risk Address': '',
       'Fire Code': '',
       'Protection Class': '',
       'CFP?': '',
@@ -610,7 +639,7 @@
   function buildFinalRowResult(row) {
     const nextRow = mergeHomeRow(emptyHomeRow(), row || {});
     const missing = Object.entries(nextRow)
-      .filter(([key, value]) => !normalizeText(value) && key !== 'Done?' && key !== 'Result')
+      .filter(([key, value]) => !normalizeText(value) && key !== 'Done?' && key !== 'Result' && key !== 'Risk Address')
       .map(([key]) => key);
 
     if (missing.length) {
@@ -1237,7 +1266,16 @@
       'AZ ID': normalizeText(job?.['AZ ID'] || ''),
       'Name': normalizeText(rowUpdates?.['Name'] || job?.['Name'] || ''),
       'Mailing Address': normalizeText(rowUpdates?.['Mailing Address'] || job?.['Mailing Address'] || ''),
-      'SubmissionNumber': normalizeText(rowUpdates?.['Submission Number'] || job?.['SubmissionNumber'] || '')
+      'SubmissionNumber': normalizeText(rowUpdates?.['Submission Number'] || job?.['SubmissionNumber'] || ''),
+      'First Name': normalizeText(job?.['First Name'] || ''),
+      'Last Name': normalizeText(job?.['Last Name'] || ''),
+      'Email': normalizeText(job?.['Email'] || ''),
+      'Phone': normalizeText(job?.['Phone'] || ''),
+      'DOB': normalizeText(job?.['DOB'] || ''),
+      'Street Address': normalizeText(job?.['Street Address'] || ''),
+      'City': normalizeText(job?.['City'] || ''),
+      'State': normalizeText(job?.['State'] || ''),
+      'Zip': normalizeText(job?.['Zip'] || '')
     };
 
     const merged = mergeCurrentJob(update);
@@ -1458,6 +1496,7 @@
     const finalRow = withProcessedDate({
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
+      'Risk Address': dwellingData['Risk Address'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
       'Protection Class': dwellingData['Protection Class'] || '',
       'CFP?': cfpValue || '',
@@ -1730,7 +1769,13 @@
       getDisplayValueById(IDS.waterDevice) ||
       extractWithRegex(getTextById(IDS.waterDevice), /Water\s*Protection\s+(.+)$/i);
 
+    const riskAddressRaw =
+      extractRiskAddressValue() ||
+      getDisplayValueById(IDS.riskAddressPolicyInfo) ||
+      extractWithRegex(getTextById(IDS.riskAddressPolicyInfo), /^Risk\s*Address\s+(.+)$/i);
+
     return {
+      'Risk Address': normalizeSimpleValue(riskAddressRaw),
       'Fire Code': normalizeFireCode(fireRaw),
       'Protection Class': normalizeSimpleValue(protectionRaw),
       'Reconstruction Cost': normalizeMoneyText(reconstructionRaw),
@@ -1739,6 +1784,23 @@
       '# of Story': normalizeSimpleValue(storiesRaw),
       'Water Device?': normalizeWaterDevice(waterRaw)
     };
+  }
+
+  function extractRiskAddressValue() {
+    return findInDocs((doc) => {
+      const labels = doc.querySelectorAll('.gw-label, .gw-boldLabel, .gw-LabelWidget');
+      for (const label of labels) {
+        if (!isVisibleEl(label)) continue;
+        if (normalizeText(label.textContent) !== 'Risk Address') continue;
+        const container = label.closest('.gw-InputWidget, .gw-LabelWidget, [role="group"]') || label.parentElement;
+        if (!container) continue;
+        const valueNode = container.querySelector('.gw-value-readonly-wrapper, .gw-vw--value, .gw-value');
+        if (valueNode && !isVisibleEl(valueNode)) continue;
+        const text = normalizeText(valueNode?.innerText || valueNode?.textContent || '');
+        if (text && text !== 'Risk Address') return text.replace(/^Risk Address\s*/i, '').trim();
+      }
+      return '';
+    }) || '';
   }
 
   function extractPricingFields() {

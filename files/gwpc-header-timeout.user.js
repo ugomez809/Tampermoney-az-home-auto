@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.1
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, can persistently enable or disable automatic timeout posting, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
+// @version      2.1.1
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -353,6 +353,11 @@
     return state.timeoutEnabled;
   }
 
+  function timeoutActionsEnabled() {
+    state.timeoutEnabled = readTimeoutEnabled();
+    return state.timeoutEnabled;
+  }
+
   function logWait(key, message) {
     if (state.lastWaitLogKey === key) return;
     state.lastWaitLogKey = key;
@@ -539,7 +544,16 @@
       'Name': '',
       'Mailing Address': '',
       'SubmissionNumber': '',
-      'updatedAt': ''
+      'updatedAt': '',
+      'First Name': '',
+      'Last Name': '',
+      'Email': '',
+      'Phone': '',
+      'DOB': '',
+      'Street Address': '',
+      'City': '',
+      'State': '',
+      'Zip': ''
     };
 
     if (!isPlainObject(raw)) return out;
@@ -562,6 +576,15 @@
     out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
     out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
     out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.updatedAt || '');
+    out['First Name'] = normalizeText(raw['First Name'] || raw.firstName || az['First Name'] || az['AZ Name'] || '');
+    out['Last Name'] = normalizeText(raw['Last Name'] || raw.lastName || az['Last Name'] || az['AZ Last'] || '');
+    out['Email'] = normalizeText(raw['Email'] || raw.email || az['Email'] || az['AZ Email'] || '');
+    out['Phone'] = normalizeText(raw['Phone'] || raw.phone || az['Phone'] || az['AZ Phone'] || '');
+    out['DOB'] = normalizeText(raw['DOB'] || raw.dob || az['DOB'] || az['AZ DOB'] || '');
+    out['Street Address'] = normalizeText(raw['Street Address'] || raw.streetAddress || az['Street Address'] || az['AZ Street Address'] || '');
+    out['City'] = normalizeText(raw['City'] || raw.city || az['City'] || az['AZ City'] || '');
+    out['State'] = normalizeText(raw['State'] || raw.state || az['State'] || az['AZ State'] || '');
+    out['Zip'] = normalizeText(raw['Zip'] || raw.zip || raw.zipCode || az['Zip'] || az['AZ Postal Code'] || '');
     return out;
   }
 
@@ -601,7 +624,16 @@
       'Name': incoming['Name'] || current['Name'] || '',
       'Mailing Address': incoming['Mailing Address'] || current['Mailing Address'] || '',
       'SubmissionNumber': incoming['SubmissionNumber'] || current['SubmissionNumber'] || '',
-      'updatedAt': nowIso()
+      'updatedAt': nowIso(),
+      'First Name': incoming['First Name'] || current['First Name'] || '',
+      'Last Name': incoming['Last Name'] || current['Last Name'] || '',
+      'Email': incoming['Email'] || current['Email'] || '',
+      'Phone': incoming['Phone'] || current['Phone'] || '',
+      'DOB': incoming['DOB'] || current['DOB'] || '',
+      'Street Address': incoming['Street Address'] || current['Street Address'] || '',
+      'City': incoming['City'] || current['City'] || '',
+      'State': incoming['State'] || current['State'] || '',
+      'Zip': incoming['Zip'] || current['Zip'] || ''
     };
     return writeCurrentJob(next);
   }
@@ -930,6 +962,11 @@
   }
 
   function requestForceSend(reason) {
+    if (!timeoutActionsEnabled()) {
+      log('Force send blocked: timeout actions are OFF');
+      return { requestedAt: '', reason: normalizeText(reason || 'header-timeout'), source: SCRIPT_NAME, blocked: true };
+    }
+
     const request = {
       requestedAt: nowIso(),
       reason: normalizeText(reason || 'header-timeout'),
@@ -1257,6 +1294,12 @@
   }
 
   function dispatchEvent(event) {
+    if (!timeoutActionsEnabled()) {
+      log('Timeout actions are OFF. Event skipped.');
+      setStatus(state.running ? 'Watching header' : 'Stopped');
+      return false;
+    }
+
     const context = buildEventContext();
     if (!context.ok) {
       log(context.reason);
@@ -1310,7 +1353,7 @@
   }
 
   function processHeaderTimeout() {
-    if (!state.timeoutEnabled) return;
+    if (!timeoutActionsEnabled()) return;
     const context = buildEventContext();
     if (!context.ok) {
       logWait(`timeout:${context.reason}`, context.reason);
@@ -1345,7 +1388,7 @@
 
   function cancelPendingTimeoutFlow(reason) {
     const pending = readPendingPost();
-    if (!pending || normalizeText(pending.source || '') !== 'timeout') return false;
+    if (!pending) return false;
     restorePendingRollback(pending);
     clearForceSendRequestIfOwned();
     writePendingPost(null);
@@ -1364,8 +1407,8 @@
       return;
     }
 
-    if (!state.timeoutEnabled && normalizeText(pending.source || '') === 'timeout') {
-      cancelPendingTimeoutFlow('Automatic timeout disabled. Pending timeout post canceled.');
+    if (!timeoutActionsEnabled()) {
+      cancelPendingTimeoutFlow('Timeout actions are OFF. Pending timeout-script post canceled.');
       return;
     }
 
@@ -1413,6 +1456,11 @@
   }
 
   function retryPendingPost() {
+    if (!timeoutActionsEnabled()) {
+      log('Retry blocked: timeout actions are OFF');
+      return;
+    }
+
     const pending = readPendingPost();
     if (!pending) {
       log('Retry skipped: no pending post');
@@ -1449,6 +1497,10 @@
   }
 
   function attemptCloseAfterSuccess() {
+    if (!timeoutActionsEnabled()) {
+      log('Close skipped: timeout actions are OFF');
+      return;
+    }
     log('Attempting to close tab after successful post');
     try { window.close(); } catch {}
     try { clearTimeout(state.closeCheckTimer); } catch {}
@@ -2089,12 +2141,12 @@
     };
 
     state.els.timeoutEnableToggle.onclick = () => {
-      const enabled = writeTimeoutEnabled(!state.timeoutEnabled);
+      const enabled = writeTimeoutEnabled(!timeoutActionsEnabled());
       if (!enabled) {
-        cancelPendingTimeoutFlow('Automatic timeout disabled. Timeout auto-post and auto-close are OFF.');
-        log('Automatic timeout posting disabled');
+        cancelPendingTimeoutFlow('Timeout actions turned OFF. Posting and close are blocked.');
+        log('Timeout actions OFF');
       } else {
-        log('Automatic timeout posting enabled');
+        log('Timeout actions ON');
         scheduleScan('timeout-enabled');
       }
       setStatus(state.running ? 'Watching header' : 'Stopped');

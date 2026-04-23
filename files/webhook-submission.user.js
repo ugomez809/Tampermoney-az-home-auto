@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.16
+// @version      1.17
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -343,7 +343,16 @@
       'Name': '',
       'Mailing Address': '',
       'SubmissionNumber': '',
-      'updatedAt': ''
+      'updatedAt': '',
+      'First Name': '',
+      'Last Name': '',
+      'Email': '',
+      'Phone': '',
+      'DOB': '',
+      'Street Address': '',
+      'City': '',
+      'State': '',
+      'Zip': ''
     };
 
     if (!isPlainObject(raw)) return out;
@@ -361,6 +370,15 @@
     out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
     out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
     out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.lastUpdatedAt || raw?.meta?.createdAt || '');
+    out['First Name'] = normalizeText(raw['First Name'] || raw.firstName || az['First Name'] || az['AZ Name'] || '');
+    out['Last Name'] = normalizeText(raw['Last Name'] || raw.lastName || az['Last Name'] || az['AZ Last'] || '');
+    out['Email'] = normalizeText(raw['Email'] || raw.email || az['Email'] || az['AZ Email'] || '');
+    out['Phone'] = normalizeText(raw['Phone'] || raw.phone || az['Phone'] || az['AZ Phone'] || '');
+    out['DOB'] = normalizeText(raw['DOB'] || raw.dob || az['DOB'] || az['AZ DOB'] || '');
+    out['Street Address'] = normalizeText(raw['Street Address'] || raw.streetAddress || az['Street Address'] || az['AZ Street Address'] || '');
+    out['City'] = normalizeText(raw['City'] || raw.city || az['City'] || az['AZ City'] || '');
+    out['State'] = normalizeText(raw['State'] || raw.state || az['State'] || az['AZ State'] || '');
+    out['Zip'] = normalizeText(raw['Zip'] || raw.zip || raw.zipCode || az['Zip'] || az['AZ Postal Code'] || '');
     return out;
   }
 

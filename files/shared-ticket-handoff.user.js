@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.8
+// @version      1.9
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -154,6 +154,15 @@
       ticketId,
       name,
       mailingAddress,
+      firstName: clean(payload.az?.['First Name'] || payload.az?.['AZ Name'] || ''),
+      lastName: clean(payload.az?.['Last Name'] || payload.az?.['AZ Last'] || ''),
+      email: clean(payload.az?.['Email'] || payload.az?.['AZ Email'] || ''),
+      phone: clean(payload.az?.['Phone'] || payload.az?.['AZ Phone'] || ''),
+      dob: clean(payload.az?.['DOB'] || payload.az?.['AZ DOB'] || ''),
+      streetAddress: clean(payload.az?.['Street Address'] || payload.az?.['AZ Street Address'] || ''),
+      city: clean(payload.az?.['City'] || payload.az?.['AZ City'] || ''),
+      state: clean(payload.az?.['State'] || payload.az?.['AZ State'] || ''),
+      zip: clean(payload.az?.['Zip'] || payload.az?.['AZ Postal Code'] || ''),
       savedAt,
       source: {
         origin: location.origin,
@@ -281,7 +290,16 @@
       'Name': gwName,
       'Mailing Address': gwAddress,
       'SubmissionNumber': submissionNumber,
-      'updatedAt': new Date().toISOString()
+      'updatedAt': new Date().toISOString(),
+      'First Name': clean(currentJob['First Name'] || handoff.firstName || ''),
+      'Last Name': clean(currentJob['Last Name'] || handoff.lastName || ''),
+      'Email': clean(currentJob['Email'] || handoff.email || ''),
+      'Phone': clean(currentJob['Phone'] || handoff.phone || ''),
+      'DOB': clean(currentJob['DOB'] || handoff.dob || ''),
+      'Street Address': clean(currentJob['Street Address'] || handoff.streetAddress || ''),
+      'City': clean(currentJob['City'] || handoff.city || ''),
+      'State': clean(currentJob['State'] || handoff.state || ''),
+      'Zip': clean(currentJob['Zip'] || handoff.zip || '')
     };
 
     localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(nextJob, null, 2));
@@ -537,10 +555,10 @@
   }
 
   function buildAzMailingAddress(az) {
-    const street = clean(az['AZ Street Address'] || az.address || '');
-    const city = clean(az['AZ City'] || az.city || '');
-    const stateValue = clean(az['AZ State'] || az.state || '');
-    const zip = clean(az['AZ Postal Code'] || az.zip || az.zipCode || '');
+    const street = clean(az['Street Address'] || az['AZ Street Address'] || az.address || '');
+    const city = clean(az['City'] || az['AZ City'] || az.city || '');
+    const stateValue = clean(az['State'] || az['AZ State'] || az.state || '');
+    const zip = clean(az['Zip'] || az['AZ Postal Code'] || az.zip || az.zipCode || '');
 
     if (street && city && stateValue && zip) return `${street}, ${city}, ${stateValue} ${zip}`;
     if (street && city && stateValue) return `${street}, ${city}, ${stateValue}`;
@@ -660,7 +678,16 @@
       'Name': '',
       'Mailing Address': '',
       'SubmissionNumber': '',
-      'updatedAt': ''
+      'updatedAt': '',
+      'First Name': '',
+      'Last Name': '',
+      'Email': '',
+      'Phone': '',
+      'DOB': '',
+      'Street Address': '',
+      'City': '',
+      'State': '',
+      'Zip': ''
     };
 
     if (!job || typeof job !== 'object' || Array.isArray(job)) return out;
@@ -670,6 +697,15 @@
     out['Mailing Address'] = clean(job['Mailing Address'] || job.mailingAddress || '');
     out['SubmissionNumber'] = clean(job['SubmissionNumber'] || job.submissionNumber || '');
     out['updatedAt'] = clean(job['updatedAt'] || '');
+    out['First Name'] = clean(job['First Name'] || job.firstName || '');
+    out['Last Name'] = clean(job['Last Name'] || job.lastName || '');
+    out['Email'] = clean(job['Email'] || job.email || '');
+    out['Phone'] = clean(job['Phone'] || job.phone || '');
+    out['DOB'] = clean(job['DOB'] || job.dob || '');
+    out['Street Address'] = clean(job['Street Address'] || job.streetAddress || '');
+    out['City'] = clean(job['City'] || job.city || '');
+    out['State'] = clean(job['State'] || job.state || '');
+    out['Zip'] = clean(job['Zip'] || job.zip || job.zipCode || '');
     return out;
   }
 
@@ -679,7 +715,16 @@
       'Name': clean(handoff?.name || ''),
       'Mailing Address': clean(handoff?.mailingAddress || ''),
       'SubmissionNumber': '',
-      'updatedAt': new Date().toISOString()
+      'updatedAt': new Date().toISOString(),
+      'First Name': clean(handoff?.firstName || ''),
+      'Last Name': clean(handoff?.lastName || ''),
+      'Email': clean(handoff?.email || ''),
+      'Phone': clean(handoff?.phone || ''),
+      'DOB': clean(handoff?.dob || ''),
+      'Street Address': clean(handoff?.streetAddress || ''),
+      'City': clean(handoff?.city || ''),
+      'State': clean(handoff?.state || ''),
+      'Zip': clean(handoff?.zip || '')
     });
   }
 

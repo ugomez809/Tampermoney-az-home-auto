@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.3
-// @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Saves ON/OFF + Auto/Home across reloads. Uses visible AZ dock side-actions as the open signal, forces Main first, requires all 13 AZ fields before continuing, then clicks Quotes exactly, clicks Auto/Home, pauses in background, resumes after 3s in front, and only moves on when Bot Quoted appears on that same ticket. FIX: also mirrors tm_az_current_job_v1 + tm_pc_current_job_v1 into localStorage.
+// @version      2.4
+// @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Saves ON/OFF + Auto/Home across reloads. Uses visible AZ dock side-actions as the open signal, forces Main first, requires all AZ payload fields before continuing, then clicks Quotes exactly, clicks Auto/Home, pauses in background, resumes after 3s in front, and only moves on when Bot Quoted appears on that same ticket. FIX: also mirrors tm_az_current_job_v1 + tm_pc_current_job_v1 into localStorage.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -96,7 +96,16 @@
     'AZ City',
     'AZ Country',
     'AZ State',
-    'AZ Postal Code'
+    'AZ Postal Code',
+    'First Name',
+    'Last Name',
+    'Email',
+    'Phone',
+    'DOB',
+    'Street Address',
+    'City',
+    'State',
+    'Zip'
   ];
 
   const state = {
@@ -124,7 +133,7 @@
 
     log(`${SCRIPT_NAME} V${VERSION} loaded`, 'ok');
     log('Pick Auto or Home, then click Start', 'info');
-    log('Main must return 13/13 AZ fields before Quotes', 'info');
+    log(`Main must return ${FIELD_ORDER.length}/${FIELD_ORDER.length} AZ fields before Quotes`, 'info');
     log('Ticket is only done when Bot Quoted appears', 'info');
     log('ESC stops the run', 'info');
 
@@ -1066,7 +1075,16 @@
       'AZ City': firstNonEmpty(cr.city, readVal('#customerreferral-city')),
       'AZ Country': firstNonEmpty(cr.country, readVal('#customerreferral-country')),
       'AZ State': firstNonEmpty(cr.state, readVal('#state')),
-      'AZ Postal Code': firstNonEmpty(cr.zip, readVal('#customerreferral-zip'))
+      'AZ Postal Code': firstNonEmpty(cr.zip, readVal('#customerreferral-zip')),
+      'First Name': firstNonEmpty(cr.firstname, readVal('#customerreferral-firstname')),
+      'Last Name': firstNonEmpty(cr.lastname, readVal('#customerreferral-lastname')),
+      'Email': firstNonEmpty(cr.email, readVal('#customerreferral-email')),
+      'Phone': firstNonEmpty(cr.phone, readVal('#customerreferral-phone')),
+      'DOB': firstNonEmpty(cr.birthday, readVal('input[name="CustomerReferral[birthday]"]')),
+      'Street Address': firstNonEmpty(cr.address1, readVal('#customerreferral-address1')),
+      'City': firstNonEmpty(cr.city, readVal('#customerreferral-city')),
+      'State': firstNonEmpty(cr.state, readVal('#state')),
+      'Zip': firstNonEmpty(cr.zip, readVal('#customerreferral-zip'))
     };
 
     let filledCount = 0;
@@ -1111,11 +1129,11 @@
 
       if (snapshot.filledCount !== lastCount) {
         lastCount = snapshot.filledCount;
-        log(`Main payload count: ${snapshot.filledCount}/13`, snapshot.filledCount === 13 ? 'ok' : 'warn');
+        log(`Main payload count: ${snapshot.filledCount}/${FIELD_ORDER.length}`, snapshot.filledCount === FIELD_ORDER.length ? 'ok' : 'warn');
       }
 
       if (activeEnough && snapshot.filledCount === FIELD_ORDER.length) {
-        log('Main payload ready 13/13', 'ok');
+        log(`Main payload ready ${FIELD_ORDER.length}/${FIELD_ORDER.length}`, 'ok');
         return {
           filledCount: snapshot.filledCount,
           payload: {
@@ -1191,7 +1209,16 @@
         norm(payload.az?.['AZ State']) && norm(payload.az?.['AZ Postal Code']) ? `${norm(payload.az?.['AZ State'])} ${norm(payload.az?.['AZ Postal Code'])}` : '',
       ].filter(Boolean).join(', ').replace('undefined', '').trim(),
       'SubmissionNumber': '',
-      'updatedAt': payload.meta.savedAt
+      'updatedAt': payload.meta.savedAt,
+      'First Name': firstNonEmpty(payload.az?.['First Name'], payload.az?.['AZ Name']),
+      'Last Name': firstNonEmpty(payload.az?.['Last Name'], payload.az?.['AZ Last']),
+      'Email': firstNonEmpty(payload.az?.['Email'], payload.az?.['AZ Email']),
+      'Phone': firstNonEmpty(payload.az?.['Phone'], payload.az?.['AZ Phone']),
+      'DOB': firstNonEmpty(payload.az?.['DOB'], payload.az?.['AZ DOB']),
+      'Street Address': firstNonEmpty(payload.az?.['Street Address'], payload.az?.['AZ Street Address']),
+      'City': firstNonEmpty(payload.az?.['City'], payload.az?.['AZ City']),
+      'State': firstNonEmpty(payload.az?.['State'], payload.az?.['AZ State']),
+      'Zip': firstNonEmpty(payload.az?.['Zip'], payload.az?.['AZ Postal Code'])
     };
 
     if (!currentJob['Mailing Address']) {
