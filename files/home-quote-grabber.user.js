@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.4
-// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits before requote, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      3.5
+// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits before requote, retries in-tab after failures, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.4';
+  const VERSION = '3.5';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -463,6 +463,9 @@
         .catch((err) => {
           log(`Full flow failed: ${err?.message || err}`);
           setStatus('Failed');
+          state.flowStartedThisLoad = false;
+          state.coverageTriggerSince = 0;
+          log('Full flow unlocked for same-tab retry');
         })
         .finally(() => {
           state.busy = false;
@@ -472,7 +475,7 @@
     state.coverageTriggerSince = 0;
 
     if (state.flowStartedThisLoad) {
-      announceSkipReason('flowStartedThisLoad=true (reload tab to retry after failure)');
+      announceSkipReason('flowStartedThisLoad=true (run in progress)');
       return;
     }
 
@@ -531,6 +534,9 @@
       .catch((err) => {
         log(`Legacy grab failed: ${err?.message || err}`);
         setStatus('Failed');
+        state.flowStartedThisLoad = false;
+        state.triggerSince = 0;
+        log('Legacy grab unlocked for same-tab retry');
       })
       .finally(() => {
         state.busy = false;

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.8
-// @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, then Quote.
+// @version      3.9
+// @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.8';
+  const VERSION = '3.9';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';
@@ -814,6 +814,14 @@
     await quoteFlow();
   }
 
+  function finishDwellingSuccess(message = 'Dwelling step complete') {
+    writeFlowStage('home', 'coverages');
+    state.done = true;
+    writeActivityState('done', 'Dwelling complete');
+    setStatus('Done');
+    log(message);
+  }
+
   async function tick() {
     if (!state.running || state.busy || state.done) return;
     if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeSettleMs) {
@@ -841,11 +849,7 @@
       if (fieldsReady()) {
         setStatus('Filling Dwelling');
         await fillDwellingFlow();
-        writeFlowStage('home', 'coverages');
-        state.done = true;
-        writeActivityState('done', 'Dwelling complete');
-        setStatus('Done');
-        log('Dwelling step complete');
+        finishDwellingSuccess('Dwelling step complete');
         return;
       }
 
@@ -871,11 +875,7 @@
             if (fieldsReady()) {
               setStatus('Filling Dwelling');
               await fillDwellingFlow();
-              writeFlowStage('home', 'coverages');
-              state.done = true;
-              writeActivityState('done', 'Dwelling complete');
-              setStatus('Done');
-              log('Dwelling step complete');
+              finishDwellingSuccess('Dwelling step complete');
               return;
             }
             await sleep(300);
@@ -892,12 +892,12 @@
       log('Create Valuation missing. Going straight to fill');
       setStatus('Filling Dwelling');
       await fillDwellingFlow();
-      writeFlowStage('home', 'coverages');
-      state.done = true;
-      writeActivityState('done', 'Dwelling complete');
-      setStatus('Done');
-      log('Dwelling step complete');
+      finishDwellingSuccess('Dwelling step complete');
     } catch (err) {
+      if (!headerStillDwelling()) {
+        finishDwellingSuccess(`Dwelling header already moved; treating as success after: ${err.message}`);
+        return;
+      }
       setStatus('Failed');
       log(`Failed: ${err.message}`);
       state.done = true;
