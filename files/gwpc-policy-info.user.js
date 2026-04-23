@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Guidewire Policy Info V1.9
-// @namespace    home.bot.guidewire.policy.info
+// @name         Home Bot: Guidewire Policy Info
+// @namespace    homebot.gwpc-policy-info
 // @version      1.9
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Policy%20Info%20V1.9.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Policy%20Info%20V1.9.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js
 // ==/UserScript==
 
 (function () {

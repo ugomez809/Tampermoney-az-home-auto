@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Guidewire Header Timeout V1.11
-// @namespace    home.bot.guidewire.header.timeout
+// @name         Home Bot: Guidewire Header Timeout
+// @namespace    homebot.gwpc-header-timeout
 // @version      1.22
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
@@ -9,8 +9,8 @@
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-start
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Header%20Timeout%20V1.11.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Header%20Timeout%20V1.11.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout V1.11';
+  const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
   const VERSION = '1.22';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';

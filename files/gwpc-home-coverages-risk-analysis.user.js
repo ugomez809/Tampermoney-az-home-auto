@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         04 GWPC Home Coverages Quote + Risk Analysis V1.0.9
-// @namespace    home.bot.gwpc.home.coverages.quote.risk.analysis
+// @name         04 GWPC Home Coverages Quote + Risk Analysis
+// @namespace    homebot.gwpc-home-coverages-risk-analysis
 // @version      1.0.9
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,14 +9,14 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/04%20GWPC%20Home%20Coverages%20Quote%20%2B%20Risk%20Analysis%20V1.0.9.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/04%20GWPC%20Home%20Coverages%20Quote%20%2B%20Risk%20Analysis%20V1.0.9.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis V1.0.9';
+  const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
   const VERSION = '1.0.9';
 
   const CFG = {

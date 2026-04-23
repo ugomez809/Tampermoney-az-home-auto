@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Home Bot: APEX Duplicates Continue V1.8
-// @namespace    homebot.apex.duplicates.continue
+// @name         Home Bot: APEX Duplicates Continue
+// @namespace    homebot.apex-duplicates-continue
 // @version      1.8
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Duplicates%20Continue%20V1.8.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Duplicates%20Continue%20V1.8.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
 // ==/UserScript==
 
 (function () {
@@ -16,7 +16,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: APEX Duplicates Continue V1.8';
+  const SCRIPT_NAME = 'Home Bot: APEX Duplicates Continue';
   const VERSION = '1.8';
 
   const KEYS = {

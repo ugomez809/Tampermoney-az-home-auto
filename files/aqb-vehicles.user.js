@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
-// @namespace    tm.pc.aqb.2.autodataprefill.vehicles
+// @namespace    homebot.aqb-vehicles
 // @version      1.4
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, then set Primary Driver to first non-<none>. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/2%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Vehicles%20Only%20%28listens%20to%20drivers%20flag%29.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/2%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Vehicles%20Only%20%28listens%20to%20drivers%20flag%29.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js
 // ==/UserScript==
 
 (function () {

@@ -1,13 +1,13 @@
 // ==UserScript==
-// @name         Home Bot: APEX Inactivity Reload Failsafe V1.1
-// @namespace    homebot.apex.inactivity.reload.failsafe
+// @name         Home Bot: APEX Inactivity Reload Failsafe
+// @namespace    homebot.apex-inactivity-reload
 // @version      1.1
 // @description  Lightweight APEX failsafe. If the page shows no real activity for 60s, reloads the page. Uses a safe watcher that avoids freezing Lightning.
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Inactivity%20Reload%20Failsafe%20V1.1.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Inactivity%20Reload%20Failsafe%20V1.1.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-inactivity-reload.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-inactivity-reload.user.js
 // ==/UserScript==
 
 (function () {
@@ -17,7 +17,7 @@
 
   try { window.__HB_APEX_IDLE_FAILSAFE_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: APEX Inactivity Reload Failsafe V1.1';
+  const SCRIPT_NAME = 'Home Bot: APEX Inactivity Reload Failsafe';
   const VERSION = '1.1';
 
   const CFG = {

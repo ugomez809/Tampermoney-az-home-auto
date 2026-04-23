@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Home Bot: APEX Continue New Quote V1.8
-// @namespace    homebot.apex.continue.new.quote
+// @name         Home Bot: APEX Continue New Quote
+// @namespace    homebot.apex-continue-new-quote
 // @version      1.8
 // @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Continue%20New%20Quote%20V1.8.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Continue%20New%20Quote%20V1.8.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
 // ==/UserScript==
 
 (function () {
@@ -16,7 +16,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: APEX Continue New Quote V1.8';
+  const SCRIPT_NAME = 'Home Bot: APEX Continue New Quote';
   const VERSION = '1.8';
 
   const CFG = {

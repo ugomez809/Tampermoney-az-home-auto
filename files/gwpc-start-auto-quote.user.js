@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         01 GWPC Start Auto Quote V1.6
-// @namespace    home.bot.gwpc.start.auto.quote
+// @name         01 GWPC Start Auto Quote
+// @namespace    homebot.gwpc-start-auto-quote
 // @version      1.7
 // @description  Waits for Current Activities, reloads once, waits 2 seconds after Current Activities is visible again, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,14 +9,14 @@
 // @run-at       document-start
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/01%20GWPC%20Start%20Auto%20Quote%20V1.6.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/01%20GWPC%20Start%20Auto%20Quote%20V1.6.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const SCRIPT_NAME = '01 GWPC Start Auto Quote V1.6';
+  const SCRIPT_NAME = '01 GWPC Start Auto Quote';
   const VERSION = '1.7';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 

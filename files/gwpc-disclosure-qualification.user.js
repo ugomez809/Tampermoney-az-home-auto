@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Guidewire Disclosure Qualification V1.9
-// @namespace    home.bot.guidewire.disclosure.qualification
+// @name         Home Bot: Guidewire Disclosure Qualification
+// @namespace    homebot.gwpc-disclosure-qualification
 // @version      1.9
 // @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Disclosure%20Qualification%20V1.9.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Guidewire%20Disclosure%20Qualification%20V1.9.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-disclosure-qualification.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-disclosure-qualification.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
 
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: Guidewire Disclosure Qualification V1.9';
+  const SCRIPT_NAME = 'Home Bot: Guidewire Disclosure Qualification';
 
   const REQUIRED_LABELS = ['Submission (Draft)'];
   const PERSONAL_AUTO_LABEL = 'Personal Auto';

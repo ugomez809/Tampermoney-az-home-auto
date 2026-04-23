@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Auto Quote Grabber V2.2
-// @namespace    home.bot.auto.quote.grabber
+// @name         Home Bot: Auto Quote Grabber
+// @namespace    homebot.auto-quote-grabber
 // @version      2.6
 // @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Auto%20Quote%20Grabber%20V2.2.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Auto%20Quote%20Grabber%20V2.2.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/auto-quote-grabber.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/auto-quote-grabber.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber V2.2';
+  const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber';
   const VERSION = '2.6';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 

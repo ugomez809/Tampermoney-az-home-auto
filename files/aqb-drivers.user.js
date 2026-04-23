@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
-// @namespace    tm.pc.aqb.1.autodataprefill.drivers
+// @namespace    homebot.aqb-drivers
 // @version      1.7
 // @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/1%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Drivers%20Only%20%28Go-Ahead%20Flag%29.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/1%29%20AQB%20-%20Auto%20Data%20Prefill%20%E2%86%92%20Drivers%20Only%20%28Go-Ahead%20Flag%29.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js
 // ==/UserScript==
 
 (function () {

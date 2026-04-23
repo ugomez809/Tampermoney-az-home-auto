@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
-// @namespace    az.to.gwpc.webhook.submission
+// @name         AZ TO GWPC Home Bot: Webhook Submission
+// @namespace    homebot.webhook-submission
 // @version      1.13
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
@@ -11,8 +11,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      *
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Webhook%20Submission%20V1.9.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Home%20Bot_%20Webhook%20Submission%20V1.9.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
 // ==/UserScript==
 
 (function () {

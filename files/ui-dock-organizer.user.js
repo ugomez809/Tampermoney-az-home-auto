@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: UI Dock Organizer V1.3
-// @namespace    home.bot.ui.dock.organizer
+// @name         Home Bot: UI Dock Organizer
+// @namespace    homebot.ui-dock-organizer
 // @version      1.3
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes the organizer's own panel in the dock.
 // @author       OpenAI
@@ -11,8 +11,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20UI%20Dock%20Organizer%20V1.3.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20UI%20Dock%20Organizer%20V1.3.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
 // ==/UserScript==
 
 (function () {
@@ -22,7 +22,7 @@
 
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: UI Dock Organizer V1.3';
+  const SCRIPT_NAME = 'Home Bot: UI Dock Organizer';
   const VERSION = '1.3';
 
   const CFG = {

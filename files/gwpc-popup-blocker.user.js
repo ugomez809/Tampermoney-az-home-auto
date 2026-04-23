@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         GWPC Popup Blocker V1.0
-// @namespace    home.bot.gwpc.popup.blocker
+// @name         GWPC Popup Blocker
+// @namespace    homebot.gwpc-popup-blocker
 // @version      1.1
 // @description  Blocks GWPC alert/confirm/prompt and beforeunload leave-reload prompts across all 3 PolicyCenter hosts.
 // @match        https://policycenter.farmersinsurance.com/*
@@ -9,14 +9,14 @@
 // @run-at       document-start
 // @all-frames   true
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/GWPC%20Popup%20Blocker%20V1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/GWPC%20Popup%20Blocker%20V1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-popup-blocker.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-popup-blocker.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const SCRIPT_NAME = 'GWPC Popup Blocker V1.0';
+  const SCRIPT_NAME = 'GWPC Popup Blocker';
   const PATCH_FLAG = '__HB_GWPC_POPUP_BLOCKER_PATCHED__';
   const LOOP_MS = 250;
 

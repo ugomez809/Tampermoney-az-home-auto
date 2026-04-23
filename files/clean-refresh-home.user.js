@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Clean All → Refresh → Home V1.3
-// @namespace    homebot.clean.refresh.home
+// @name         Home Bot: Clean All → Refresh → Home
+// @namespace    homebot.clean-refresh-home
 // @version      1.3
 // @description  APEX Account page in front 2s -> open 1 GWPC cleaner tab in front -> wait 3s there -> GWPC clears keys and closes -> APEX clears keys -> refresh -> click Home. No UI.
 // @match        https://farmersagent.lightning.force.com/*
@@ -8,8 +8,8 @@
 // @run-at       document-start
 // @noframes
 // @grant        GM_openInTab
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Clean%20All%20%E2%86%92%20Refresh%20%E2%86%92%20Home%20V1.3.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Clean%20All%20%E2%86%92%20Refresh%20%E2%86%92%20Home%20V1.3.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/clean-refresh-home.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/clean-refresh-home.user.js
 // ==/UserScript==
 
 (function () {

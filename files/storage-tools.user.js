@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4
-// @namespace    homebot.az.apex.gwpc.storage.tools
+// @name         AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close)
+// @namespace    homebot.storage-tools
 // @version      1.4.0
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
 // @match        https://app.agencyzoom.com/*
@@ -13,8 +13,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20%2B%20APEX%20%2B%20GWPC%20Storage%20Tools%20%28Export%20Payloads%20%2B%20Clear%20%2B%20Close%29%20V1.4.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20%2B%20APEX%20%2B%20GWPC%20Storage%20Tools%20%28Export%20Payloads%20%2B%20Clear%20%2B%20Close%29%20V1.4.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
 // ==/UserScript==
 
 (function () {

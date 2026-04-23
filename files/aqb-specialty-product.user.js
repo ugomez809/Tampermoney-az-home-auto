@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         03 AQB - Specialty Product → Remove if needed, then Quote
-// @namespace    tm.pc.aqb.03.specialty.quote
+// @namespace    homebot.aqb-specialty-product
 // @version      1.6
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. After Quote click: if header "Auto Data Prefill" still visible after 3s, click Quote again (up to 3 total). Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/03%20AQB%20-%20Specialty%20Product%20%E2%86%92%20Remove%20if%20needed%2C%20then%20Quote.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/03%20AQB%20-%20Specialty%20Product%20%E2%86%92%20Remove%20if%20needed%2C%20then%20Quote.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
 // ==/UserScript==
 
 (function () {

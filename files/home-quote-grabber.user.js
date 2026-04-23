@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Home Quote Grabber V1.8
-// @namespace    home.bot.home.quote.grabber
+// @name         Home Bot: Home Quote Grabber
+// @namespace    homebot.home-quote-grabber
 // @version      1.9
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
@@ -9,8 +9,8 @@
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Home%20Quote%20Grabber%20V1.8.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Home%20Quote%20Grabber%20V1.8.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: Home Quote Grabber V1.8';
+  const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
   const VERSION = '1.9';
 
   const KEYS = {

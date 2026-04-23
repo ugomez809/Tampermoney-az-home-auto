@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber V2.3
-// @namespace    home.bot.az.stage.runner.payload
+// @name         AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber
+// @namespace    homebot.az-stage-runner
 // @version      2.3
 // @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Saves ON/OFF + Auto/Home across reloads. Uses visible AZ dock side-actions as the open signal, forces Main first, requires all 13 AZ fields before continuing, then clicks Quotes exactly, clicks Auto/Home, pauses in background, resumes after 3s in front, and only moves on when Bot Quoted appears on that same ticket. FIX: also mirrors tm_az_current_job_v1 + tm_pc_current_job_v1 into localStorage.
 // @match        https://app.agencyzoom.com/*
@@ -8,8 +8,8 @@
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%2001%20AZ%20Stage%20Runner%20%2B%20AZ%20Payload%20Grabber%20V2.3.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%2001%20AZ%20Stage%20Runner%20%2B%20AZ%20Payload%20Grabber%20V2.3.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
 // ==/UserScript==
 
 (function () {

@@ -17,7 +17,7 @@ webhook (Pabbly) for downstream processing.
 
 ```
 ┌─────────────────────────┐
-│ AZ Stage Runner V2.3    │  picks tickets, validates 13 fields
+│ AZ Stage Runner         │  picks tickets, validates 13 fields
 └──────────┬──────────────┘
            │ writes: tm_shared_az_job_v1,
            │         tm_az_current_job_v1,
@@ -30,7 +30,7 @@ webhook (Pabbly) for downstream processing.
 ┌─────────────────────────────────────────────────────────────────┐
 │ GWPC submission flow                                             │
 │                                                                  │
-│  01 Start Auto Quote  →  Policy Info  →  Disclosure             │
+│  Start Auto Quote  →  Policy Info  →  Disclosure                │
 │    →  AQB Drivers  →  AQB Vehicles  →  AQB Specialty            │
 │    →  Dwelling Water Rule  →  Home Coverages + Risk Analysis    │
 │    →  Home Quote Grabber + Auto Quote Grabber                   │
@@ -41,7 +41,7 @@ webhook (Pabbly) for downstream processing.
            │   tm_pc_webhook_bundle_v1
            ▼
 ┌─────────────────────────┐
-│ Webhook Submission V1.9 │  POSTs one consolidated bundle to Pabbly
+│ Webhook Submission      │  POSTs one consolidated bundle to Pabbly
 └─────────────────────────┘
 ```
 
@@ -49,47 +49,47 @@ webhook (Pabbly) for downstream processing.
 
 ### AgencyZoom
 
-| Script | Purpose |
+| File | Purpose |
 |---|---|
-| **AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber V2.3** | Opens pipeline tickets one-by-one. Validates 13 AZ fields. Clicks Auto or Home link. Waits for "Bot Quoted" tag before advancing. Writes shared job state. |
-| **AZ TO GWPC Shared Ticket Handoff V1.0** | Captures Ticket ID + Name + Mailing Address on AZ side; on GWPC side, matches by name + address and writes `tm_pc_current_job_v1`. |
+| `az-stage-runner.user.js` | Opens pipeline tickets one-by-one. Validates 13 AZ fields. Clicks Auto or Home link. Waits for "Bot Quoted" tag before advancing. Writes shared job state. |
+| `shared-ticket-handoff.user.js` | Captures Ticket ID + Name + Mailing Address on AZ side; on GWPC side, matches by name + address and writes `tm_pc_current_job_v1`. |
 
 ### Salesforce Lightning (APEX)
 
-| Script | Purpose |
+| File | Purpose |
 |---|---|
-| **Home Bot: APEX Quote New Account V3.9** | **Dormant.** Reads `tm_apex_home_bot_payload_v1` (not currently populated by any script in this repo). Kept installed for when webhook-seeded APEX form-fill is wired up. |
-| **Home Bot: APEX Duplicates Continue V1.8** | Handles the Duplicates Found modal: selects first match, waits for Continue to enable, clicks it. |
-| **Home Bot: APEX Continue New Quote V1.8** | Handles the Personal Lines Quote modal: clicks Home, picks Residence Address, clicks Continue New Quote once. |
-| **Home Bot: APEX Inactivity Reload Failsafe V1.1** | Reloads the page if no real activity for 60s. |
+| `apex-quote-new-account.user.js` | **Dormant.** Reads `tm_apex_home_bot_payload_v1` (not currently populated by any script in this repo). Kept installed for when webhook-seeded APEX form-fill is wired up. |
+| `apex-duplicates-continue.user.js` | Handles the Duplicates Found modal: selects first match, waits for Continue to enable, clicks it. |
+| `apex-continue-new-quote.user.js` | Handles the Personal Lines Quote modal: clicks Home, picks Residence Address, clicks Continue New Quote once. |
+| `apex-inactivity-reload.user.js` | Reloads the page if no real activity for 60s. |
 
 ### Guidewire PolicyCenter
 
-| Script | Purpose |
+| File | Purpose |
 |---|---|
-| **01 GWPC Start Auto Quote V1.6** | Waits for Current Activities, reloads once, clicks Start New Submission, picks Personal Auto. |
-| **Home Bot: Guidewire Policy Info V1.9** | Policy Info tab. Branches on Personal Auto presence. Handles Non-Binary/Flex gender error by switching to Male. DT2 Next retry. |
-| **Home Bot: Guidewire Disclosure Qualification V1.9** | Clicks Yes on all disclosure questions, including extra Personal Auto Yes radios. DT2 Next retry. Hard-stops if already quoted. |
-| **1) AQB - Auto Data Prefill → Drivers Only** | Driver info: dropdowns, Gender, DOB (26–50), Age Lic (16–22). Sets `aqb_step_drivers_done=1`. |
-| **2) AQB - Auto Data Prefill → Vehicles Only** | Waits for `drivers_done`. Removes incomplete vehicle rows. Sets Primary Driver. Sets `aqb_step_vehicles_done=1` + `aqb_step_specialty_start=1`. |
-| **03 AQB - Specialty Product → Remove if needed, then Quote** | Waits for `specialty_start`. Removes specialty rows if present. Clicks Quote with up to 3 retries. Sets `aqb_step_specialty_done=1`. |
-| **Home Bot: Dwelling Water Rule V3.0** | Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure. |
-| **04 GWPC Home Coverages Quote + Risk Analysis V1.0.9** | Edit All → apply coverage changes → Quote → Risk Analysis. |
-| **Home Bot: Home Quote Grabber V1.8** | After Submission (Quoted), scrapes home quote fields from Dwelling/Coverages/Quote and saves `tm_pc_home_quote_grab_payload_v1`. |
-| **Home Bot: Guidewire Header Timeout V1.11** | Watches Guidewire header/product state, posts timeout or no-vehicle results to the configured Google Apps Script endpoints, then closes the tab. |
-| **GWPC Popup Blocker V1.0** | Utility support script that suppresses alert/confirm/prompt and beforeunload blockers across all 3 PolicyCenter hosts. |
-| **Home Bot: Auto Quote Grabber V2.2** | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves shared AUTO payload and bundle data only. |
-| **AZ TO GWPC Home Bot: Webhook Submission V1.9** | Waits for handoff + payloads, POSTs one consolidated bundle to the configured webhook URL (Pabbly). Blocks infinite retry loops. |
-| **Home Bot: GWPC Discard Unsaved Change Clicker V1.0** | Auto-dismisses the "Discard Unsaved Change" dialog whenever it appears. |
+| `gwpc-start-auto-quote.user.js` | Waits for Current Activities, reloads once, clicks Start New Submission, picks Personal Auto. |
+| `gwpc-policy-info.user.js` | Policy Info tab. Branches on Personal Auto presence. Handles Non-Binary/Flex gender error by switching to Male. DT2 Next retry. |
+| `gwpc-disclosure-qualification.user.js` | Clicks Yes on all disclosure questions, including extra Personal Auto Yes radios. DT2 Next retry. Hard-stops if already quoted. |
+| `aqb-drivers.user.js` | Driver info: dropdowns, Gender, DOB (26–50), Age Lic (16–22). Sets `aqb_step_drivers_done=1`. |
+| `aqb-vehicles.user.js` | Waits for `drivers_done`. Removes incomplete vehicle rows. Sets Primary Driver. Sets `aqb_step_vehicles_done=1` + `aqb_step_specialty_start=1`. |
+| `aqb-specialty-product.user.js` | Waits for `specialty_start`. Removes specialty rows if present. Clicks Quote with up to 3 retries. Sets `aqb_step_specialty_done=1`. |
+| `dwelling-water-rule.user.js` | Dwelling step. Optional Create Valuation + Plumbing Replaced. Year Built water-device rule. Fixes Garage Type after first Quote failure. |
+| `gwpc-home-coverages-risk-analysis.user.js` | Edit All → apply coverage changes → Quote → Risk Analysis. |
+| `home-quote-grabber.user.js` | After Submission (Quoted), scrapes home quote fields from Dwelling/Coverages/Quote and saves `tm_pc_home_quote_grab_payload_v1`. |
+| `gwpc-header-timeout.user.js` | Watches Guidewire header/product state, posts timeout or no-vehicle results to the configured endpoints, then closes the tab. |
+| `gwpc-popup-blocker.user.js` | Utility support script that suppresses alert/confirm/prompt and beforeunload blockers across all 3 PolicyCenter hosts. |
+| `auto-quote-grabber.user.js` | After Submission (Quoted), navigates Policy Info → Drivers → Vehicles → PA Coverages → Quote, scrapes auto quote fields, saves shared AUTO payload and bundle data only. |
+| `webhook-submission.user.js` | Waits for handoff + payloads, POSTs one consolidated bundle to the configured webhook URL (Pabbly). Blocks infinite retry loops. |
+| `gwpc-discard-unsaved-change.user.js` | Auto-dismisses the "Discard Unsaved Change" dialog whenever it appears. |
 
 ### Cross-origin utilities
 
-| Script | Purpose |
+| File | Purpose |
 |---|---|
-| **AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4** | Floating panel per origin: exports tracked storage to TXT, clears tracked keys, closes the tab. |
-| **Home Bot: Global Clear Launcher V1.0** | One-click fan-out: opens AZ + APEX + GWPC tabs, each clears its own storage. |
-| **Home Bot: Clean All → Refresh → Home V1.3** | APEX → GWPC refresh cycle: opens cleaner tab, waits, clears keys, closes. |
-| **Home Bot: UI Dock Organizer V1.3** | Organizes floating UIs inside the viewport so they don't overlap. |
+| `storage-tools.user.js` | Floating panel per origin: exports tracked storage to TXT, clears tracked keys, closes the tab. |
+| `global-clear-launcher.user.js` | One-click fan-out: opens AZ + APEX + GWPC tabs, each clears its own storage. |
+| `clean-refresh-home.user.js` | APEX → GWPC refresh cycle: opens cleaner tab, waits, clears keys, closes. |
+| `ui-dock-organizer.user.js` | Organizes floating UIs inside the viewport so they don't overlap. |
 
 ## Storage key conventions
 
@@ -104,13 +104,14 @@ webhook (Pabbly) for downstream processing.
 
 ## Development
 
-- All scripts live in `files/*.user.js`.
+- All scripts live in `files/*.user.js`. **Filenames are stable IDs — do not rename.**
+  Version numbers live only in the `@version` header.
 - **PII dumps (`*.storage.json`, `*.options.json`) are gitignored** — Tampermonkey
   export files contain real customer data and must never be committed. See
   `.gitignore`.
 - **Data source is a webhook (Pabbly intake, in development).** APEX Quote New
-  Account V3.9 is kept dormant so the form-fill slot is ready when the
-  webhook-to-APEX adapter is built.
+  Account is kept dormant so the form-fill slot is ready when the webhook-to-APEX
+  adapter is built.
 
 ## Install & auto-update
 
@@ -118,14 +119,10 @@ Scripts ship with `@updateURL` + `@downloadURL` pointing at raw GitHub. See
 [`UPDATE.md`](UPDATE.md) for install links, update-interval configuration,
 and the developer version-bump rule.
 
-## Operator install notes
+## Developer rules (read before touching a script)
 
-Tampermonkey treats changes to `@name` or `@namespace` as new scripts. After
-pulling a renamed or version-bumped script, either:
-
-- Remove the old entry in Tampermonkey and install the new file, or
-- Manually edit the installed script's header to match.
-
-Orphaned localStorage values from previous installs will not be read by the
-renamed scripts. Run the Storage Tools clear once (it sweeps `tm_*`, `hb_*`,
-and `aqb_*` prefixes) to wipe them.
+1. **Bump `@version` on every change** — Tampermonkey won't update operators otherwise.
+2. **Never put the version in the filename, `@name`, or `@namespace`.** Versions
+   live only in `@version`.
+3. **Never rename** a file, `@name`, or `@namespace` after it's installed. Doing
+   so orphans every operator's install silently.

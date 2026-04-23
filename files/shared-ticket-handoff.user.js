@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         AZ TO GWPC Shared Ticket Handoff V1.0
-// @namespace    home.bot.az.to.gwpc.shared.ticket.handoff
+// @name         AZ TO GWPC Shared Ticket Handoff
+// @namespace    homebot.shared-ticket-handoff
 // @version      1.4
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
@@ -12,8 +12,8 @@
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Shared%20Ticket%20Handoff%20V1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/AZ%20TO%20GWPC%20Shared%20Ticket%20Handoff%20V1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-ticket-handoff.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-ticket-handoff.user.js
 // ==/UserScript==
 
 (function () {

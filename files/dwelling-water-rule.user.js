@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Dwelling Water Rule V3.0
-// @namespace    home.bot.dwelling.water.rule
+// @name         Home Bot: Dwelling Water Rule
+// @namespace    homebot.dwelling-water-rule
 // @version      3.0
 // @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
@@ -8,8 +8,8 @@
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Dwelling%20Water%20Rule%20V3.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Dwelling%20Water%20Rule%20V3.0.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
 // ==/UserScript==
 
 (function () {
@@ -17,7 +17,7 @@
 
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule V3.0';
+  const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
   const VERSION = '3.0';
 
   const CFG = {

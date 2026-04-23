@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Home Bot: APEX Quote New Account V3.9
-// @namespace    homebot.apex.quote.new.account
+// @name         Home Bot: APEX Quote New Account
+// @namespace    homebot.apex-quote-new-account
 // @version      3.9
 // @description  Reads the current APEX payload (flat or nested), fills APEX Quote New Account, ignores Personal Lines Quote modal, locks interaction to the real Quote New Account form only, and hard-stops until page reload after Save is clicked.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Quote%20New%20Account%20V3.9.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20APEX%20Quote%20New%20Account%20V3.9.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-quote-new-account.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-quote-new-account.user.js
 // ==/UserScript==
 
 (function () {
@@ -16,7 +16,7 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: APEX Quote New Account V3.9';
+  const SCRIPT_NAME = 'Home Bot: APEX Quote New Account';
   const VERSION = '3.9';
 
   const CFG = {

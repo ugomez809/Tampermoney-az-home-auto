@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Home Bot: Global Clear Launcher V1.0
-// @namespace    home.bot.global.clear.launcher
+// @name         Home Bot: Global Clear Launcher
+// @namespace    homebot.global-clear-launcher
 // @version      1.0
 // @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
@@ -14,8 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Global%20Clear%20Launcher%20V1.0.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/Home%20Bot_%20Global%20Clear%20Launcher%20V1.0.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js
 // ==/UserScript==
 
 (function () {
