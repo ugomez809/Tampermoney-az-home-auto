@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.5
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
+// @version      1.6
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, then enriches the current job from GWPC identity. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.5';
+  const VERSION = '1.6';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -37,7 +37,19 @@
   };
 
   const SS_KEYS = {
-    STOP: 'hb_shared_az_to_gwpc_ticket_handoff_stop_v1'
+    STOP: 'hb_shared_az_to_gwpc_ticket_handoff_stop_v1',
+    GWPC_ENTRY_INIT: 'hb_shared_az_to_gwpc_ticket_handoff_gwpc_entry_init_v1'
+  };
+
+  const GWPC_KEYS = {
+    currentJob: 'tm_pc_current_job_v1',
+    legacySharedJob: 'tm_shared_az_job_v1',
+    homePayload: 'tm_pc_home_quote_grab_payload_v1',
+    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
+    bundle: 'tm_pc_webhook_bundle_v1',
+    homeTrigger: 'tm_pc_home_quote_grabber_trigger_v1',
+    webhookSentMeta: 'tm_pc_webhook_submit_sent_meta_v17',
+    forceSend: 'tm_pc_force_send_now_v1'
   };
 
   const CFG = {
@@ -64,6 +76,7 @@
     buildUI();
     log(`Loaded ${SCRIPT_NAME} V${VERSION}`);
     log(isAzOrigin() ? 'Mode: AZ capture' : isGwpcOrigin() ? 'Mode: GWPC apply' : 'Mode: idle');
+    ensureGwpcEntryResetOnce();
     setStatus(state.running ? 'Running' : 'Stopped');
     setInterval(tick, CFG.tickMs);
     tick();
@@ -196,6 +209,11 @@
       return;
     }
 
+    const seededJob = seedGwpcJobAndPayloadsFromHandoff(handoff);
+    if (seededJob?.['AZ ID']) {
+      maybeAdvanceGwpcFlow(seededJob);
+    }
+
     const gwpcIdentity = getGwpcIdentity();
     if (!gwpcIdentity) {
       setIdle('gw-no-gwpc-identity', 'GWPC waiting for current job / auto payload / home payload / bundle');
@@ -230,7 +248,7 @@
     ].join(' | ');
 
     const lastApplied = localStorage.getItem(LS_KEYS.LAST_APPLIED) || '';
-    const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), {}) || {};
+    const currentJob = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), {}) || {};
 
     const currentAzId = clean(currentJob['AZ ID'] || currentJob.azId || '');
     const currentName = clean(currentJob['Name'] || currentJob.name || '');
@@ -266,7 +284,7 @@
       'updatedAt': new Date().toISOString()
     };
 
-    localStorage.setItem('tm_pc_current_job_v1', JSON.stringify(nextJob, null, 2));
+    localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(nextJob, null, 2));
     localStorage.setItem(LS_KEYS.LAST_APPLIED, applySig);
 
     log(`GWPC current job written | AZ ID ${nextJob['AZ ID']}`);
@@ -338,10 +356,10 @@
   }
 
   function getGwpcIdentity() {
-    const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
-    const homePayload = safeJsonParse(localStorage.getItem('tm_pc_home_quote_grab_payload_v1'), null);
-    const autoPayload = safeJsonParse(localStorage.getItem('tm_pc_auto_quote_grab_payload_v1'), null);
-    const bundle = safeJsonParse(localStorage.getItem('tm_pc_webhook_bundle_v1'), null);
+    const currentJob = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null);
+    const homePayload = safeJsonParse(localStorage.getItem(GWPC_KEYS.homePayload), null);
+    const autoPayload = safeJsonParse(localStorage.getItem(GWPC_KEYS.autoPayload), null);
+    const bundle = safeJsonParse(localStorage.getItem(GWPC_KEYS.bundle), null);
     const pageIdentity = getGwpcPageIdentity();
 
     const candidates = [
@@ -548,6 +566,241 @@
 
   function safeJsonParse(text, fallback = null) {
     try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function ensureGwpcEntryResetOnce() {
+    if (!isGwpcOrigin()) return;
+    try {
+      if (sessionStorage.getItem(SS_KEYS.GWPC_ENTRY_INIT) === '1') return;
+    } catch {}
+
+    resetGwpcEntryState();
+
+    try { sessionStorage.setItem(SS_KEYS.GWPC_ENTRY_INIT, '1'); } catch {}
+    log('GWPC entry reset complete');
+  }
+
+  function resetGwpcEntryState() {
+    const keysToRemove = [
+      GWPC_KEYS.currentJob,
+      GWPC_KEYS.legacySharedJob,
+      GWPC_KEYS.homePayload,
+      GWPC_KEYS.autoPayload,
+      GWPC_KEYS.bundle,
+      GWPC_KEYS.homeTrigger,
+      GWPC_KEYS.webhookSentMeta,
+      GWPC_KEYS.forceSend,
+      FLOW_STAGE_KEY,
+      LS_KEYS.LAST_APPLIED
+    ];
+
+    for (const key of keysToRemove) {
+      try { localStorage.removeItem(key); } catch {}
+    }
+  }
+
+  function normalizeCurrentJob(job) {
+    const out = {
+      'AZ ID': '',
+      'Name': '',
+      'Mailing Address': '',
+      'SubmissionNumber': '',
+      'updatedAt': ''
+    };
+
+    if (!job || typeof job !== 'object' || Array.isArray(job)) return out;
+
+    out['AZ ID'] = clean(job['AZ ID'] || job.azId || job.ticketId || '');
+    out['Name'] = clean(job['Name'] || job.name || '');
+    out['Mailing Address'] = clean(job['Mailing Address'] || job.mailingAddress || '');
+    out['SubmissionNumber'] = clean(job['SubmissionNumber'] || job.submissionNumber || '');
+    out['updatedAt'] = clean(job['updatedAt'] || '');
+    return out;
+  }
+
+  function buildSeedJobFromHandoff(handoff) {
+    return normalizeCurrentJob({
+      'AZ ID': clean(handoff?.ticketId || ''),
+      'Name': clean(handoff?.name || ''),
+      'Mailing Address': clean(handoff?.mailingAddress || ''),
+      'SubmissionNumber': '',
+      'updatedAt': new Date().toISOString()
+    });
+  }
+
+  function writeCurrentJob(job) {
+    const next = normalizeCurrentJob(job);
+    next.updatedAt = next.updatedAt || new Date().toISOString();
+    localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  function ensureSeedBundle(job) {
+    const azId = clean(job?.['AZ ID'] || '');
+    if (!azId) return null;
+
+    const current = safeJsonParse(localStorage.getItem(GWPC_KEYS.bundle), null);
+    if (current && typeof current === 'object' && !Array.isArray(current) && clean(current['AZ ID']) === azId) {
+      let changed = false;
+      if (!current['Name'] && clean(job['Name'])) {
+        current['Name'] = clean(job['Name']);
+        changed = true;
+      }
+      if (!current['Mailing Address'] && clean(job['Mailing Address'])) {
+        current['Mailing Address'] = clean(job['Mailing Address']);
+        changed = true;
+      }
+      if (!current.home || typeof current.home !== 'object') {
+        current.home = { ready: false, data: null };
+        changed = true;
+      }
+      if (!current.auto || typeof current.auto !== 'object') {
+        current.auto = { ready: false, data: null };
+        changed = true;
+      }
+      if (!current.timeout || typeof current.timeout !== 'object') {
+        current.timeout = { ready: false, events: [] };
+        changed = true;
+      }
+      current.meta = current.meta && typeof current.meta === 'object' ? current.meta : {};
+      if (!current.meta.lastWriter) {
+        current.meta.lastWriter = SCRIPT_NAME;
+        changed = true;
+      }
+      if (!current.meta.version) {
+        current.meta.version = VERSION;
+        changed = true;
+      }
+      if (!current.meta.stage) {
+        current.meta.stage = 'entry_seeded';
+        changed = true;
+      }
+      if (!current.meta.stageWriter) {
+        current.meta.stageWriter = SCRIPT_NAME;
+        changed = true;
+      }
+      if (!current.meta.updatedAt) {
+        current.meta.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+      if (changed) {
+        localStorage.setItem(GWPC_KEYS.bundle, JSON.stringify(current, null, 2));
+      }
+      return current;
+    }
+
+    const next = {
+      'AZ ID': azId,
+      'Name': clean(job['Name']),
+      'Mailing Address': clean(job['Mailing Address']),
+      'SubmissionNumber': clean(job['SubmissionNumber']),
+      home: {
+        ready: false,
+        data: null,
+        meta: {
+          product: 'home',
+          step: 'seeded',
+          savedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: SCRIPT_NAME,
+          version: VERSION
+        }
+      },
+      auto: {
+        ready: false,
+        data: null,
+        meta: {
+          product: 'auto',
+          step: 'seeded',
+          savedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: SCRIPT_NAME,
+          version: VERSION
+        }
+      },
+      timeout: {
+        ready: false,
+        events: []
+      },
+      meta: {
+        updatedAt: new Date().toISOString(),
+        lastWriter: SCRIPT_NAME,
+        version: VERSION,
+        stage: 'entry_seeded',
+        stageWriter: SCRIPT_NAME
+      }
+    };
+    localStorage.setItem(GWPC_KEYS.bundle, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  function ensureSeedPayload(payloadKey, product, job) {
+    const azId = clean(job?.['AZ ID'] || '');
+    if (!azId) return null;
+
+    const current = safeJsonParse(localStorage.getItem(payloadKey), null);
+    if (current && typeof current === 'object' && !Array.isArray(current) && clean(current['AZ ID'] || current?.currentJob?.['AZ ID']) === azId) {
+      return current;
+    }
+
+    const now = new Date().toISOString();
+    const next = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      event: `${product}_payload_seeded`,
+      product,
+      ready: false,
+      'AZ ID': azId,
+      currentJob: normalizeCurrentJob(job),
+      savedAt: now,
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      meta: {
+        product,
+        step: 'seeded',
+        savedAt: now,
+        updatedAt: now,
+        source: SCRIPT_NAME,
+        version: VERSION
+      }
+    };
+    localStorage.setItem(payloadKey, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  function seedGwpcJobAndPayloadsFromHandoff(handoff) {
+    const seedJob = buildSeedJobFromHandoff(handoff);
+    if (!seedJob['AZ ID']) return null;
+
+    const current = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null);
+    const currentAzId = clean(current?.['AZ ID'] || current?.azId || '');
+    const currentName = clean(current?.['Name'] || current?.name || '');
+    const currentAddress = clean(current?.['Mailing Address'] || current?.mailingAddress || '');
+    const currentSubmission = clean(current?.['SubmissionNumber'] || current?.submissionNumber || '');
+    const nextJob = {
+      'AZ ID': seedJob['AZ ID'],
+      'Name': seedJob['Name'],
+      'Mailing Address': seedJob['Mailing Address'],
+      'SubmissionNumber': currentAzId === seedJob['AZ ID'] ? currentSubmission : '',
+      'updatedAt': new Date().toISOString()
+    };
+    const shouldSeed =
+      currentAzId !== nextJob['AZ ID'] ||
+      currentName !== nextJob['Name'] ||
+      currentAddress !== nextJob['Mailing Address'] ||
+      currentSubmission !== nextJob['SubmissionNumber'];
+
+    if (shouldSeed) {
+      writeCurrentJob(nextJob);
+      log(`GWPC current job seeded | AZ ID ${nextJob['AZ ID']}`);
+    }
+
+    ensureSeedBundle(seedJob);
+    ensureSeedPayload(GWPC_KEYS.homePayload, 'home', seedJob);
+    ensureSeedPayload(GWPC_KEYS.autoPayload, 'auto', seedJob);
+    return normalizeCurrentJob(safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null));
   }
 
   function setIdle(key, text) {
