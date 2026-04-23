@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.8.1
-// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 5s before handing off to Vehicles. Sets localStorage aqb_step_drivers_done=1 when finished.
+// @version      1.8.2
+// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting and 5s before handing off to Vehicles. Sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -35,6 +35,7 @@
   const DRV_MIN_AGE_LIC        = 16;
   const DRV_MAX_AGE_LIC_RANDOM_MIN = 16;
   const DRV_MAX_AGE_LIC_RANDOM_MAX = 22;
+  const INITIAL_START_DELAY_MS = 2000;
   const AFTER_DONE_TRIGGER_WAIT_MS = 5000;
 
   const BTN_TEXT_ON  = 'AQB: STOP';
@@ -42,8 +43,9 @@
 
   let armed = true;
   let done  = false;
-  let running = false;
   let mo    = null;
+  let startDelayUntil = 0;
+  let startDelayTimer = null;
 
   function safeJsonParse(text, fallback = null) {
     try { return JSON.parse(text); } catch { return fallback; }
@@ -73,9 +75,21 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Drivers',
-      version: '1.8.1'
+      version: '1.8.2'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
+
+  function armStartDelay() {
+    startDelayUntil = Date.now() + INITIAL_START_DELAY_MS;
+    if (startDelayTimer) {
+      try { clearTimeout(startDelayTimer); } catch {}
+      startDelayTimer = null;
+    }
+    startDelayTimer = setTimeout(() => {
+      startDelayTimer = null;
+      tick();
+    }, INITIAL_START_DELAY_MS + 50);
   }
 
   function mountToggle() {
@@ -90,7 +104,7 @@
     btn.addEventListener('click', () => {
       armed = !armed;
       btn.textContent = armed ? BTN_TEXT_ON : BTN_TEXT_OFF;
-      if (armed) tick();
+      if (armed) armStartDelay();
     });
 
     document.body.appendChild(btn);
@@ -388,30 +402,28 @@
   }
 
   async function runSequence() {
-    if (done || running || !armed || isGloballyPaused()) return;
+    if (done || !armed || isGloballyPaused()) return;
+    if (Date.now() < startDelayUntil) return;
+    if (!gateOK() || !headerOK()) return;
+    if (!findDriversTable()) return;
+
+    const start = Date.now();
+    while (Date.now() - start < 1200) {
+      if (!armed || done || isGloballyPaused()) return;
+      applyDriversOnce();
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    await new Promise(r => setTimeout(r, AFTER_DONE_TRIGGER_WAIT_MS));
+    if (!armed || done || isGloballyPaused()) return;
     if (!gateOK() || !headerOK()) return;
 
-    running = true;
-    try {
-      const start = Date.now();
-      while (Date.now() - start < 1200) {
-        if (!armed || done || isGloballyPaused()) return;
-        applyDriversOnce();
-        await new Promise(r => setTimeout(r, 200));
-      }
+    setDoneFlag();
 
-      await new Promise(r => setTimeout(r, AFTER_DONE_TRIGGER_WAIT_MS));
-      if (!armed || done || isGloballyPaused()) return;
-
-      setDoneFlag();
-
-      done = true;
-      if (mo) {
-        try { mo.disconnect(); } catch {}
-        mo = null;
-      }
-    } finally {
-      running = false;
+    done = true;
+    if (mo) {
+      try { mo.disconnect(); } catch {}
+      mo = null;
     }
   }
 
@@ -424,6 +436,7 @@
     clearDoneFlag();
     clearLegacyDoneFlag();
     mountToggle();
+    armStartDelay();
 
     mo = new MutationObserver(tick);
     mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
