@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.0
+// @version      3.1
 // @description  End-to-end Home quote driver. Detects the Coverages page, sets the 8 required coverage values, runs the initial Quote, grabs initial pricing + Policy Info, clicks the Auto radio in the Job Wizard Info Bar, re-Quotes, grabs Dwelling + final pricing, checks FAIR Plan Companion Endorsement on Exclusions and Conditions, grabs Quote tab info, and writes flow stage 'home/handoff' for shared-ticket-handoff to continue. Replaces 04 GWPC Home Coverages Quote + Risk Analysis.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.0';
+  const VERSION = '3.1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -475,6 +475,12 @@
 
     // LEGACY PATH: an older standalone writer fired a direct trigger. Run
     // the grab phase only (skip coverage edits, since the writer did them).
+    // Also gated by flowStartedThisLoad so a failed full flow doesn't fall
+    // through here and silently retry.
+    if (state.flowStartedThisLoad) {
+      announceSkipReason('flowStartedThisLoad=true (reload tab to retry after failure)');
+      return;
+    }
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
     const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
@@ -1086,9 +1092,26 @@
       log('All fields grabbed successfully');
     }
 
-    const currentJob = readCurrentJob();
+    let currentJob = readCurrentJob();
     if (!currentJob['AZ ID']) {
-      throw new Error('Missing tm_pc_current_job_v1 / AZ ID');
+      // Cross-origin fallback: the handoff reached this tab via GM storage
+      // but tm_pc_current_job_v1 is origin-scoped and may not have been
+      // written on this subdomain yet. Bootstrap from the handoff payload
+      // plus the data we already grabbed off the page so we can still save.
+      const handoffNow = readHomeQuoteGrabberTrigger();
+      const handoffAzId = normalizeText(handoffNow?.azId || '');
+      if (handoffAzId) {
+        log(`current_job missing AZ ID; bootstrapping from handoff (azId=${handoffAzId})`);
+        currentJob = writeCurrentJob({
+          'AZ ID': handoffAzId,
+          'Name': row['Name'] || '',
+          'Mailing Address': row['Mailing Address'] || '',
+          'SubmissionNumber': row['Submission Number'] || normalizeText(handoffNow?.submissionNumber || '')
+        });
+      }
+    }
+    if (!currentJob['AZ ID']) {
+      throw new Error('Missing tm_pc_current_job_v1 / AZ ID (handoff also had no azId)');
     }
 
     const payload = {
@@ -1206,25 +1229,74 @@
     );
   }
 
+  function describeElement(el) {
+    if (!el) return 'null';
+    const tag = el.tagName?.toLowerCase?.() || '?';
+    const id = el.id ? `#${el.id}` : '';
+    const cls = el.className && typeof el.className === 'string'
+      ? '.' + el.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.')
+      : '';
+    const aria = el.getAttribute?.('aria-label');
+    const role = el.getAttribute?.('role');
+    const disabled = el.getAttribute?.('aria-disabled');
+    const bits = [`<${tag}>`];
+    if (id) bits.push(id);
+    if (cls) bits.push(cls);
+    if (aria) bits.push(`aria="${aria}"`);
+    if (role) bits.push(`role="${role}"`);
+    if (disabled === 'true') bits.push('aria-disabled=true');
+    return bits.join(' ');
+  }
+
+  // Walks up from an element to the nearest non-disabled clickable ancestor.
+  // Returns null if the resolved target is aria-disabled and has no enabled
+  // clickable ancestor within the search depth. This prevents "click landed
+  // on a disabled tab" silent failures.
+  function resolveClickableTab(el) {
+    if (!el) return null;
+    // Prefer an enabled .gw-action--inner at or above this element.
+    const upgraded = upgradeToClickable(el);
+    if (upgraded && upgraded.getAttribute?.('aria-disabled') !== 'true') return upgraded;
+    // Walk up for a non-disabled clickable owner.
+    const owner = getClickableOwner(el);
+    if (owner && owner.getAttribute?.('aria-disabled') !== 'true') return owner;
+    return null;
+  }
+
   async function navigateToTab(name, resolvers, readyFn) {
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const el = resolveFirst(resolvers);
-      if (!el) {
+      const raw = resolveFirst(resolvers);
+      if (!raw) {
         log(`${name} tab not found, attempt ${attempt}/3`);
         await sleep(500);
         continue;
       }
 
-      log(`Clicking ${name}, attempt ${attempt}/3`);
-      safeClick(el);
+      const target = resolveClickableTab(raw);
+      if (!target) {
+        log(`${name} tab resolved target is disabled/unclickable (raw=${describeElement(raw)}), attempt ${attempt}/3`);
+        await sleep(500);
+        continue;
+      }
+
+      log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/3`);
+      const headerBefore = getHeaderText();
+      strongClick(target);
 
       const ok = await waitFor(readyFn, CFG.waitTimeoutMs, `${name} readiness`);
       if (ok) {
-        log(`${name} ready`);
+        const headerAfter = getHeaderText();
+        if (headerBefore && headerAfter && headerBefore === headerAfter && headerBefore !== name) {
+          // Page became ready but the header never moved. Likely the operator
+          // clicked manually while we were waiting, or readyFn is too lenient.
+          log(`${name} ready (but header unchanged: "${headerBefore}")`);
+        } else {
+          log(`${name} ready (header "${headerBefore}" -> "${headerAfter}")`);
+        }
         return;
       }
 
-      log(`${name} did not become ready`);
+      log(`${name} did not become ready after click`);
     }
 
     throw new Error(`Could not open ${name}`);
