@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.6
-// @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, then Quote.
+// @version      3.7
+// @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -18,10 +18,12 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.6';
+  const VERSION = '3.7';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'dwelling-water-rule';
 
   const CFG = {
     tickMs: 900,
@@ -84,13 +86,16 @@
     lastQuoteClickAt: 0,
     logs: [],
     intervalId: null,
+    heartbeatIntervalId: null,
     panel: null,
     statusEl: null,
     logEl: null,
     btn: null,
     styleEl: null,
     lastTabNudgeAt: 0,
-    quoteRetryUsed: false
+    quoteRetryUsed: false,
+    activityState: 'idle',
+    activityMessage: 'Armed'
   };
 
   function safeJsonParse(text, fallback = null) {
@@ -144,6 +149,35 @@
 
   function setStatus(msg) {
     if (state.statusEl) state.statusEl.textContent = msg;
+  }
+
+  function readScriptActivityMap() {
+    return safeJsonParse(localStorage.getItem(SCRIPT_ACTIVITY_KEY), {}) || {};
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = normalizeText(nextState).toLowerCase() || 'idle';
+    state.activityMessage = normalizeText(message) || state.activityMessage || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      state: state.activityState,
+      updatedAt: new Date().toISOString(),
+      message: state.activityMessage,
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
+  }
+
+  function refreshActiveHeartbeat() {
+    if (state.activityState !== 'active') return;
+    writeActivityState('active', state.activityMessage);
   }
 
   function q(sel, root = document) {
@@ -763,12 +797,14 @@
     }
 
     state.busy = true;
+    writeActivityState('active', 'Working Dwelling');
     try {
       if (fieldsReady()) {
         setStatus('Filling Dwelling');
         await fillDwellingFlow();
         writeFlowStage('home', 'coverages');
         state.done = true;
+        writeActivityState('done', 'Dwelling complete');
         setStatus('Done');
         log('Dwelling step complete');
         return;
@@ -779,6 +815,7 @@
           setStatus('Failed');
           log('Create Valuation max attempts reached');
           state.done = true;
+          writeActivityState('error', 'Create Valuation max attempts reached');
           return;
         }
 
@@ -797,6 +834,7 @@
               await fillDwellingFlow();
               writeFlowStage('home', 'coverages');
               state.done = true;
+              writeActivityState('done', 'Dwelling complete');
               setStatus('Done');
               log('Dwelling step complete');
               return;
@@ -817,14 +855,17 @@
       await fillDwellingFlow();
       writeFlowStage('home', 'coverages');
       state.done = true;
+      writeActivityState('done', 'Dwelling complete');
       setStatus('Done');
       log('Dwelling step complete');
     } catch (err) {
       setStatus('Failed');
       log(`Failed: ${err.message}`);
       state.done = true;
+      writeActivityState('error', err.message || 'Dwelling failed');
     } finally {
       state.busy = false;
+      if (!state.done && state.running) writeActivityState('idle', state.statusEl?.textContent || 'Armed');
     }
   }
 
@@ -908,9 +949,11 @@
         state.done = false;
         state.createAttempts = 0;
         state.quoteRetryUsed = false;
+        writeActivityState('idle', 'Resumed');
         log('Script resumed');
         setStatus('Resumed');
       } else {
+        writeActivityState('stopped', 'Stopped');
         log('Script stopped for this page session');
         setStatus('Stopped');
       }
@@ -976,6 +1019,8 @@
 
   function cleanup() {
     try { clearInterval(state.intervalId); } catch {}
+    try { clearInterval(state.heartbeatIntervalId); } catch {}
+    try { writeActivityState(state.running ? 'idle' : 'stopped', 'Cleanup'); } catch {}
     try { state.panel?.remove?.(); } catch {}
     try { state.styleEl?.remove?.(); } catch {}
     delete window.__HB_DWELLING_WATER_RULE_CLEANUP__;
@@ -985,6 +1030,7 @@
     buildUi();
     log('Script start');
     setStatus('Armed');
+    writeActivityState('idle', 'Armed');
 
     state.intervalId = setInterval(() => {
       tick().catch(err => {
@@ -992,8 +1038,13 @@
         log(`Tick error: ${err.message}`);
         state.busy = false;
         state.done = true;
+        writeActivityState('error', err.message || 'Tick error');
       });
     }, CFG.tickMs);
+
+    state.heartbeatIntervalId = setInterval(() => {
+      try { refreshActiveHeartbeat(); } catch {}
+    }, 1000);
   }
 
   window.__HB_DWELLING_WATER_RULE_CLEANUP__ = cleanup;

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.6
-// @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes the organizer's own panel in the dock.
+// @version      1.7
+// @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,8 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: UI Dock Organizer';
-  const VERSION = '1.6';
+  const VERSION = '1.7';
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
 
   const CFG = {
     tickMs: 900,
@@ -46,7 +47,8 @@
     uiZ: 2147483647,
     posKey: 'tm_ui_dock_organizer_panel_pos_v13',
     logsOpenKey: 'tm_ui_dock_organizer_logs_open_v13',
-    hiddenKey: 'tm_ui_dock_organizer_hidden_v14'
+    hiddenKey: 'tm_ui_dock_organizer_hidden_v14',
+    activeStaleMs: 6000
   };
 
   const UI = {
@@ -63,6 +65,10 @@
     styleId: 'hb-ui-dock-organizer-style-v13'
   };
 
+  const SCRIPT_PANEL_MAP = {
+    'hb-dwelling-water-rule-panel': 'dwelling-water-rule'
+  };
+
   const state = {
     running: true,
     logs: [],
@@ -73,7 +79,8 @@
     drag: null,
     lastRescanAt: 0,
     lastDockedCount: -1,
-    uiHidden: false
+    uiHidden: false,
+    activePanels: 0
   };
 
   function clamp(n, min, max) {
@@ -204,7 +211,13 @@
       seen.add(el);
 
       if (!state.registry.has(el)) {
-        state.registry.set(el, { order: state.orderSeed++ });
+        state.registry.set(el, {
+          order: state.orderSeed++,
+          scriptId: detectScriptId(el)
+        });
+      } else {
+        const meta = state.registry.get(el);
+        meta.scriptId = detectScriptId(el);
       }
     }
 
@@ -317,6 +330,7 @@
 
       items.push({
         el,
+        scriptId: meta.scriptId || '',
         order: meta.order,
         width: Math.max(1, Math.ceil(rect.width)),
         height: Math.max(1, Math.ceil(rect.height)),
@@ -342,13 +356,20 @@
       log(`Docked UI count: ${items.length}`);
     }
 
-    updateUI();
-
-    if (!items.length) return;
+    if (!items.length) {
+      state.activePanels = 0;
+      updateUI();
+      return;
+    }
     if (state.uiHidden) {
+      state.activePanels = 0;
+      updateUI();
       applyHiddenMode();
       return;
     }
+
+    applyActiveHighlights(items);
+    updateUI();
 
     const placements = buildPlacements(items);
 
@@ -531,6 +552,7 @@
       else el.style.removeProperty('pointer-events');
       delete el.dataset.hbUiDockPrevPointerEvents;
     }
+    el.classList.remove('hb-ui-dock-active-script');
   }
 
   function applyHiddenMode() {
@@ -595,6 +617,43 @@
       panel.style.setProperty('transform', 'none', 'important');
       panel.style.setProperty('margin', '0', 'important');
     } catch {}
+  }
+
+  function detectScriptId(el) {
+    if (!(el instanceof HTMLElement)) return '';
+    if (el.id && SCRIPT_PANEL_MAP[el.id]) return SCRIPT_PANEL_MAP[el.id];
+    return '';
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function isScriptActive(scriptId, activityMap) {
+    if (!scriptId) return false;
+    const entry = activityMap?.[scriptId];
+    if (!entry || String(entry.state || '').toLowerCase() !== 'active') return false;
+    const updatedAt = Date.parse(entry.updatedAt || '');
+    if (!Number.isFinite(updatedAt)) return false;
+    return (Date.now() - updatedAt) <= CFG.activeStaleMs;
+  }
+
+  function applyActiveHighlights(items) {
+    const activityMap = readScriptActivityMap();
+    let activePanels = 0;
+
+    for (const item of items) {
+      const isActive = isScriptActive(item.scriptId, activityMap);
+      item.el.classList.toggle('hb-ui-dock-active-script', isActive);
+      if (isActive) activePanels++;
+    }
+
+    state.activePanels = activePanels;
   }
 
   function getOrganizerRect() {
@@ -664,6 +723,15 @@
         font:12px/1.35 Arial,sans-serif;
         overflow:hidden;
         user-select:none;
+      }
+      .hb-ui-dock-active-script{
+        background:linear-gradient(180deg, rgba(11,52,34,.96), rgba(16,72,48,.96)) !important;
+        border:1px solid rgba(74,222,128,.90) !important;
+        box-shadow:0 0 0 1px rgba(74,222,128,.22), 0 10px 26px rgba(22,163,74,.28) !important;
+      }
+      .hb-ui-dock-active-script [id$="status"],
+      .hb-ui-dock-active-script [class*="status"]{
+        color:#dcfce7 !important;
       }
       #${UI.panelId} *{ box-sizing:border-box; }
       #${UI.headId}{
@@ -805,7 +873,7 @@
     }
 
     if (count) {
-      count.textContent = `${state.registry.size} UI`;
+      count.textContent = `${state.registry.size} UI | ${state.activePanels} active`;
     }
 
     if (toggle) {
