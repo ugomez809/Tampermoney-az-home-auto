@@ -1,13 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-<<<<<<< HEAD
-// @version      3.1
-// @description  End-to-end Home quote driver. Detects the Coverages page, sets the 8 required coverage values, runs the initial Quote, grabs initial pricing + Policy Info, clicks the Auto radio in the Job Wizard Info Bar, re-Quotes, grabs Dwelling + final pricing, checks FAIR Plan Companion Endorsement on Exclusions and Conditions, grabs Quote tab info, and writes flow stage 'home/handoff' for shared-ticket-handoff to continue. Replaces 04 GWPC Home Coverages Quote + Risk Analysis.
-=======
-// @version      3.2
+// @version      3.3
 // @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -26,11 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-<<<<<<< HEAD
-  const VERSION = '3.1';
-=======
-  const VERSION = '3.2';
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
+  const VERSION = '3.3';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -49,10 +40,6 @@
     waitPollMs: 250,
     afterClickMs: 800,
     maxLogLines: 24,
-<<<<<<< HEAD
-    // Coverage edit phase timings (formerly in writer):
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     afterEditAllMs: 1200,
     afterFieldMs: 250,
     afterQuoteWaitMs: 1200,
@@ -62,10 +49,6 @@
     triggerStableMs: 1000,
     tabNudgeCooldownMs: 1500,
     tabNudgeSettleMs: 2500,
-<<<<<<< HEAD
-    // Wait for the re-Quote (post auto-discount) to settle before navigating
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     afterRequoteSettleMs: 4000
   };
 
@@ -88,13 +71,9 @@
       'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-8-lineCovRow-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
     personalInjuryCheckbox:
       'input[type="checkbox"][name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideScreenBasePanelSet-SideBySideScreenPanelSet-HOSideBySideAddnCoveragesPanelSet-1-HOCoverageInputSet-CovPatternInputGroup-_checkbox"]',
-<<<<<<< HEAD
-    fairPlanLabelClass: '.gw-InputGroup--header--label'
-=======
     fairPlanLabelClass: '.gw-InputGroup--header--label',
     autoDiscountCheckboxExact:
       'input[name="SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-MultiLineDiscounts_ExtInputSet-MultiLineDiscounts_ExtLV-1-DiscountSelected"]'
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   };
 
   const IDS = {
@@ -107,15 +86,6 @@
     coveragesScreen: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen',
     mainArea: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV',
     quoteButtonHost: 'SubmissionWizard-Quote',
-
-    // Coverage edit phase (formerly in 04 GWPC Home Coverages Quote + Risk Analysis):
-    coveragesHeader: 'Coverages',
-    coveragesScreen: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen',
-    mainArea: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV',
-    quoteButtonHost: 'SubmissionWizard-Quote',
-
-    // Job Wizard Info Bar Auto link (clicked to apply the auto cross-sell discount):
-    autoRadio: 'SubmissionWizard-JobWizardInfoBar-ViewAuto',
 
     name: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
     mailingAddress: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-PolicyAddressDisplayInputSet-PolicyAddress_Ext_Input',
@@ -155,10 +125,6 @@
     lastSnapshotTick: 0,
     lastTriggerSource: '',
     announcedSkipReason: '',
-<<<<<<< HEAD
-    // Coverage edit phase (formerly in writer):
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     coverageTriggerSince: 0,
     lastQuoteClickAt: 0,
     lastTabNudgeAt: 0
@@ -478,11 +444,6 @@
     if (state.doneThisLoad) { announceSkipReason('doneThisLoad=true (reload tab for another quote)'); return; }
     state.announcedSkipReason = '';
 
-<<<<<<< HEAD
-    // PRIMARY PATH (v3.0): we are sitting on the Coverages edit page with a
-    // Homeowners line visible -> drive the full 9-step flow ourselves.
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     if (!state.flowStartedThisLoad && isOnCoverageEditPage()) {
       if (!state.coverageTriggerSince) {
         state.coverageTriggerSince = Date.now();
@@ -509,21 +470,11 @@
     }
     state.coverageTriggerSince = 0;
 
-<<<<<<< HEAD
-    // LEGACY PATH: an older standalone writer fired a direct trigger. Run
-    // the grab phase only (skip coverage edits, since the writer did them).
-    // Also gated by flowStartedThisLoad so a failed full flow doesn't fall
-    // through here and silently retry.
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     if (state.flowStartedThisLoad) {
       announceSkipReason('flowStartedThisLoad=true (reload tab to retry after failure)');
       return;
     }
-<<<<<<< HEAD
-=======
 
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
     const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
@@ -531,11 +482,7 @@
     if (!handoff && !stageReady) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = '';
-<<<<<<< HEAD
-      setWaiting('Waiting for Coverages page or legacy trigger');
-=======
       setWaiting('Waiting for Coverages page or HOME quote-grabber trigger');
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
         state.lastSnapshotTick = state.tickCount;
         logTriggerSnapshot(currentJob);
@@ -565,7 +512,7 @@
 
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found: HOME quote-grabber handoff (legacy path)');
+      log('Trigger found: HOME quote-grabber handoff');
       setStatus('Trigger found, waiting 3 seconds');
       return;
     }
@@ -595,7 +542,7 @@
       try {
         const nodes = doc.querySelectorAll('.gw-label');
         for (const el of nodes) {
-          if (!isVisible(el)) continue;
+          if (!isVisibleEl(el)) continue;
           if (normalizeText(el.textContent || '') === labelText) return true;
         }
       } catch {}
@@ -603,7 +550,7 @@
     return false;
   }
 
-  function isVisible(el) {
+  function isVisibleEl(el) {
     if (!el || !(el instanceof Element)) return false;
     try {
       const r = el.getBoundingClientRect?.();
@@ -616,13 +563,6 @@
     } catch { return false; }
   }
 
-<<<<<<< HEAD
-  // ===========================================================================
-  // Coverage edit phase (formerly in 04 GWPC Home Coverages Quote + Risk Analysis)
-  // ===========================================================================
-
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   function byId(id) {
     try { return document.getElementById(id); } catch { return null; }
   }
@@ -633,32 +573,19 @@
 
   function queryFirstVisible(selector) {
     try {
-<<<<<<< HEAD
-      return Array.from(document.querySelectorAll(selector)).find(isVisible) || null;
-=======
       return Array.from(document.querySelectorAll(selector)).find(isVisibleEl) || null;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     } catch { return null; }
   }
 
   function getHeaderText() {
     const nodes = Array.from(document.querySelectorAll('.gw-TitleBar--title'));
-<<<<<<< HEAD
-    const el = nodes.find(isVisible) || null;
-=======
     const el = nodes.find(isVisibleEl) || null;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     return normalizeText(el?.textContent || '');
   }
 
   function headerStillCoverages() {
-<<<<<<< HEAD
-    const titles = Array.from(document.querySelectorAll('.gw-TitleBar--title')).filter(isVisible);
-    return titles.some(t => normalizeText(t.textContent || '') === IDS.coveragesHeader);
-=======
     const titles = Array.from(document.querySelectorAll('.gw-TitleBar--title')).filter(isVisibleEl);
     return titles.some((t) => normalizeText(t.textContent || '') === IDS.coveragesHeader);
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   }
 
   function isOnCoverageEditPage() {
@@ -712,11 +639,7 @@
   function verifyContextLabels(el, expectedLabels) {
     if (!expectedLabels || !expectedLabels.length) return true;
     const context = gatherContextText(el).toLowerCase();
-<<<<<<< HEAD
-    return expectedLabels.every(label => context.includes(String(label).toLowerCase()));
-=======
     return expectedLabels.every((label) => context.includes(String(label).toLowerCase()));
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   }
 
   function getSelectedText(selectEl) {
@@ -726,20 +649,12 @@
   }
 
   function optionCanon(text) {
-<<<<<<< HEAD
-    return normalizeText(text).toLowerCase().replace(/ /g, '').replace(/\s+/g, '').replace(/,/g, '').replace(/\$/g, '');
-=======
     return normalizeText(text).toLowerCase().replace(/\u00a0/g, '').replace(/\s+/g, '').replace(/,/g, '').replace(/\$/g, '');
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   }
 
   function optionMatchesText(text, desiredTexts) {
     const actual = optionCanon(text);
-<<<<<<< HEAD
-    return desiredTexts.some(want => actual === optionCanon(want));
-=======
     return desiredTexts.some((want) => actual === optionCanon(want));
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   }
 
   function findMatchingOption(selectEl, desiredTexts) {
@@ -752,11 +667,7 @@
   }
 
   function isProbablyClickable(el) {
-<<<<<<< HEAD
-    if (!el || !(el instanceof Element) || !isVisible(el)) return false;
-=======
     if (!el || !(el instanceof Element) || !isVisibleEl(el)) return false;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     return (
       el.matches('button, a, input[type="button"], input[type="submit"], [role="button"], [role="tab"], [role="menuitem"]') ||
       el.classList.contains('gw-action--inner') ||
@@ -780,31 +691,18 @@
   }
 
   function findClickableOwnerByLabel(labelText) {
-<<<<<<< HEAD
-    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisible);
-    for (const label of direct) {
-      const owner = getClickableOwner(label);
-      if (owner && isVisible(owner)) return owner;
-=======
     const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
     for (const label of direct) {
       const owner = getClickableOwner(label);
       if (owner && isVisibleEl(owner)) return owner;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     }
     const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
     for (const el of generic) {
       const aria = normalizeText(el.getAttribute?.('aria-label') || '');
       const txt = normalizeText(el.textContent || '');
-<<<<<<< HEAD
-      if ((aria === labelText || txt === labelText) && isVisible(el)) {
-        const owner = getClickableOwner(el);
-        if (owner && isVisible(owner)) return owner;
-=======
       if ((aria === labelText || txt === labelText) && isVisibleEl(el)) {
         const owner = getClickableOwner(el);
         if (owner && isVisibleEl(owner)) return owner;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       }
     }
     return null;
@@ -814,19 +712,6 @@
     return findClickableOwnerByLabel('Edit All');
   }
 
-<<<<<<< HEAD
-  function nudgeCoveragesTabIfNeeded() {
-    if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeCooldownMs) return false;
-    const target = findActionByText('Coverages');
-    if (!target) return false;
-    state.lastTabNudgeAt = Date.now();
-    strongClick(target);
-    log('Clicked Coverages tab helper');
-    return true;
-  }
-
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   function quoteRecentlyClicked() {
     return Date.now() - state.lastQuoteClickAt < 1500;
   }
@@ -858,18 +743,6 @@
 
   function upgradeToClickable(el) {
     if (!el) return null;
-<<<<<<< HEAD
-    if (el.matches?.('.gw-action--inner') && el.getAttribute('aria-disabled') !== 'true' && isVisible(el)) return el;
-    if (el.querySelector) {
-      const inner = el.querySelector('.gw-action--inner[aria-disabled="false"]');
-      if (inner && isVisible(inner)) return inner;
-    }
-    let p = el;
-    for (let i = 0; i < 12 && p; i++, p = p.parentElement) {
-      if (p.matches?.('.gw-action--inner') && p.getAttribute('aria-disabled') !== 'true' && isVisible(p)) return p;
-    }
-    return isVisible(el) ? el : null;
-=======
     if (el.matches?.('.gw-action--inner') && el.getAttribute('aria-disabled') !== 'true' && isVisibleEl(el)) return el;
     if (el.querySelector) {
       const inner = el.querySelector('.gw-action--inner[aria-disabled="false"]');
@@ -880,7 +753,6 @@
       if (p.matches?.('.gw-action--inner') && p.getAttribute('aria-disabled') !== 'true' && isVisibleEl(p)) return p;
     }
     return isVisibleEl(el) ? el : null;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   }
 
   function clickQuoteOnce() {
@@ -921,26 +793,6 @@
     return false;
   }
 
-<<<<<<< HEAD
-  // After the Auto radio is clicked the page stays on its current screen, so
-  // clickQuoteUntilTransition's "moved off Coverages" criterion does not apply.
-  // We just click the Quote button and sleep for the re-quote to settle.
-  async function clickQuoteRequote() {
-    state.lastQuoteClickAt = 0; // reset cooldown so clickQuoteOnce is allowed
-    for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
-      setStatus(`Re-Quote click (${attempt}/${CFG.maxQuoteAttempts})`);
-      if (clickQuoteOnce()) {
-        log('Re-Quote click sent, waiting to settle');
-        await sleep(CFG.afterRequoteSettleMs);
-        return true;
-      }
-      await sleep(CFG.betweenQuoteAttemptsMs);
-    }
-    throw new Error('Could not click Quote for re-quote');
-  }
-
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
   async function ensureEditMode() {
     const editTarget = findEditAllTarget();
     if (editTarget) {
@@ -1044,60 +896,9 @@
     if (!quoteOK) throw new Error('Initial Quote click did not move off Coverages');
   }
 
-<<<<<<< HEAD
-  // ===========================================================================
-  // Auto-discount step + Fair Plan check (new in v3.0)
-  // ===========================================================================
-
-  function findAutoRadioTarget() {
-    return findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoRadio)} > div`));
-  }
-
-  async function clickAutoRadio() {
-    // waitFor only returns true/false in this script, so look up the element
-    // fresh once the wait succeeds.
-    const ok = await waitFor(
-      () => !!findAutoRadioTarget(),
-      CFG.waitTimeoutMs,
-      'Auto radio (Job Wizard Info Bar)'
-    );
-    if (!ok) throw new Error('Auto radio not found within timeout');
-    const target = findAutoRadioTarget();
-    if (!target) throw new Error('Auto radio vanished after wait');
-    log('Clicking Auto radio (Job Wizard Info Bar)');
-    strongClick(target);
-    await sleep(CFG.afterClickMs);
-  }
-
-  function hasFairPlanCompanionEndorsement() {
-    return !!findInDocs((doc) => {
-      const labels = doc.querySelectorAll(SEL.fairPlanLabelClass);
-      for (const el of labels) {
-        if (!isVisible(el)) continue;
-        if (normalizeText(el.textContent || '') === 'FAIR Plan Companion Endorsement') return el;
-      }
-      return null;
-    });
-  }
-
-  function extractExclusionsFields() {
-    return { 'CFP?': hasFairPlanCompanionEndorsement() ? 'YES' : 'NO' };
-  }
-
-  // Top-level orchestrator. Two entry shapes:
-  //   - fullFlow=true: drive coverage edits + initial Quote first, then run
-  //     the new 9-step grab (dual pricing + auto radio + fair plan check).
-  //   - fullFlow=false: legacy path, used when the old separate writer fired
-  //     a direct trigger. Skips coverage edits and runs a single-pricing grab
-  //     with the fair-plan check.
-  async function runGrab(opts = {}) {
-    const fullFlow = !!opts.fullFlow;
-    log(`Starting ${fullFlow ? 'full flow (coverage edits + 9-step grab)' : 'legacy grab (post-trigger)'}`);
-=======
   async function runGrab(opts = {}) {
     const fullFlow = !!opts.fullFlow;
     log(`Starting ${fullFlow ? 'full flow (coverage edits + quote grab)' : 'legacy grab (post-trigger)'}`);
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
 
     if (fullFlow) {
       setStatus('Phase 1: editing coverages and quoting');
@@ -1105,22 +906,8 @@
     }
 
     const submissionNumberEarly = extractSubmissionNumber();
-    if (submissionNumberEarly) log(`Submission Number found early: ${submissionNumberEarly}`);
+    if (submissionNumberEarly) log(`Submission Number found: ${submissionNumberEarly}`);
 
-<<<<<<< HEAD
-    // Step 1: Coverages → INITIAL prices (only meaningful in full flow)
-    let initialPricing = { 'Standard Pricing': '', 'Enhance Pricing': '' };
-    if (fullFlow) {
-      setStatus('Step 1: Coverages (initial pricing)');
-      await goToCoverages();
-      await sleep(CFG.afterClickMs);
-      initialPricing = extractPricingFields();
-      log(`Initial pricing: ${JSON.stringify(initialPricing)}`);
-    }
-
-    // Step 2: Policy Info → Name, Mailing Address
-    setStatus('Step 2: Policy Info');
-=======
     setStatus('Opening Coverages (No Auto Discount)');
     await goToCoverages();
     await sleep(CFG.afterClickMs);
@@ -1128,24 +915,11 @@
     log(`Pricing before auto discount: ${JSON.stringify(pricingNoAutoData)}`);
 
     setStatus('Opening Policy Info');
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     await goToPolicyInfo();
     await sleep(CFG.afterClickMs);
     const policyInfoData = extractPolicyInfoFields();
-    log(`Policy Info fields: ${JSON.stringify(policyInfoData)}`);
+    log(`Policy Info fields read: ${JSON.stringify(policyInfoData)}`);
 
-<<<<<<< HEAD
-    // Steps 3-4: Click Auto radio + Re-Quote (only meaningful in full flow)
-    if (fullFlow) {
-      setStatus('Step 3: clicking Auto radio (Policy Level Discount)');
-      await clickAutoRadio();
-      setStatus('Step 4: re-Quote with Auto discount');
-      await clickQuoteRequote();
-    }
-
-    // Step 5: Dwelling → fields
-    setStatus('Step 5: Dwelling');
-=======
     setStatus('Opening Edit Quote');
     await goToEditQuote();
     await sleep(CFG.afterClickMs);
@@ -1163,83 +937,46 @@
     log(`Quote fields after auto discount: ${JSON.stringify(quoteAfterDiscountData)}`);
 
     setStatus('Opening Dwelling');
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     await goToDwelling();
     await sleep(CFG.afterClickMs);
     const dwellingData = extractDwellingFields();
-    log(`Dwelling fields: ${JSON.stringify(dwellingData)}`);
+    log(`Dwelling fields read: ${JSON.stringify(dwellingData)}`);
 
-<<<<<<< HEAD
-    // Step 6: Coverages → FINAL prices (the only pricing in legacy mode)
-    setStatus(fullFlow ? 'Step 6: Coverages (final pricing, with auto discount)' : 'Coverages pricing');
-    await goToCoverages();
-    await sleep(CFG.afterClickMs);
-    const finalPricing = extractPricingFields();
-    log(`Final pricing: ${JSON.stringify(finalPricing)}`);
-
-    const submissionNumber = extractSubmissionNumber() || submissionNumberEarly || '';
-=======
     setStatus('Opening Coverages (Auto Discount)');
     await goToCoverages();
     await sleep(CFG.afterClickMs);
     const pricingAutoData = extractPricingFields();
     const submissionNumber = extractSubmissionNumber() || submissionNumberEarly || '';
     log(`Pricing after auto discount: ${JSON.stringify(pricingAutoData)}`);
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     if (submissionNumber) log(`Submission Number confirmed: ${submissionNumber}`);
 
-    // Step 7: Exclusions and Conditions → check FAIR Plan Companion Endorsement
-    setStatus('Step 7: Exclusions and Conditions (Fair Plan check)');
+    setStatus('Opening Exclusions and Conditions');
     await goToExclusionsAndConditions();
     await sleep(CFG.afterClickMs);
-<<<<<<< HEAD
-    const exclusionsData = extractExclusionsFields();
-    log(`Exclusions fields: ${JSON.stringify(exclusionsData)}`);
-=======
     const cfpValue = extractCFPValue();
     log(`CFP detected: ${cfpValue}`);
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
 
-    // Step 8: Quote tab → Auto Discount value
-    setStatus('Step 8: Quote tab');
+    setStatus('Opening Quote');
     await goToQuote();
     await sleep(CFG.afterClickMs);
     const quoteData = extractQuoteFields();
-<<<<<<< HEAD
-    log(`Quote fields: ${JSON.stringify(quoteData)}`);
-=======
     log(`Final quote fields read: ${JSON.stringify(quoteData)}`);
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
 
-    // Build the row. Initial pricing fields are blank in legacy mode (they
-    // weren't captured because the old writer's pre-trigger pricing wasn't
-    // accessible by the time the grab started).
     const row = {
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
       'Protection Class': dwellingData['Protection Class'] || '',
-<<<<<<< HEAD
-      'CFP?': exclusionsData['CFP?'] || 'NO',
-=======
       'CFP?': cfpValue,
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       'Reconstruction Cost': dwellingData['Reconstruction Cost'] || '',
       'Year Built': dwellingData['Year Built'] || '',
       'Square FT': dwellingData['Square FT'] || '',
       '# of Story': dwellingData['# of Story'] || '',
       'Water Device?': dwellingData['Water Device?'] || '',
-<<<<<<< HEAD
-      'Standard Pricing Initial': initialPricing['Standard Pricing'] || '',
-      'Enhance Pricing Initial': initialPricing['Enhance Pricing'] || '',
-      'Standard Pricing': finalPricing['Standard Pricing'] || '',
-      'Enhance Pricing': finalPricing['Enhance Pricing'] || '',
-=======
       'Standard Pricing No Auto Discount': pricingNoAutoData['Standard Pricing'] || '',
       'Enhance Pricing No Auto Discount': pricingNoAutoData['Enhance Pricing'] || '',
       'Standard Pricing Auto Discount': pricingAutoData['Standard Pricing'] || '',
       'Enhance Pricing Auto Discount': pricingAutoData['Enhance Pricing'] || '',
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       'Submission Number': submissionNumber || '',
       'Auto Discount': quoteData['Auto Discount'] || quoteAfterDiscountData['Auto Discount'] || '',
       'Date Processed?': formatDate(new Date()),
@@ -1247,15 +984,8 @@
       'Result': ''
     };
 
-    // In legacy mode the initial pricing fields are expected to be blank, so
-    // exclude them from the missing-field check.
-    const skipMissingKeys = new Set(['Done?', 'Result']);
-    if (!fullFlow) {
-      skipMissingKeys.add('Standard Pricing Initial');
-      skipMissingKeys.add('Enhance Pricing Initial');
-    }
     const missing = Object.entries(row)
-      .filter(([key, value]) => !value && !skipMissingKeys.has(key))
+      .filter(([key, value]) => !value && key !== 'Done?' && key !== 'Result')
       .map(([key]) => key);
 
     if (missing.length) {
@@ -1270,13 +1000,6 @@
 
     let currentJob = readCurrentJob();
     if (!currentJob['AZ ID']) {
-<<<<<<< HEAD
-      // Cross-origin fallback: the handoff reached this tab via GM storage
-      // but tm_pc_current_job_v1 is origin-scoped and may not have been
-      // written on this subdomain yet. Bootstrap from the handoff payload
-      // plus the data we already grabbed off the page so we can still save.
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       const handoffNow = readHomeQuoteGrabberTrigger();
       const handoffAzId = normalizeText(handoffNow?.azId || '');
       if (handoffAzId) {
@@ -1307,17 +1030,6 @@
       },
       flow: fullFlow ? 'full' : 'legacy',
       tabsUsed: {
-<<<<<<< HEAD
-        coveragesInitial: fullFlow,
-        policyInfo: true,
-        autoRadioClicked: fullFlow,
-        requoted: fullFlow,
-        dwelling: true,
-        coveragesFinal: true,
-        exclusionsAndConditions: true,
-        quote: true,
-        cfpFromFairPlanEndorsement: true
-=======
         coveragesEditedAndQuotedInitially: fullFlow,
         coveragesNoAutoDiscount: true,
         policyInfo: true,
@@ -1328,7 +1040,6 @@
         exclusionsAndConditions: true,
         quoteFinal: true,
         fairPlanCompanionEndorsementDetected: cfpValue === 'YES'
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
       },
       quoteAfterDiscount: quoteAfterDiscountData,
       row
@@ -1354,8 +1065,6 @@
     }
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.home');
-    // shared-ticket-handoff watches for product='home' step='handoff' and
-    // advances the flow to 'home/sender'. This is the exit handoff.
     writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
     consumeHomeQuoteGrabberHandoff((mergeJob.next || currentJob)['AZ ID']);
     setStatus('Grab complete (handed off to shared-ticket-handoff)');
@@ -1452,23 +1161,10 @@
     return bits.join(' ');
   }
 
-<<<<<<< HEAD
-  // Walks up from an element to the nearest non-disabled clickable ancestor.
-  // Returns null if the resolved target is aria-disabled and has no enabled
-  // clickable ancestor within the search depth. This prevents "click landed
-  // on a disabled tab" silent failures.
-  function resolveClickableTab(el) {
-    if (!el) return null;
-    // Prefer an enabled .gw-action--inner at or above this element.
-    const upgraded = upgradeToClickable(el);
-    if (upgraded && upgraded.getAttribute?.('aria-disabled') !== 'true') return upgraded;
-    // Walk up for a non-disabled clickable owner.
-=======
   function resolveClickableTab(el) {
     if (!el) return null;
     const upgraded = upgradeToClickable(el);
     if (upgraded && upgraded.getAttribute?.('aria-disabled') !== 'true') return upgraded;
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
     const owner = getClickableOwner(el);
     if (owner && owner.getAttribute?.('aria-disabled') !== 'true') return owner;
     return null;
@@ -1498,11 +1194,6 @@
       if (ok) {
         const headerAfter = getHeaderText();
         if (headerBefore && headerAfter && headerBefore === headerAfter && headerBefore !== name) {
-<<<<<<< HEAD
-          // Page became ready but the header never moved. Likely the operator
-          // clicked manually while we were waiting, or readyFn is too lenient.
-=======
->>>>>>> 4422efa (Update home quote grabber edit quote flow)
           log(`${name} ready (but header unchanged: "${headerBefore}")`);
         } else {
           log(`${name} ready (header "${headerBefore}" -> "${headerAfter}")`);
