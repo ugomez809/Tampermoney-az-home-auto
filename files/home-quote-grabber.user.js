@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.4
+// @version      2.5
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
 // ==/UserScript==
@@ -19,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.4';
+  const VERSION = '2.5';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -108,9 +110,33 @@
     return next;
   }
 
+  function readHomeQuoteGrabberTriggerFromGm() {
+    try {
+      if (typeof GM_getValue !== 'function') return null;
+      const raw = GM_getValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, null);
+      if (raw == null) return null;
+      const parsed = typeof raw === 'string' ? safeJsonParse(raw, null) : raw;
+      return isPlainObject(parsed) ? parsed : null;
+    } catch { return null; }
+  }
+
+  function readHomeQuoteGrabberTriggerFromLocalStorage() {
+    const parsed = safeJsonParse(localStorage.getItem(HOME_QUOTE_GRABBER_TRIGGER_KEY), null);
+    return isPlainObject(parsed) ? parsed : null;
+  }
+
   function readHomeQuoteGrabberTrigger() {
-    const trigger = safeJsonParse(localStorage.getItem(HOME_QUOTE_GRABBER_TRIGGER_KEY), null);
-    return isPlainObject(trigger) ? trigger : {};
+    // GM storage bridges PolicyCenter subdomains (writer may be on a
+    // different origin). localStorage is the same-origin fast path.
+    // If both exist, prefer the one with the newer requestedAt.
+    const gm = readHomeQuoteGrabberTriggerFromGm();
+    const ls = readHomeQuoteGrabberTriggerFromLocalStorage();
+    if (gm && ls) {
+      const gmAt = normalizeText(gm.requestedAt || '');
+      const lsAt = normalizeText(ls.requestedAt || '');
+      return (lsAt && lsAt > gmAt) ? ls : gm;
+    }
+    return gm || ls || {};
   }
 
   function hasDirectHomeQuoteGrabberTrigger(azId = '') {
@@ -127,6 +153,13 @@
     const triggerAzId = normalizeText(trigger.azId || '');
     if (triggerAzId && normalizeText(azId) && triggerAzId !== normalizeText(azId)) return;
     try { localStorage.removeItem(HOME_QUOTE_GRABBER_TRIGGER_KEY); } catch {}
+    try {
+      if (typeof GM_deleteValue === 'function') {
+        GM_deleteValue(HOME_QUOTE_GRABBER_TRIGGER_KEY);
+      } else if (typeof GM_setValue === 'function') {
+        GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, null);
+      }
+    } catch {}
   }
 
   function deepClone(value) {

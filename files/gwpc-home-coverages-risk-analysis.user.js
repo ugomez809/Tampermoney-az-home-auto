@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.3.3
+// @version      1.3.4
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
 // ==/UserScript==
@@ -17,7 +18,7 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const HOME_QUOTE_GRABBER_TRIGGER_KEY = 'tm_pc_home_quote_grabber_trigger_v1';
@@ -132,7 +133,15 @@
       source: SCRIPT_NAME,
       version: VERSION
     };
-    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, JSON.stringify(next, null, 2)); } catch {}
+    const serialized = JSON.stringify(next, null, 2);
+    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized); } catch {}
+    // Also bridge cross-origin via Tampermonkey storage so the grabber tab
+    // sees the trigger even when it's on a different PolicyCenter subdomain.
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized);
+      }
+    } catch {}
     log(`Home Quote Grabber trigger saved${azId ? ` | AZ ID ${azId}` : ''}`);
   }
 
