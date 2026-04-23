@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.1.2
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
+// @version      2.2
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, and saves timeout or selected errors into the shared GWPC payload flow without posting or closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,15 +20,13 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '2.1';
+  const VERSION = '2.2';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
-  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
-  const SENT_META_KEY = 'tm_pc_webhook_submit_sent_meta_v17';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
@@ -48,8 +46,6 @@
     uiMs: 250,
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
-    sendWaitMs: 180000,
-    closeBlockCheckMs: 1200,
     maxLogLines: 140,
     maxSentEvents: 300,
     maxRuleText: 280,
@@ -79,7 +75,6 @@
     selectorListeners: [],
     hoverBoxEl: null,
     hoveredEl: null,
-    pending: null,
     current: {
       azId: '',
       submission: '',
@@ -94,11 +89,9 @@
     lastHeaderLogKey: '',
     lastStageLogKey: '',
     lastWaitLogKey: '',
-    lastFailedWaitLogKey: '',
     lastUnknownStageKey: '',
     lastScanAt: 0,
     lastRuntimePersistKey: '',
-    closeCheckTimer: null,
     pausedAtMs: 0,
     frozenElapsedMs: 0
   };
@@ -138,7 +131,7 @@
     state.runtimeStarted = true;
     state.timeoutEnabled = readTimeoutEnabled();
     restoreStaleSelectorPause();
-    state.pending = readPendingPost();
+    clearOwnedSendArtifacts();
     log(`Script started v${VERSION}`);
     log(`Origin: ${location.origin}`);
     log('Fresh timeout gatherer armed');
@@ -149,7 +142,6 @@
     if (state.tickTimer) clearInterval(state.tickTimer);
     state.tickTimer = setInterval(() => {
       try {
-        processPendingSend();
         if (state.running) scheduleScan('tick');
       } catch (err) {
         log(`Tick failed: ${err?.message || err}`);
@@ -177,7 +169,6 @@
     try { clearInterval(state.bootstrapTimer); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.uiTimer); } catch {}
-    try { clearTimeout(state.closeCheckTimer); } catch {}
     try { state.mutationObserver?.disconnect(); } catch {}
 
     try { window.removeEventListener('beforeunload', handleBeforeUnload, true); } catch {}
@@ -840,10 +831,6 @@
     return hashString(JSON.stringify(sigObj));
   }
 
-  function readSentMeta() {
-    return safeJsonParse(localStorage.getItem(SENT_META_KEY), null);
-  }
-
   function readRuntimeState() {
     const runtime = safeJsonParse(localStorage.getItem(KEYS.runtime), null);
     return isPlainObject(runtime) ? runtime : {};
@@ -871,27 +858,8 @@
     }
   }
 
-  function readPendingPost() {
-    const pending = safeJsonParse(localStorage.getItem(KEYS.pendingPost), null);
-    return isPlainObject(pending) ? pending : null;
-  }
-
-  function writePendingPost(pending) {
-    state.pending = isPlainObject(pending) ? deepClone(pending) : null;
-    if (state.pending) localStorage.setItem(KEYS.pendingPost, JSON.stringify(state.pending, null, 2));
-    else localStorage.removeItem(KEYS.pendingPost);
-    renderButtons();
-    return state.pending;
-  }
-
-  function clearForceSendRequestIfOwned(reasonPrefix = '') {
-    const current = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
-    if (!isPlainObject(current)) return;
-    const source = normalizeText(current.source || '');
-    const reason = normalizeText(current.reason || '');
-    if (source !== SCRIPT_NAME) return;
-    if (reasonPrefix && !reason.startsWith(reasonPrefix)) return;
-    try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
+  function clearOwnedSendArtifacts() {
+    try { localStorage.removeItem(KEYS.pendingPost); } catch {}
   }
 
   function readSentEventsStore() {
@@ -923,59 +891,31 @@
     return next;
   }
 
-  function rememberSentEvent(pending, sentMeta) {
+  function rememberDispatchedEvent(event) {
     const store = readSentEventsStore();
     const record = {
-      eventId: pending.eventId,
-      dedupeKey: pending.dedupeKey,
-      azId: pending.azId,
-      product: pending.product,
-      ruleId: normalizeText(pending.ruleId || ''),
-      signature: normalizeText(pending.signature || ''),
-      requestAt: normalizeText(pending.requestedAt || ''),
-      sentAt: normalizeText(sentMeta?.sentAt || nowIso()),
-      source: normalizeText(pending.source || SCRIPT_NAME)
+      eventId: event.eventId,
+      dedupeKey: event.dedupeKey,
+      azId: event.identity?.['AZ ID'] || '',
+      product: event.product,
+      ruleId: normalizeText(event.selectorRuleId || ''),
+      signature: '',
+      requestAt: normalizeText(event.detectedAt || nowIso()),
+      sentAt: '',
+      source: normalizeText(event.triggerType || SCRIPT_NAME)
     };
-    store.byId[pending.eventId] = record;
-    if (pending.dedupeKey) store.byDedupeKey[pending.dedupeKey] = pending.eventId;
-    store.order = Array.isArray(store.order) ? store.order.filter((id) => id !== pending.eventId) : [];
-    store.order.push(pending.eventId);
+    store.byId[event.eventId] = record;
+    if (event.dedupeKey) store.byDedupeKey[event.dedupeKey] = event.eventId;
+    store.order = Array.isArray(store.order) ? store.order.filter((id) => id !== event.eventId) : [];
+    store.order.push(event.eventId);
     writeSentEventsStore(pruneSentEventsStore(store));
   }
 
   function hasSentOrPendingDedupe(dedupeKey) {
     const normalized = normalizeText(dedupeKey);
     if (!normalized) return false;
-    if (normalizeText(state.pending?.dedupeKey || '') === normalized) return true;
     const store = readSentEventsStore();
     return !!normalizeText(store.byDedupeKey[normalized] || '');
-  }
-
-  function findSentRecordByEventId(eventId) {
-    const store = readSentEventsStore();
-    return isPlainObject(store.byId[eventId]) ? store.byId[eventId] : null;
-  }
-
-  function hasForceSendRequest() {
-    const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
-    return !!(request && typeof request === 'object' && request.requestedAt);
-  }
-
-  function requestForceSend(reason) {
-    if (!timeoutActionsEnabled()) {
-      log('Force send blocked: timeout actions are OFF');
-      return { requestedAt: '', reason: normalizeText(reason || 'header-timeout'), source: SCRIPT_NAME, blocked: true };
-    }
-
-    const request = {
-      requestedAt: nowIso(),
-      reason: normalizeText(reason || 'header-timeout'),
-      source: SCRIPT_NAME
-    };
-    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
-    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
-    log(`Force send requested: ${request.reason}`);
-    return request;
   }
 
   function handleBeforeUnload() {
@@ -1062,8 +1002,6 @@
       submission,
       pageIdentity
     });
-
-    processPendingSend();
 
     if (!state.running || state.selectorMode || state.modalOpen) {
       renderAll();
@@ -1311,37 +1249,11 @@
     }
 
     try {
-      const rollback = {
-        product: context.product,
-        payloadKey: context.product === 'home' ? KEYS.homePayload : KEYS.autoPayload,
-        payloadValue: readProductPayload(context.product).value,
-        bundleValue: readBundle()
-      };
       saveEventToPayload(context.product, context.job, event);
-      const bundle = saveEventToBundle(context.product, context.job, event);
-      const signature = buildSignatureJobBundle(context.job, bundle);
-      const forceRequest = requestForceSend(event.actionKey || 'header-timeout');
-
-      writePendingPost({
-        eventId: event.eventId,
-        dedupeKey: event.dedupeKey,
-        azId: context.job['AZ ID'],
-        product: context.product,
-        ruleId: normalizeText(event.selectorRuleId || ''),
-        signature,
-        requestedAt: normalizeText(forceRequest.requestedAt || nowIso()),
-        status: 'waiting',
-        source: normalizeText(event.triggerType || 'timeout'),
-        errorText: normalizeText(event.errorText || ''),
-        headerText: normalizeText(event.headerText || ''),
-        submissionNumber: normalizeText(event.submissionNumber || ''),
-        attempts: 1,
-        rollback
-      });
-
-      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event`);
-      setStatus(`Waiting for sender (${context.product.toUpperCase()})`);
-      clearWaitLog();
+      saveEventToBundle(context.product, context.job, event);
+      rememberDispatchedEvent(event);
+      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to payload/bundle`);
+      setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();
       return true;
     } catch (err) {
@@ -1368,147 +1280,6 @@
     const event = buildTimeoutEvent(context);
     if (hasSentOrPendingDedupe(event.dedupeKey)) return;
     dispatchEvent(event);
-  }
-
-  function restorePendingRollback(pending) {
-    const rollback = isPlainObject(pending?.rollback) ? pending.rollback : null;
-    if (!rollback) return false;
-    try {
-      if (rollback.payloadKey) {
-        if (rollback.payloadValue == null) localStorage.removeItem(rollback.payloadKey);
-        else localStorage.setItem(rollback.payloadKey, JSON.stringify(rollback.payloadValue, null, 2));
-      }
-      if (rollback.bundleValue == null) localStorage.removeItem(BUNDLE_KEY);
-      else localStorage.setItem(BUNDLE_KEY, JSON.stringify(rollback.bundleValue, null, 2));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function cancelPendingTimeoutFlow(reason) {
-    const pending = readPendingPost();
-    if (!pending) return false;
-    restorePendingRollback(pending);
-    clearForceSendRequestIfOwned();
-    writePendingPost(null);
-    state.lastFailedWaitLogKey = '';
-    log(reason);
-    setStatus('Watching header');
-    return true;
-  }
-
-  function processPendingSend() {
-    const pending = readPendingPost();
-    state.pending = pending;
-    if (!pending) {
-      state.lastFailedWaitLogKey = '';
-      renderButtons();
-      return;
-    }
-
-    if (!timeoutActionsEnabled()) {
-      cancelPendingTimeoutFlow('Timeout actions are OFF. Pending timeout-script post canceled.');
-      return;
-    }
-
-    const sentMeta = readSentMeta();
-    const pendingAzId = normalizeText(pending.azId || '');
-    const pendingSig = normalizeText(pending.signature || '');
-    const requestMs = Date.parse(pending.requestedAt || '') || 0;
-    const sentAtMs = Date.parse(sentMeta?.sentAt || '') || 0;
-    const sentAzId = normalizeText(sentMeta?.azId || '');
-    const sentSig = normalizeText(sentMeta?.signature || '');
-
-    if (pending.status === 'waiting') {
-      if (pendingAzId && pendingSig && sentAzId === pendingAzId && sentSig === pendingSig && sentAtMs >= requestMs) {
-        rememberSentEvent(pending, sentMeta);
-        writePendingPost(null);
-        log(`Sender success confirmed for ${pending.eventId}`);
-        setStatus('Posted successfully');
-        attemptCloseAfterSuccess();
-        return;
-      }
-
-      const ageMs = Date.now() - requestMs;
-      if (requestMs > 0 && ageMs >= CFG.sendWaitMs) {
-        const next = {
-          ...pending,
-          status: 'failed',
-          failedAt: nowIso(),
-          lastError: 'Sender success marker was not seen before the wait window expired'
-        };
-        writePendingPost(next);
-        log(next.lastError);
-        setStatus('Post failed / waiting retry');
-        state.lastFailedWaitLogKey = '';
-        return;
-      }
-
-      logWait(`pending:${pending.eventId}`, `Waiting for sender success for ${pending.eventId}`);
-      return;
-    }
-
-    if (pending.status === 'failed' && state.lastFailedWaitLogKey !== pending.eventId) {
-      state.lastFailedWaitLogKey = pending.eventId;
-      log(`Pending post failed: ${normalizeText(pending.lastError || 'Unknown send failure')}`);
-    }
-  }
-
-  function retryPendingPost() {
-    if (!timeoutActionsEnabled()) {
-      log('Retry blocked: timeout actions are OFF');
-      return;
-    }
-
-    const pending = readPendingPost();
-    if (!pending) {
-      log('Retry skipped: no pending post');
-      return;
-    }
-
-    const context = buildEventContext();
-    if (!context.ok) {
-      log(`Retry blocked: ${context.reason}`);
-      return;
-    }
-
-    const bundle = ensureBundleForJob(context.job);
-    if (!bundle) {
-      log('Retry blocked: missing bundle');
-      return;
-    }
-
-    const signature = buildSignatureJobBundle(context.job, bundle);
-    const forceRequest = requestForceSend(`retry:${pending.eventId}`);
-    writePendingPost({
-      ...pending,
-      azId: context.job['AZ ID'],
-      signature,
-      requestedAt: normalizeText(forceRequest.requestedAt || nowIso()),
-      status: 'waiting',
-      lastError: '',
-      attempts: Number(pending.attempts || 0) + 1,
-      retriedAt: nowIso()
-    });
-    log(`Retry requested for ${pending.eventId}`);
-    setStatus('Waiting for sender retry');
-    clearWaitLog();
-  }
-
-  function attemptCloseAfterSuccess() {
-    if (!timeoutActionsEnabled()) {
-      log('Close skipped: timeout actions are OFF');
-      return;
-    }
-    log('Attempting to close tab after successful post');
-    try { window.close(); } catch {}
-    try { clearTimeout(state.closeCheckTimer); } catch {}
-    state.closeCheckTimer = setTimeout(() => {
-      if (!state.destroyed) {
-        log('Close blocked after successful post');
-      }
-    }, CFG.closeBlockCheckMs);
   }
 
   function buildRuleId(selector, textFingerprint) {
@@ -1800,7 +1571,7 @@
     if (!isPlainObject(pauseState)) return;
 
     try {
-      if (pauseState.createdPause && !hasForceSendRequest()) {
+      if (pauseState.createdPause) {
         localStorage.removeItem(GLOBAL_PAUSE_KEY);
       }
     } catch {}
@@ -1820,10 +1591,6 @@
 
   function startSelectorMode() {
     if (state.selectorMode || state.modalOpen) return;
-    if (state.pending?.status === 'waiting') {
-      log('Selector mode blocked while sender is still posting');
-      return;
-    }
 
     publishSelectorPause();
     state.selectorMode = true;
@@ -1844,7 +1611,7 @@
     removeSaveRuleModal();
     if (options.restorePause !== false) restoreSelectorPause();
     if (options.logIt !== false && normalizeText(message)) log(message);
-    if (!state.destroyed) setStatus(state.pending ? 'Waiting for sender' : (state.running ? 'Watching header' : 'Stopped'));
+    if (!state.destroyed) setStatus(state.running ? 'Watching header' : 'Stopped');
     renderButtons();
     renderAll();
   }
@@ -2024,8 +1791,6 @@
   }
 
   function processSelectorMatches() {
-    if (state.pending?.status === 'waiting') return;
-
     const context = buildEventContext();
     if (!context.ok) return;
 
@@ -2082,7 +1847,6 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">STOP</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-enable-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">TIMEOUT ON</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
-          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-retry" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">RETRY POST</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
@@ -2109,7 +1873,6 @@
     state.els.toggle = $('#tm-timeout-toggle', panel);
     state.els.timeoutEnableToggle = $('#tm-timeout-enable-toggle', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
-    state.els.retry = $('#tm-timeout-retry', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
     state.els.status = $('#tm-timeout-status', panel);
     state.els.header = $('#tm-timeout-header', panel);
@@ -2143,7 +1906,7 @@
     state.els.timeoutEnableToggle.onclick = () => {
       const enabled = writeTimeoutEnabled(!timeoutActionsEnabled());
       if (!enabled) {
-        cancelPendingTimeoutFlow('Timeout actions turned OFF. Posting and close are blocked.');
+        clearOwnedSendArtifacts();
         log('Timeout actions OFF');
       } else {
         log('Timeout actions ON');
@@ -2162,7 +1925,6 @@
       }
     };
 
-    state.els.retry.onclick = () => retryPendingPost();
     state.els.copyLogs.onclick = () => copyLogsToClipboard();
 
     renderButtons();
@@ -2188,12 +1950,6 @@
       state.els.selector.style.cursor = 'pointer';
     }
 
-    if (state.els.retry) {
-      const enabled = !!state.pending;
-      state.els.retry.disabled = !enabled;
-      state.els.retry.style.opacity = enabled ? '1' : '0.5';
-      state.els.retry.style.cursor = enabled ? 'pointer' : 'not-allowed';
-    }
   }
 
   function renderAll() {
@@ -2209,15 +1965,11 @@
       const statusText =
         state.modalOpen ? 'Selector config' :
         state.selectorMode ? 'Selector mode' :
-        state.pending?.status === 'waiting' ? 'Waiting for sender' :
-        state.pending?.status === 'failed' ? 'Post failed / retry ready' :
         state.running ? (state.lastStatus || 'Watching header') :
         'Stopped';
 
       state.els.status.textContent = statusText;
       state.els.status.style.color =
-        state.pending?.status === 'failed' ? '#fca5a5' :
-        state.pending?.status === 'waiting' ? '#facc15' :
         state.selectorMode || state.modalOpen ? '#67e8f9' :
         state.running ? '#86efac' : '#fca5a5';
     }
