@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.0.9
+// @version      1.1.0
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.0.9';
+  const VERSION = '1.1.0';
 
   const CFG = {
     tickMs: 900,
@@ -25,9 +25,11 @@
     waitTimeoutMs: 30000,
     afterEditAllMs: 1200,
     afterFieldMs: 250,
-    afterQuoteWaitMs: 3000,
+    afterQuoteWaitMs: 1200,
     afterClickMs: 450,
-    maxQuoteAttempts: 3,
+    maxQuoteAttempts: 6,
+    quoteTransitionTimeoutMs: 25000,
+    betweenQuoteAttemptsMs: 1500,
     triggerStableMs: 1000,
     maxLogLines: 14,
     panelRight: 12,
@@ -199,7 +201,7 @@
       'Additional / Personal Injury'
     );
 
-    const quoteOK = await clickQuoteUpTo3IfStuck();
+    const quoteOK = await clickQuoteUntilTransition();
     if (!quoteOK) {
       throw new Error('Quote click did not move off Coverages');
     }
@@ -539,18 +541,33 @@
     return false;
   }
 
-  async function clickQuoteUpTo3IfStuck() {
+  async function clickQuoteUntilTransition() {
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
-      clickQuoteOnce();
+      const clicked = clickQuoteOnce();
+      if (!clicked) {
+        await sleep(CFG.betweenQuoteAttemptsMs);
+        continue;
+      }
+
       await sleep(CFG.afterQuoteWaitMs);
 
-      if (!headerStillCoverages()) {
+      const movedOffCoverages = await waitFor(
+        () => !headerStillCoverages(),
+        CFG.quoteTransitionTimeoutMs,
+        `Quote transition after attempt ${attempt}`
+      );
+
+      if (movedOffCoverages) {
         log('Quote succeeded');
         return true;
       }
 
       log(`Still on Coverages after Quote attempt ${attempt}`);
+      if (attempt < CFG.maxQuoteAttempts) {
+        setStatus(`Waiting to retry Quote (${attempt}/${CFG.maxQuoteAttempts})`);
+        await sleep(CFG.betweenQuoteAttemptsMs);
+      }
     }
 
     return false;

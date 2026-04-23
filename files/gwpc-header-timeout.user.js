@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      1.23
+// @version      1.24
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '1.23';
+  const VERSION = '1.24';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -32,7 +32,8 @@
     autoMissingStableMs: 3000,
     maxLogLines: 18,
     selectorOutlineColor: '#22d3ee',
-    selectorOutlineWidth: 2
+    selectorOutlineWidth: 2,
+    bootstrapRetryMs: 500
   };
 
   const KEYS = {
@@ -60,6 +61,8 @@
     els: {},
     tickTimer: null,
     uiTimer: null,
+    bootstrapTimer: null,
+    runtimeStarted: false,
     selectorMode: false,
     selectorDialogOpen: false,
     selectorTargetEl: null,
@@ -73,16 +76,38 @@
   boot();
 
   function boot() {
+    tryStartRuntime();
+    if (state.runtimeStarted) return;
+
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', onReady, { once: true });
-    } else {
-      onReady();
+      document.addEventListener('DOMContentLoaded', tryStartRuntime, { once: true });
     }
+
+    window.addEventListener('load', tryStartRuntime, { once: true });
+    window.addEventListener('pageshow', tryStartRuntime, { once: true });
+
+    if (state.bootstrapTimer) clearInterval(state.bootstrapTimer);
+    state.bootstrapTimer = setInterval(() => {
+      tryStartRuntime();
+      if (state.runtimeStarted && state.bootstrapTimer) {
+        clearInterval(state.bootstrapTimer);
+        state.bootstrapTimer = null;
+      }
+    }, CFG.bootstrapRetryMs);
   }
 
-  function onReady() {
+  function tryStartRuntime() {
+    if (!document.documentElement) return;
+    if (!buildUi()) return;
+
+    if (state.runtimeStarted) {
+      renderStatus();
+      renderLiveUi();
+      return;
+    }
+
+    state.runtimeStarted = true;
     clearStaleSharedPause();
-    buildUi();
     log('Script started');
     log('Shared-payload error gatherer armed');
     log('Selector mode publishes tm_pc_global_pause_v1');
@@ -516,6 +541,7 @@
   }
 
   function renderLiveUi() {
+    ensurePanelMounted();
     if (!state.enabled) return;
     const currentSubmission = normalizeText(getSubmissionNumber()) || state.lastSubmission || '';
     const currentHeader = normalizeText(getGuidewireHeader()) || state.lastHeader || '';
@@ -760,7 +786,10 @@
   function buildUi() {
     if (!document.documentElement) return false;
     const existing = $('#tm-pc-header-timeout-panel');
-    if (existing) return true;
+    if (existing) {
+      bindUi(existing);
+      return true;
+    }
 
     const panel = document.createElement('div');
     panel.id = 'tm-pc-header-timeout-panel';
@@ -807,16 +836,7 @@
     document.documentElement.appendChild(panel);
     loadPanelPos(panel);
     makeDraggable(panel, $('#tm-pc-header-timeout-handle', panel));
-
-    state.panel = panel;
-    state.els.toggle = $('#tm-pc-header-timeout-toggle', panel);
-    state.els.selector = $('#tm-pc-header-timeout-selector', panel);
-    state.els.status = $('#tm-pc-header-timeout-status', panel);
-    state.els.submission = $('#tm-pc-header-timeout-submission', panel);
-    state.els.header = $('#tm-pc-header-timeout-header', panel);
-    state.els.age = $('#tm-pc-header-timeout-age', panel);
-    state.els.deadline = $('#tm-pc-header-timeout-deadline', panel);
-    state.els.logs = $('#tm-pc-header-timeout-logs', panel);
+    bindUi(panel);
 
     state.els.toggle.addEventListener('click', () => {
       state.enabled = !state.enabled;
@@ -832,6 +852,25 @@
     renderStatus();
     renderLogs();
     return true;
+  }
+
+  function bindUi(panel) {
+    state.panel = panel;
+    state.els.toggle = $('#tm-pc-header-timeout-toggle', panel);
+    state.els.selector = $('#tm-pc-header-timeout-selector', panel);
+    state.els.status = $('#tm-pc-header-timeout-status', panel);
+    state.els.submission = $('#tm-pc-header-timeout-submission', panel);
+    state.els.header = $('#tm-pc-header-timeout-header', panel);
+    state.els.age = $('#tm-pc-header-timeout-age', panel);
+    state.els.deadline = $('#tm-pc-header-timeout-deadline', panel);
+    state.els.logs = $('#tm-pc-header-timeout-logs', panel);
+  }
+
+  function ensurePanelMounted() {
+    if (state.panel && document.contains(state.panel)) return;
+    buildUi();
+    renderStatus();
+    renderLogs();
   }
 
   function enterSelectorMode() {
