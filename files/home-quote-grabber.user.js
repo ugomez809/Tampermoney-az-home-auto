@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      4.0.1
+// @version      4.0.2
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '4.0.1';
+  const VERSION = '4.0.2';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -130,6 +130,7 @@
     coverageTriggerSince: 0,
     pageLoadedAtMs: Date.now(),
     currentAzId: '',
+    autoDiscountChosenThisLoad: false,
     lastQuoteClickAt: 0,
     lastTabNudgeAt: 0
   };
@@ -733,6 +734,7 @@
     const azId = normalizeText(currentJob?.['AZ ID'] || '');
     if (!azId) {
       state.currentAzId = '';
+      state.autoDiscountChosenThisLoad = false;
       return;
     }
 
@@ -745,6 +747,7 @@
     state.triggerSince = 0;
     state.activeHandoffRequestedAt = '';
     state.announcedSkipReason = '';
+    state.autoDiscountChosenThisLoad = false;
   }
 
   function tick() {
@@ -1776,9 +1779,10 @@
   function extractQuoteFields() {
     const raw = getTextById(IDS.autoDiscountLV);
     const amount = extractFirstMoney(raw);
+    const applied = isAutoDiscountApplied() || state.autoDiscountChosenThisLoad === true;
 
     return {
-      'Auto Discount': amount
+      'Auto Discount': amount || (applied ? 'Yes' : '')
     };
   }
 
@@ -1884,6 +1888,7 @@
 
       const ok = await waitFor(() => isAutoDiscountApplied(), CFG.waitTimeoutMs, 'auto discount selection');
       if (ok) {
+        state.autoDiscountChosenThisLoad = true;
         log('Auto discount selected');
         return;
       }
