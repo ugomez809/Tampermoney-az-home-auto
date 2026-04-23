@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Policy Info
 // @namespace    homebot.gwpc-policy-info
-// @version      1.9
+// @version      2.0
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -16,7 +16,13 @@
 (function () {
   'use strict';
 
+  const SCRIPT_NAME = 'Home Bot: Guidewire Policy Info';
+  const VERSION = '2.0';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+
   const REQUIRED_LABELS = ['Submission (Draft)'];
+  const HOME_LABEL = 'Homeowners';
   const TRIGGER_TITLE_STARTS_WITH = 'Policy Info';
   const PERSONAL_AUTO_LABEL = 'Personal Auto';
   const HARD_STOP_LABEL = 'Submission (Quoted)';
@@ -64,6 +70,40 @@
   let stuckTimer = null;
 
   let nextAttempts = 0;
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return normText(job?.['AZ ID'] || '');
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (normText(stage.product) !== product || normText(stage.step) !== step) return false;
+    if (!normText(stage.azId)) return true;
+    return normText(stage.azId) === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
 
   function mountToggle() {
     const btn = document.createElement('button');
@@ -151,6 +191,16 @@
 
   function hasQuotedLabel() {
     return hasLabelExactAnyDoc(HARD_STOP_LABEL);
+  }
+
+  function hasHomeownersLabel() {
+    return hasLabelExactAnyDoc(HOME_LABEL);
+  }
+
+  function getActiveFlow() {
+    if (matchesStage('home', 'policy_info') && hasHomeownersLabel() && !isPersonalAutoMode()) return 'home';
+    if (matchesStage('auto', 'policy_info') && isPersonalAutoMode()) return 'auto';
+    return '';
   }
 
   function hasGenderFallbackErrorAnyDoc() {
@@ -382,6 +432,9 @@
     }
 
     if (!titleIsPolicyInfoAnyDoc()) {
+      const flow = getActiveFlow();
+      if (flow === 'home') writeFlowStage('home', 'dwelling');
+      if (flow === 'auto') writeFlowStage('auto', 'drivers');
       done = true;
       running = false;
       if (mo) { try { mo.disconnect(); } catch {} mo = null; }
@@ -442,6 +495,7 @@
       hardStopAndFinish();
       return;
     }
+    if (!getActiveFlow()) return;
     if (!gateOK()) return;
     if (!titleIsPolicyInfoAnyDoc()) return;
 

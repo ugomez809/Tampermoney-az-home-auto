@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         03 AQB - Specialty Product → Remove if needed, then Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.6
+// @version      1.7
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. After Quote click: if header "Auto Data Prefill" still visible after 3s, click Quote again (up to 3 total). Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,6 +19,8 @@
   /************* CONFIG *************/
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const WAIT_KEY = 'aqb_step_specialty_start';
   const DONE_KEY = 'aqb_step_specialty_done';
@@ -45,6 +47,39 @@
   let armed = true;
   let finished = false;
   let running = false;
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return String(job?.['AZ ID'] || '').trim();
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (String(stage.product || '').trim() !== product || String(stage.step || '').trim() !== step) return false;
+    if (!String(stage.azId || '').trim()) return true;
+    return String(stage.azId || '').trim() === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: 'AQB Specialty',
+      version: '1.7'
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
 
   // track "flag became 1" moment
   let sawFlagAt = 0;
@@ -103,7 +138,7 @@
   }
 
   function gateOK() {
-    return REQUIRED_LABELS.every(hasLabelExact);
+    return matchesStage('auto', 'specialty') && REQUIRED_LABELS.every(hasLabelExact);
   }
 
   function waitKeyReady() {
@@ -112,6 +147,7 @@
 
   function setDoneFlag() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    writeFlowStage('auto', 'quote_grabber');
   }
 
   function clearDoneFlag() {

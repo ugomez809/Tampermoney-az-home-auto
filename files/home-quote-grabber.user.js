@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.0
+// @version      2.1
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,10 +19,11 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.0';
+  const VERSION = '2.1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
@@ -78,6 +79,32 @@
 
   function safeJsonParse(value, fallback = null) {
     try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return isPlainObject(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step, azId = '') {
+    const stage = readFlowStage();
+    if (normalizeText(stage.product) !== normalizeText(product)) return false;
+    if (normalizeText(stage.step) !== normalizeText(step)) return false;
+    if (!normalizeText(stage.azId) || !normalizeText(azId)) return true;
+    return normalizeText(stage.azId) === normalizeText(azId);
+  }
+
+  function writeFlowStage(product, step, azId = '') {
+    const next = {
+      product: normalizeText(product),
+      step: normalizeText(step),
+      azId: normalizeText(azId),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2));
+    return next;
   }
 
   function deepClone(value) {
@@ -250,6 +277,13 @@
   function tick() {
     if (!state.running || state.busy || state.doneThisLoad) return;
 
+    const currentJob = readCurrentJob();
+    if (!matchesStage('home', 'quote_grabber', currentJob['AZ ID']) || !hasVisibleExactLabel('Homeowners')) {
+      state.triggerSince = 0;
+      setWaiting('Waiting for HOME quote-grabber trigger');
+      return;
+    }
+
     if (hasVisibleExactLabel('Personal Auto')) {
       state.triggerSince = 0;
       setWaiting('Blocked: Personal Auto present');
@@ -407,6 +441,7 @@
     }
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.home');
+    writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
     setStatus('Grab complete');
     state.doneThisLoad = true;
   }

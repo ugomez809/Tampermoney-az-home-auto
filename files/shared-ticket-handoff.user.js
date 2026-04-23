@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.4
+// @version      1.5
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC matches Name + Mailing Address from current job, home payload, auto payload, or bundle and writes tm_pc_current_job_v1. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,9 +22,10 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.4';
+  const VERSION = '1.5';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const GM_KEYS = {
     HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1'
@@ -239,6 +240,12 @@
         currentAzId === clean(handoff.ticketId) &&
         namesLikelySame(currentName || gwName, gwName) &&
         addressesLikelySame(currentAddress || gwAddress, gwAddress)) {
+      maybeAdvanceGwpcFlow({
+        'AZ ID': clean(handoff.ticketId),
+        'Name': gwName,
+        'Mailing Address': gwAddress,
+        'SubmissionNumber': submissionNumber
+      });
       setIdle('gw-already-applied', `GWPC linked ${handoff.ticketId}`);
       return;
     }
@@ -266,7 +273,68 @@
     log(`GWPC Name: ${nextJob['Name']}`);
     log(`GWPC Address: ${nextJob['Mailing Address']}`);
     log(`GWPC Submission: ${nextJob['SubmissionNumber'] || '(blank)'}`);
+    maybeAdvanceGwpcFlow(nextJob);
     setStatus(`GWPC linked ${nextJob['AZ ID']}`);
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function writeFlowStage(product, step, azId = '') {
+    const next = {
+      product: clean(product),
+      step: clean(step),
+      azId: clean(azId),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  function hasVisibleExactLabel(labelText) {
+    const wanted = clean(labelText);
+    if (!wanted) return false;
+    for (const doc of getAccessibleDocs()) {
+      const hit = Array.from(doc.querySelectorAll('.gw-label'))
+        .some((el) => isVisible(el) && clean(el.textContent) === wanted);
+      if (hit) return true;
+    }
+    return false;
+  }
+
+  function maybeAdvanceGwpcFlow(job) {
+    const azId = clean(job && job['AZ ID']);
+    if (!azId) return;
+
+    const stage = readFlowStage();
+    const stageAzId = clean(stage.azId);
+
+    if (stageAzId && stageAzId !== azId) {
+      if (hasVisibleExactLabel('Homeowners')) {
+        writeFlowStage('home', 'disclosure', azId);
+      }
+      return;
+    }
+
+    if (!clean(stage.product) || !clean(stage.step)) {
+      if (hasVisibleExactLabel('Homeowners')) {
+        writeFlowStage('home', 'disclosure', azId);
+      }
+      return;
+    }
+
+    if (clean(stage.product) === 'home' && clean(stage.step) === 'handoff') {
+      writeFlowStage('home', 'sender', azId);
+      return;
+    }
+
+    if (clean(stage.product) === 'auto' && clean(stage.step) === 'handoff') {
+      writeFlowStage('auto', 'sender', azId);
+    }
   }
 
   function getGwpcIdentity() {

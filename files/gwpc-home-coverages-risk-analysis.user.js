@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.1.0
+// @version      1.2.0
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,9 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const CFG = {
     tickMs: 900,
@@ -85,6 +87,39 @@
     lastQuoteClickAt: 0
   };
 
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return normalizeText(job?.['AZ ID'] || '');
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (normalizeText(stage.product) !== product || normalizeText(stage.step) !== step) return false;
+    if (!normalizeText(stage.azId)) return true;
+    return normalizeText(stage.azId) === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
+
   init();
 
   function init() {
@@ -98,6 +133,10 @@
 
   function tick() {
     if (!state.running || state.busy || state.doneThisLoad || state.attemptedThisLoad) return;
+    if (!matchesStage('home', 'coverages') || !hasVisibleExactLabel('Homeowners')) {
+      setWaiting('Waiting for HOME coverages trigger...');
+      return;
+    }
 
     if (!isOnTriggerPage()) {
       state.triggerSince = 0;
@@ -122,6 +161,7 @@
 
     runFlow()
       .then(() => {
+        writeFlowStage('home', 'quote_grabber');
         state.doneThisLoad = true;
         setStatus('Done');
         log('Flow complete');
@@ -679,6 +719,11 @@
     return getHeaderText() === IDS.coveragesHeader &&
       !!byId(IDS.coveragesScreen) &&
       !!byId(IDS.mainArea);
+  }
+
+  function hasVisibleExactLabel(labelText) {
+    return Array.from(document.querySelectorAll('.gw-label'))
+      .some((el) => isVisible(el) && normalizeText(el.textContent || '') === labelText);
   }
 
   function getHeaderText() {

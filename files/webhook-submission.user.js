@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.14
+// @version      1.15
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,9 +22,10 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.14';
+  const VERSION = '1.15';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -377,6 +378,32 @@
     return job;
   }
 
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return isPlainObject(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step, azId = '') {
+    const stage = readFlowStage();
+    if (normalizeText(stage.product) !== normalizeText(product)) return false;
+    if (normalizeText(stage.step) !== normalizeText(step)) return false;
+    if (!normalizeText(stage.azId) || !normalizeText(azId)) return true;
+    return normalizeText(stage.azId) === normalizeText(azId);
+  }
+
+  function writeFlowStage(product, step, azId = '') {
+    const next = {
+      product: normalizeText(product),
+      step: normalizeText(step),
+      azId: normalizeText(azId),
+      updatedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2));
+    return next;
+  }
+
   function readBundleRaw() {
     return safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
   }
@@ -668,7 +695,11 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async function afterSuccess(_job, _bundle) {
+  async function afterSuccess(job, bundle) {
+    const homeSuccessOnly = hasHomeSuccess(bundle) && !hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
+    if (homeSuccessOnly) writeFlowStage('auto', 'start', job['AZ ID']);
+    else writeFlowStage('auto', 'done', job['AZ ID']);
+
     state.running = false;
     sessionStorage.setItem(CFG.stoppedKey, '1');
     clearForceSendRequest();
@@ -892,6 +923,16 @@
     }
 
     clearWaitLog();
+
+    if (!forceSend) {
+      const stageReady = matchesStage('home', 'sender', job['AZ ID']) || matchesStage('auto', 'sender', job['AZ ID']);
+      if (!stageReady) {
+        state.quoteSeenAt = 0;
+        setStatus('Waiting for sender trigger');
+        logWait('wait-stage-sender', 'Waiting for shared sender trigger');
+        return;
+      }
+    }
 
     if (forceSend) {
       setStatus('Force send ready');

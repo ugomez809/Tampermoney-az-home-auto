@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.0
+// @version      3.1
 // @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, Garage Type fix after first Quote failure, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,9 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.0';
+  const VERSION = '3.1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const CFG = {
     tickMs: 900,
@@ -38,7 +40,7 @@
     zIndex: 2147483647
   };
 
-  const REQUIRED_LABELS = ['Submission (Draft)'];
+  const REQUIRED_LABELS = ['Submission (Draft)', 'Homeowners'];
   const HEADER_STUCK_EXACT = 'Dwelling';
 
   const IDS = {
@@ -86,6 +88,39 @@
     btn: null,
     styleEl: null
   };
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return norm(job?.['AZ ID'] || '');
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (norm(stage.product) !== product || norm(stage.step) !== step) return false;
+    if (!norm(stage.azId)) return true;
+    return norm(stage.azId) === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -150,7 +185,7 @@
   }
 
   function gateOk() {
-    return REQUIRED_LABELS.every(hasLabelExact) && isDwellingHere();
+    return matchesStage('home', 'dwelling') && REQUIRED_LABELS.every(hasLabelExact) && isDwellingHere();
   }
 
   function scrollFocus(el) {
@@ -631,6 +666,7 @@
       if (fieldsReady()) {
         setStatus('Filling Dwelling');
         await fillDwellingFlow();
+        writeFlowStage('home', 'coverages');
         state.done = true;
         setStatus('Done');
         log('Dwelling step complete');
@@ -658,6 +694,7 @@
             if (fieldsReady()) {
               setStatus('Filling Dwelling');
               await fillDwellingFlow();
+              writeFlowStage('home', 'coverages');
               state.done = true;
               setStatus('Done');
               log('Dwelling step complete');
@@ -677,6 +714,7 @@
       log('Create Valuation missing. Going straight to fill');
       setStatus('Filling Dwelling');
       await fillDwellingFlow();
+      writeFlowStage('home', 'coverages');
       state.done = true;
       setStatus('Done');
       log('Dwelling step complete');

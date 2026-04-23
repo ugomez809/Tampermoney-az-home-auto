@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.7
+// @version      1.8
 // @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,6 +19,8 @@
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const DONE_KEY = 'aqb_step_drivers_done';
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
@@ -40,6 +42,39 @@
   let armed = true;
   let done  = false;
   let mo    = null;
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return String(job?.['AZ ID'] || '').trim();
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (String(stage.product || '').trim() !== product || String(stage.step || '').trim() !== step) return false;
+    if (!String(stage.azId || '').trim()) return true;
+    return String(stage.azId || '').trim() === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: 'AQB Drivers',
+      version: '1.8'
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
 
   function mountToggle() {
     const btn = document.createElement('button');
@@ -85,7 +120,7 @@
   }
 
   function gateOK() {
-    return REQUIRED_LABELS.every(hasLabelExact);
+    return matchesStage('auto', 'drivers') && REQUIRED_LABELS.every(hasLabelExact);
   }
 
   function findHeaderEl() {
@@ -339,6 +374,7 @@
 
   function setDoneFlag() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    writeFlowStage('auto', 'vehicles');
   }
 
   function clearDoneFlag() {

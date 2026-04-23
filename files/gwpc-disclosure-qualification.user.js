@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      1.9
+// @version      2.0
 // @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,8 +19,12 @@
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Disclosure Qualification';
+  const VERSION = '2.0';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const REQUIRED_LABELS = ['Submission (Draft)'];
+  const HOME_LABEL = 'Homeowners';
   const PERSONAL_AUTO_LABEL = 'Personal Auto';
   const HARD_STOP_LABEL_QUOTED = 'Submission (Quoted)';
   const TRIGGER_TITLE_STARTS_WITH = 'Disclosure & Qualification';
@@ -50,6 +54,40 @@
   let startTimer = null;
   let retryTimer = null;
   let stuckTimer = null;
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return norm(job?.['AZ ID'] || '');
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (norm(stage.product) !== product || norm(stage.step) !== step) return false;
+    if (!norm(stage.azId)) return true;
+    return norm(stage.azId) === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
 
   function cssEscapeSafe(value) {
     try { return CSS.escape(value); } catch { return String(value).replace(/["\\]/g, '\\$&'); }
@@ -102,6 +140,16 @@
 
   function hasPersonalAutoAnyDoc() {
     return hasLabelExactAnyDoc(PERSONAL_AUTO_LABEL);
+  }
+
+  function hasHomeownersAnyDoc() {
+    return hasLabelExactAnyDoc(HOME_LABEL);
+  }
+
+  function getActiveFlow() {
+    if (matchesStage('home', 'disclosure') && hasHomeownersAnyDoc() && !hasPersonalAutoAnyDoc()) return 'home';
+    if (matchesStage('auto', 'disclosure') && hasPersonalAutoAnyDoc()) return 'auto';
+    return '';
   }
 
   function hasQuotedAnyDoc() {
@@ -360,6 +408,9 @@
 
   function finalizeIfLeftDisclosure() {
     if (!titleIsDisclosureAnyDoc()) {
+      const flow = getActiveFlow();
+      if (flow === 'home') writeFlowStage('home', 'policy_info');
+      if (flow === 'auto') writeFlowStage('auto', 'policy_info');
       return hardFinish();
     }
     return false;
@@ -440,6 +491,7 @@
     if (done || running) return;
     if (hardStopIfQuoted()) return;
     if (!gateOK()) return;
+    if (!getActiveFlow()) return;
     if (!titleIsDisclosureAnyDoc()) return;
 
     running = true;
@@ -455,6 +507,10 @@
   function tick() {
     if (done) return;
     if (hardStopIfQuoted()) return;
+    const stage = readFlowStage();
+    if (!norm(stage.product) && hasHomeownersAnyDoc() && titleIsDisclosureAnyDoc()) {
+      writeFlowStage('home', 'disclosure');
+    }
     runSequence();
   }
 

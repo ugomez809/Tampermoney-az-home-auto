@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         01 GWPC Start Auto Quote
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.8
+// @version      1.9
 // @description  Waits for Current Activities, reloads once, waits 2 seconds after Current Activities is visible again, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,10 +17,10 @@
   'use strict';
 
   const SCRIPT_NAME = '01 GWPC Start Auto Quote';
-  const VERSION = '1.8';
+  const VERSION = '1.9';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
-  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const KEYS = {
     RELOADED: 'hb_gwpc_start_auto_quote_reloaded_v16',
@@ -85,7 +85,7 @@
     if (state.uiReady) return;
     state.uiReady = true;
     buildUi();
-    setStatus('Waiting for home handoff to AUTO');
+    setStatus('Waiting for AUTO start trigger');
     syncUi();
   }
 
@@ -137,8 +137,8 @@
     }
 
     if (state.phase === 'wait-home-ready') {
-      if (!isHomeReadyForAutoStart()) {
-        setStatus('Waiting for home handoff to AUTO');
+      if (!matchesStage('auto', 'start')) {
+        setStatus('Waiting for AUTO start trigger');
         return;
       }
 
@@ -150,7 +150,7 @@
 
       const autoEntry = findAutoEntryTarget();
       if (!autoEntry) {
-        setStatus('Home handed off. Waiting for Auto entry');
+        setStatus('AUTO start triggered. Waiting for Auto entry');
         return;
       }
 
@@ -158,8 +158,8 @@
       try {
         markAutoEntryClicked();
         markReloadOnce();
-        setStatus('Home handed off. Opening Auto and reloading once');
-        log('Home handoff ready. Clicking Auto entry, then reloading once');
+        setStatus('AUTO start triggered. Opening Auto and reloading once');
+        log('AUTO start triggered. Clicking Auto entry, then reloading once');
         strongClick(autoEntry);
         setTimeout(safeReload, 120);
       } finally {
@@ -361,6 +361,7 @@
   }
 
   function successDone(msg) {
+    writeFlowStage('auto', 'disclosure');
     state.done = true;
     state.phase = 'done';
     setStatus(msg);
@@ -570,36 +571,31 @@
     return out;
   }
 
-  function getCurrentBundle() {
-    const bundle = safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
-    return isPlainObject(bundle) ? bundle : null;
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return isPlainObject(stage) ? stage : {};
   }
 
-  function hasHomeError(bundle) {
-    if (!isPlainObject(bundle?.home?.data)) {
-      return Array.isArray(bundle?.timeout?.events) &&
-        bundle.timeout.events.some((event) => normText(event?.product).toLowerCase() === 'home');
-    }
-
-    if (Array.isArray(bundle.home.data.errors) && bundle.home.data.errors.length) return true;
-    const latestError = bundle.home.data.latestError;
-    return !!(isPlainObject(latestError) && normText(latestError.errorType || latestError.errorName || latestError.errorText));
-  }
-
-  function isHomeReadyForAutoStart() {
+  function matchesStage(product, step) {
     const job = readCurrentJob();
-    if (!job['AZ ID']) return false;
+    const stage = readFlowStage();
+    if (normText(stage.product) !== product || normText(stage.step) !== step) return false;
+    if (!stage.azId) return true;
+    return !!job['AZ ID'] && normText(stage.azId) === job['AZ ID'];
+  }
 
-    const bundle = getCurrentBundle();
-    if (!isPlainObject(bundle)) return false;
-    if (normText(bundle['AZ ID']) !== job['AZ ID']) return false;
-
-    const homeReady = !!(bundle?.home?.ready && isPlainObject(bundle?.home?.data));
-    const autoReady = !!(bundle?.auto?.ready && isPlainObject(bundle?.auto?.data));
-    if (!homeReady || autoReady) return false;
-    if (hasHomeError(bundle)) return false;
-
-    return true;
+  function writeFlowStage(product, step) {
+    const job = readCurrentJob();
+    const next = {
+      product,
+      step,
+      azId: job['AZ ID'] || '',
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
   }
 
   function queryAllDeep(selector, root = document, out = []) {

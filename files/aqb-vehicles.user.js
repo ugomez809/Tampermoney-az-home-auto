@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    homebot.aqb-vehicles
-// @version      1.4
+// @version      1.5
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, then set Primary Driver to first non-<none>. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -20,6 +20,8 @@
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
   const WAIT_KEY = 'aqb_step_drivers_done';
   const DONE_KEY = 'aqb_step_vehicles_done';
@@ -45,6 +47,39 @@
   let finished = false;
   let running = false;
   let lastRearmAt = 0;
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function readCurrentAzId() {
+    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    return String(job?.['AZ ID'] || '').trim();
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step) {
+    const stage = readFlowStage();
+    if (String(stage.product || '').trim() !== product || String(stage.step || '').trim() !== step) return false;
+    if (!String(stage.azId || '').trim()) return true;
+    return String(stage.azId || '').trim() === readCurrentAzId();
+  }
+
+  function writeFlowStage(product, step) {
+    const next = {
+      product,
+      step,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: 'AQB Vehicles',
+      version: '1.5'
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+  }
 
   // ---------- Minimal START/STOP ----------
   function mountToggle() {
@@ -108,7 +143,7 @@
   }
 
   function gateOK() {
-    return REQUIRED_LABELS.every(hasLabelExact);
+    return matchesStage('auto', 'vehicles') && REQUIRED_LABELS.every(hasLabelExact);
   }
 
   function findHeaderEl() {
@@ -131,6 +166,7 @@
   function setDoneFlags() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
     try { localStorage.setItem(SPECIALTY_START_KEY, '1'); } catch {}
+    writeFlowStage('auto', 'specialty');
   }
 
   function clearDoneFlags() {

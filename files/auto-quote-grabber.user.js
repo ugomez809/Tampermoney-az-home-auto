@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber
 // @namespace    homebot.auto-quote-grabber
-// @version      2.6
+// @version      2.7
 // @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -19,8 +19,9 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber';
-  const VERSION = '2.6';
+  const VERSION = '2.7';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const KEYS = {
     payload: 'tm_pc_auto_quote_grab_payload_v1',
@@ -35,6 +36,32 @@
 
   function safeJsonParse(value, fallback = null) {
     try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  function readFlowStage() {
+    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
+    return isPlainObject(stage) ? stage : {};
+  }
+
+  function matchesStage(product, step, azId = '') {
+    const stage = readFlowStage();
+    if (normalizeText(stage.product) !== normalizeText(product)) return false;
+    if (normalizeText(stage.step) !== normalizeText(step)) return false;
+    if (!normalizeText(stage.azId) || !normalizeText(azId)) return true;
+    return normalizeText(stage.azId) === normalizeText(azId);
+  }
+
+  function writeFlowStage(product, step, azId = '') {
+    const next = {
+      product: normalizeText(product),
+      step: normalizeText(step),
+      azId: normalizeText(azId),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2));
+    return next;
   }
 
   function deepClone(value) {
@@ -298,6 +325,13 @@
     if (!state.running || state.busy || state.doneThisLoad) return;
     if (isGloballyPaused()) {
       setStatus('Paused by shared selector');
+      return;
+    }
+
+    const currentJob = readCurrentJob();
+    if (!matchesStage('auto', 'quote_grabber', currentJob['AZ ID'])) {
+      state.triggerSince = 0;
+      setWaiting('Waiting for AUTO quote-grabber trigger');
       return;
     }
 
@@ -590,6 +624,7 @@
 
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.auto');
+    writeFlowStage('auto', 'handoff', currentJob['AZ ID']);
     setStatus('Grab complete');
     state.doneThisLoad = true;
   }
