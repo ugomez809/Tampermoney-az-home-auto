@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber
 // @namespace    homebot.auto-quote-grabber
-// @version      2.7
-// @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
+// @version      2.8
+// @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber';
-  const VERSION = '2.7';
+  const VERSION = '2.8';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
@@ -662,6 +662,7 @@
       'Policy Info',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.policyInfoTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('Policy Info'),
         () => findActionByText('Policy Info')
       ],
       () => !!findByIdInDocs(IDS.policyInfoNameWrap) || !!findByIdInDocs(IDS.secondaryWrap)
@@ -673,6 +674,7 @@
       'Auto Data Prefill',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoDataPrefillTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('Auto Data Prefill'),
         () => findActionByText('Auto Data Prefill')
       ],
       () => isTitleStartsWith('Auto Data Prefill')
@@ -684,6 +686,7 @@
       'Drivers',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.driversTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('Drivers'),
         () => findActionByText('Drivers')
       ],
       () => !!findByIdInDocs(IDS.driversRoot)
@@ -695,6 +698,7 @@
       'Vehicles',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.vehiclesTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('Vehicles'),
         () => findActionByText('Vehicles')
       ],
       () => !!findByIdInDocs(IDS.vehiclesRoot)
@@ -706,6 +710,7 @@
       'PA Coverages',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.paCoveragesTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('PA Coverages'),
         () => findActionByText('PA Coverages')
       ],
       () => !!findByIdStartsWithInDocs(IDS.paCoveragesRootPrefix)
@@ -717,6 +722,7 @@
       'Quote',
       [
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`)),
+        () => findTabActionByVisibleLabel('Quote'),
         () => findActionByText('Quote')
       ],
       () => isQuoteReady()
@@ -730,20 +736,33 @@
     }
 
     for (let attempt = 1; attempt <= CFG.maxTabAttempts; attempt++) {
-      const el = resolveFirst(resolvers);
+      const raw = resolveFirst(resolvers);
 
-      if (!el) {
+      if (!raw) {
         log(`${name} tab not found, attempt ${attempt}/${CFG.maxTabAttempts}`);
         await sleep(500);
         continue;
       }
 
-      log(`Clicking ${name}, attempt ${attempt}/${CFG.maxTabAttempts}`);
-      safeClick(el);
+      const target = resolveClickableTab(raw);
+      if (!target) {
+        log(`${name} tab resolved target is disabled/unclickable (raw=${describeElement(raw)}), attempt ${attempt}/${CFG.maxTabAttempts}`);
+        await sleep(500);
+        continue;
+      }
+
+      const headerBefore = getHeaderText();
+      log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/${CFG.maxTabAttempts}`);
+      strongClick(target);
 
       const ok = await waitFor(readyFn, CFG.waitTimeoutMs, `${name} readiness`);
       if (ok) {
-        log(`${name} ready`);
+        const headerAfter = getHeaderText();
+        if (headerBefore && headerAfter && headerBefore === headerAfter && headerBefore !== name) {
+          log(`${name} ready (but header unchanged: "${headerBefore}")`);
+        } else {
+          log(`${name} ready (header "${headerBefore}" -> "${headerAfter}")`);
+        }
         return;
       }
 
@@ -998,6 +1017,18 @@
     return hasVisibleTitleExact('Quote') && !!normalizeText(readAnySelector(SEL.premium));
   }
 
+  function getHeaderText() {
+    for (const doc of getAccessibleDocs()) {
+      const titles = queryAllSafe('.gw-TitleBar--title, .gw-TitleBar--Title', doc);
+      for (const el of titles) {
+        if (!isVisible(el)) continue;
+        const text = normalizeText(el.textContent || '');
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
   function isTitleStartsWith(text) {
     const wanted = normalizeText(text);
     for (const doc of getAccessibleDocs()) {
@@ -1095,7 +1126,7 @@
   function findActionByText(text) {
     return findInDocs((doc) => {
       const wanted = normalizeText(text);
-      const candidates = doc.querySelectorAll('div.gw-action--inner, div[role="tab"], div[role="menuitem"], div[role="button"]');
+      const candidates = doc.querySelectorAll('div.gw-action--inner, div[role="tab"], div[role="menuitem"], div[role="button"], button, a');
 
       for (const el of candidates) {
         if (!isVisible(el)) continue;
@@ -1232,6 +1263,84 @@
     }
 
     try { el.click(); } catch {}
+  }
+
+  function strongClick(el) {
+    if (!el) return false;
+    try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+    try { el.click?.(); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
+    return true;
+  }
+
+  function describeElement(el) {
+    if (!el) return 'null';
+    const tag = el.tagName?.toLowerCase?.() || '?';
+    const id = el.id ? `#${el.id}` : '';
+    const cls = el.className && typeof el.className === 'string'
+      ? '.' + el.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.')
+      : '';
+    const aria = el.getAttribute?.('aria-label');
+    const role = el.getAttribute?.('role');
+    const disabled = el.getAttribute?.('aria-disabled');
+    const bits = [`<${tag}>`];
+    if (id) bits.push(id);
+    if (cls) bits.push(cls);
+    if (aria) bits.push(`aria="${aria}"`);
+    if (role) bits.push(`role="${role}"`);
+    if (disabled === 'true') bits.push('aria-disabled=true');
+    return bits.join(' ');
+  }
+
+  function isProbablyClickable(el) {
+    if (!el || !(el instanceof Element) || !isVisible(el)) return false;
+    return (
+      el.matches('button, a, input[type="button"], input[type="submit"], [role="button"], [role="tab"], [role="menuitem"]') ||
+      el.classList.contains('gw-action--inner') ||
+      el.classList.contains('gw-TabWidget') ||
+      el.classList.contains('gw-ButtonWidget') ||
+      el.hasAttribute('onclick') ||
+      el.getAttribute('tabindex') === '0'
+    );
+  }
+
+  function getClickableOwner(el) {
+    if (!el) return null;
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 10) {
+      if (isProbablyClickable(cur)) return cur;
+      cur = cur.parentElement;
+      depth++;
+    }
+    return el;
+  }
+
+  function upgradeToClickable(el) {
+    if (!el) return null;
+    if (el.matches?.('.gw-action--inner') && el.getAttribute('aria-disabled') !== 'true' && isVisible(el)) return el;
+    if (el.querySelector) {
+      const inner = el.querySelector('.gw-action--inner[aria-disabled="false"]');
+      if (inner && isVisible(inner)) return inner;
+    }
+    let cur = el;
+    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+      if (cur.matches?.('.gw-action--inner') && cur.getAttribute('aria-disabled') !== 'true' && isVisible(cur)) return cur;
+    }
+    return isVisible(el) ? el : null;
+  }
+
+  function resolveClickableTab(el) {
+    if (!el) return null;
+    const upgraded = upgradeToClickable(el);
+    if (upgraded && upgraded.getAttribute?.('aria-disabled') !== 'true') return upgraded;
+    const owner = getClickableOwner(el);
+    if (owner && owner.getAttribute?.('aria-disabled') !== 'true') return owner;
+    return null;
   }
 
   async function waitFor(checkFn, timeoutMs, label) {
