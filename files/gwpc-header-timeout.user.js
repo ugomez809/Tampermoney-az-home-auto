@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.0
+// @version      2.0.1
 // @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '2.0';
+  const VERSION = '2.0.1';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -53,9 +53,9 @@
     maxSentEvents: 300,
     maxRuleText: 280,
     zIndex: 2147483647,
-    panelWidth: 440,
-    selectorOutlineColor: '#22c55e',
-    selectorFillColor: 'rgba(34,197,94,0.18)',
+    panelWidth: 320,
+    selectorOutlineColor: '#fca5a5',
+    selectorFillColor: 'rgba(252,165,165,0.14)',
     observerThrottleMs: 60
   };
 
@@ -96,7 +96,9 @@
     lastUnknownStageKey: '',
     lastScanAt: 0,
     lastRuntimePersistKey: '',
-    closeCheckTimer: null
+    closeCheckTimer: null,
+    pausedAtMs: 0,
+    frozenElapsedMs: 0
   };
 
   boot();
@@ -795,6 +797,23 @@
   function writeRuntimeState(runtime) {
     localStorage.setItem(KEYS.runtime, JSON.stringify(runtime, null, 2));
     return runtime;
+  }
+
+  function shiftCurrentRuntimeByPauseDelta(pauseDeltaMs) {
+    if (!pauseDeltaMs || pauseDeltaMs <= 0) return;
+    if (!state.current.header || !Number.isFinite(Number(state.current.headerSinceMs))) return;
+
+    state.current.headerSinceMs = Number(state.current.headerSinceMs) + pauseDeltaMs;
+
+    const runtime = readRuntimeState();
+    const runtimeKey = normalizeText(runtime.key || '');
+    if (runtimeKey && runtimeKey === normalizeText(state.lastRuntimePersistKey || '')) {
+      runtime.headerSinceMs = Number(runtime.headerSinceMs || state.current.headerSinceMs) + pauseDeltaMs;
+      runtime.updatedAt = nowIso();
+      runtime.source = SCRIPT_NAME;
+      runtime.version = VERSION;
+      writeRuntimeState(runtime);
+    }
   }
 
   function readPendingPost() {
@@ -1547,10 +1566,10 @@
       position: 'fixed',
       zIndex: String(CFG.zIndex - 1),
       pointerEvents: 'none',
-      border: `2px solid ${CFG.selectorOutlineColor}`,
+      border: `1px solid ${CFG.selectorOutlineColor}`,
       background: CFG.selectorFillColor,
       boxSizing: 'border-box',
-      borderRadius: '6px',
+      borderRadius: '4px',
       display: 'none'
     });
     document.documentElement.appendChild(box);
@@ -1570,13 +1589,14 @@
     }
     const box = ensureHoverBox();
     const rect = target.getBoundingClientRect();
+    const inset = 2;
     state.hoveredEl = target;
     Object.assign(box.style, {
       display: 'block',
-      top: `${Math.max(0, rect.top)}px`,
-      left: `${Math.max(0, rect.left)}px`,
-      width: `${Math.max(0, rect.width)}px`,
-      height: `${Math.max(0, rect.height)}px`
+      top: `${Math.max(0, rect.top + inset)}px`,
+      left: `${Math.max(0, rect.left + inset)}px`,
+      width: `${Math.max(0, rect.width - (inset * 2))}px`,
+      height: `${Math.max(0, rect.height - (inset * 2))}px`
     });
   }
 
@@ -1939,25 +1959,13 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
-        <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:120px 1fr;gap:5px 8px;margin-bottom:10px;">
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Current Stage</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-stage">-</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Current Header</div>
+        <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:72px 1fr;gap:5px 8px;margin-bottom:10px;">
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Header</div>
           <div ${UI_MARKER_ATTR}="1" id="tm-timeout-header" style="word-break:break-word;">-</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Live Timer</div>
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Timer</div>
           <div ${UI_MARKER_ATTR}="1" id="tm-timeout-live-timer">00:00</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Timeout At</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-deadline">02:00</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">AZ ID</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-azid">-</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Submission</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-submission">-</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Pending Post</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-pending">None</div>
-          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Saved Rules</div>
-          <div ${UI_MARKER_ATTR}="1" id="tm-timeout-rule-count">0</div>
         </div>
-        <textarea ${UI_MARKER_ATTR}="1" id="tm-timeout-logs" readonly style="width:100%;min-height:180px;max-height:220px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
+        <textarea ${UI_MARKER_ATTR}="1" id="tm-timeout-logs" readonly style="width:100%;min-height:150px;max-height:190px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
     `;
 
@@ -1976,23 +1984,26 @@
     state.els.retry = $('#tm-timeout-retry', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
     state.els.status = $('#tm-timeout-status', panel);
-    state.els.stage = $('#tm-timeout-stage', panel);
     state.els.header = $('#tm-timeout-header', panel);
     state.els.liveTimer = $('#tm-timeout-live-timer', panel);
-    state.els.deadline = $('#tm-timeout-deadline', panel);
-    state.els.azId = $('#tm-timeout-azid', panel);
-    state.els.submission = $('#tm-timeout-submission', panel);
-    state.els.pending = $('#tm-timeout-pending', panel);
-    state.els.ruleCount = $('#tm-timeout-rule-count', panel);
     state.els.logs = $('#tm-timeout-logs', panel);
 
     state.els.toggle.onclick = () => {
       state.running = !state.running;
       if (!state.running) {
+        state.pausedAtMs = Date.now();
+        state.frozenElapsedMs = state.current.header
+          ? Math.max(0, Date.now() - Number(state.current.headerSinceMs || Date.now()))
+          : 0;
         closeSelectorSession('', { logIt: false, restorePause: true });
         setStatus('Stopped');
         log('Monitoring stopped');
       } else {
+        if (state.pausedAtMs) {
+          shiftCurrentRuntimeByPauseDelta(Date.now() - state.pausedAtMs);
+        }
+        state.pausedAtMs = 0;
+        state.frozenElapsedMs = 0;
         setStatus('Watching header');
         log('Monitoring started');
         scheduleScan('manual-start');
@@ -2040,7 +2051,11 @@
   function renderAll() {
     if (!state.panel) return;
 
-    const liveMs = state.current.header ? Math.max(0, Date.now() - Number(state.current.headerSinceMs || Date.now())) : 0;
+    const liveMs = !state.running && state.pausedAtMs
+      ? Math.max(0, Number(state.frozenElapsedMs || 0))
+      : state.current.header
+        ? Math.max(0, Date.now() - Number(state.current.headerSinceMs || Date.now()))
+        : 0;
 
     if (state.els.status) {
       const statusText =
@@ -2059,22 +2074,8 @@
         state.running ? '#86efac' : '#fca5a5';
     }
 
-    if (state.els.stage) {
-      state.els.stage.textContent = state.current.productLabel
-        ? `${state.current.productLabel} (${state.current.product.toUpperCase()})`
-        : 'Unknown';
-    }
     if (state.els.header) state.els.header.textContent = state.current.header || '-';
     if (state.els.liveTimer) state.els.liveTimer.textContent = state.current.header ? formatDuration(liveMs) : '--:--';
-    if (state.els.deadline) state.els.deadline.textContent = formatDuration(CFG.timeoutMs);
-    if (state.els.azId) state.els.azId.textContent = state.current.azId || '-';
-    if (state.els.submission) state.els.submission.textContent = state.current.submission || '-';
-    if (state.els.pending) {
-      if (!state.pending) state.els.pending.textContent = 'None';
-      else if (state.pending.status === 'waiting') state.els.pending.textContent = `Waiting (${state.pending.eventId})`;
-      else state.els.pending.textContent = `Failed (${state.pending.eventId})`;
-    }
-    if (state.els.ruleCount) state.els.ruleCount.textContent = String(getSelectorRules().length);
     if (state.els.logs) state.els.logs.value = state.logs.join('\n');
     renderButtons();
   }
