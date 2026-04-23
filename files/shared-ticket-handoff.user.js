@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9
+// @version      1.9.1
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -267,12 +267,25 @@
         currentAzId === clean(handoff.ticketId) &&
         namesLikelySame(currentName || gwName, gwName) &&
         addressesLikelySame(currentAddress || gwAddress, gwAddress)) {
-      maybeAdvanceGwpcFlow({
+      const enrichedJob = {
         'AZ ID': clean(handoff.ticketId),
         'Name': gwName,
         'Mailing Address': gwAddress,
-        'SubmissionNumber': submissionNumber
-      });
+        'SubmissionNumber': submissionNumber,
+        'updatedAt': new Date().toISOString(),
+        'First Name': clean(currentJob['First Name'] || handoff.firstName || ''),
+        'Last Name': clean(currentJob['Last Name'] || handoff.lastName || ''),
+        'Email': clean(currentJob['Email'] || handoff.email || ''),
+        'Phone': clean(currentJob['Phone'] || handoff.phone || ''),
+        'DOB': clean(currentJob['DOB'] || handoff.dob || ''),
+        'Street Address': clean(currentJob['Street Address'] || handoff.streetAddress || ''),
+        'City': clean(currentJob['City'] || handoff.city || ''),
+        'State': clean(currentJob['State'] || handoff.state || ''),
+        'Zip': clean(currentJob['Zip'] || handoff.zip || '')
+      };
+
+      localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(enrichedJob, null, 2));
+      maybeAdvanceGwpcFlow(enrichedJob);
       setIdle('gw-already-applied', `GWPC linked ${handoff.ticketId}`);
       return;
     }
