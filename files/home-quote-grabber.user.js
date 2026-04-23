@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.3
-// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      3.4
+// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits before requote, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.3';
+  const VERSION = '3.4';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -42,14 +42,15 @@
     maxLogLines: 24,
     afterEditAllMs: 1200,
     afterFieldMs: 250,
-    afterQuoteWaitMs: 1200,
+    afterQuoteWaitMs: 800,
     maxQuoteAttempts: 6,
-    quoteTransitionTimeoutMs: 25000,
-    betweenQuoteAttemptsMs: 1500,
+    quoteTransitionTimeoutMs: 8000,
+    betweenQuoteAttemptsMs: 500,
     triggerStableMs: 1000,
     tabNudgeCooldownMs: 1500,
     tabNudgeSettleMs: 2500,
-    afterRequoteSettleMs: 4000
+    afterRequoteSettleMs: 4000,
+    afterAutoDiscountBeforeQuoteMs: 5000
   };
 
   const SEL = {
@@ -73,7 +74,7 @@
       'input[type="checkbox"][name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideScreenBasePanelSet-SideBySideScreenPanelSet-HOSideBySideAddnCoveragesPanelSet-1-HOCoverageInputSet-CovPatternInputGroup-_checkbox"]',
     fairPlanLabelClass: '.gw-InputGroup--header--label',
     autoDiscountCheckboxExact:
-      'input[name="SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-MultiLineDiscounts_ExtInputSet-MultiLineDiscounts_ExtLV-1-DiscountSelected"]'
+      'input[name="SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-MultiLineDiscounts_ExtInputSet-MultiLineDiscounts_ExtLV-0-DiscountSelected"]'
   };
 
   const IDS = {
@@ -927,7 +928,8 @@
 
     setStatus('Applying Auto Discount');
     await applyAutoDiscount();
-    await sleep(CFG.afterClickMs);
+    setStatus('Waiting 5s before Quote after Auto Discount');
+    await sleep(CFG.afterAutoDiscountBeforeQuoteMs);
     log('Auto discount applied');
 
     setStatus('Opening Quote');
