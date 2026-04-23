@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      1.25
+// @version      1.26
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '1.25';
+  const VERSION = '1.26';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -69,6 +69,7 @@
     hoveredEl: null,
     hoveredPrevOutline: '',
     hoveredPrevOffset: '',
+    hoverBoxEl: null,
     capturedRuleId: '',
     savedEventIds: Object.create(null)
   };
@@ -954,15 +955,51 @@
     state.hoveredPrevOffset = el.style.outlineOffset || '';
     el.style.outline = `${CFG.selectorOutlineWidth}px solid ${CFG.selectorOutlineColor}`;
     el.style.outlineOffset = '2px';
+    paintHoverBox(el);
   }
 
   function clearHoveredHighlight() {
-    if (!state.hoveredEl) return;
-    state.hoveredEl.style.outline = state.hoveredPrevOutline;
-    state.hoveredEl.style.outlineOffset = state.hoveredPrevOffset;
+    if (state.hoveredEl) {
+      state.hoveredEl.style.outline = state.hoveredPrevOutline;
+      state.hoveredEl.style.outlineOffset = state.hoveredPrevOffset;
+    }
     state.hoveredEl = null;
     state.hoveredPrevOutline = '';
     state.hoveredPrevOffset = '';
+    if (state.hoverBoxEl) state.hoverBoxEl.style.display = 'none';
+  }
+
+  function paintHoverBox(el) {
+    if (!(el instanceof Element)) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
+    const box = ensureHoverBox();
+    Object.assign(box.style, {
+      display: 'block',
+      left: `${Math.max(0, rect.left + window.scrollX)}px`,
+      top: `${Math.max(0, rect.top + window.scrollY)}px`,
+      width: `${Math.max(0, rect.width)}px`,
+      height: `${Math.max(0, rect.height)}px`
+    });
+  }
+
+  function ensureHoverBox() {
+    if (state.hoverBoxEl && document.contains(state.hoverBoxEl)) return state.hoverBoxEl;
+    const box = document.createElement('div');
+    box.id = 'tm-pc-header-timeout-hover-box';
+    Object.assign(box.style, {
+      position: 'absolute',
+      zIndex: 2147483646,
+      pointerEvents: 'none',
+      border: `${CFG.selectorOutlineWidth}px solid ${CFG.selectorOutlineColor}`,
+      background: 'rgba(34,211,238,0.14)',
+      boxSizing: 'border-box',
+      borderRadius: '4px',
+      display: 'none'
+    });
+    document.documentElement.appendChild(box);
+    state.hoverBoxEl = box;
+    return box;
   }
 
   function buildSelectorRule(el, product) {
@@ -981,12 +1018,17 @@
       ruleKind: 'error',
       postMode: 'visible_text',
       customMessage: '',
+      resultField: product === 'auto' ? 'Auto' : 'Done?',
+      resultValue: '',
       createdAt: nowIso()
     };
   }
 
   function getUsableSelectorTarget(el) {
     if (!(el instanceof Element)) return null;
+
+    const coveringGuidewireTarget = findGuidewireCoveringTarget(el);
+    if (coveringGuidewireTarget) return coveringGuidewireTarget;
 
     const direct = normalizeInteractiveTarget(el, true);
     if (direct) return direct;
@@ -997,6 +1039,25 @@
     const wrapper = findTargetWrapper(el) || el;
     const upgraded = findPreferredTargetIn(wrapper);
     return normalizeInteractiveTarget(upgraded || wrapper || el, false) || upgraded || wrapper || el;
+  }
+
+  function findGuidewireCoveringTarget(el) {
+    if (!(el instanceof Element)) return null;
+
+    const coveringSelectors = [
+      '.gw-WebMessage',
+      '.gw-message--displayable',
+      '.gw-MessagesWidget--severity-sub-group',
+      '.gw-MessagesWidget--destination-group',
+      '.gw-MessagesWidget'
+    ];
+
+    for (const selector of coveringSelectors) {
+      const hit = el.closest(selector);
+      if (hit && isVisible(hit)) return hit;
+    }
+
+    return null;
   }
 
   function upgradeFrameworkWrapperTarget(el) {
@@ -1191,8 +1252,12 @@
           <option value="presence_only">Element present only</option>
           <option value="custom_text">Custom text</option>
         </select>
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Save into column</label>
+        <input id="tm-pc-rule-result-field" type="text" value="${escapeAttr(product === 'auto' ? 'Auto' : 'Done?')}" readonly style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#cbd5e1;">
+        <label style="display:block;font-size:12px;margin-bottom:4px;">Value to save in that column</label>
+        <textarea id="tm-pc-rule-result-value" rows="3" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;">${escapeHtml(baseRule.textSample || '')}</textarea>
         <label style="display:block;font-size:12px;margin-bottom:4px;">Custom text override</label>
-        <textarea id="tm-pc-rule-custom" rows="3" style="width:100%;margin-bottom:12px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;"></textarea>
+        <textarea id="tm-pc-rule-custom" rows="2" style="width:100%;margin-bottom:12px;padding:8px;border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;"></textarea>
         <div style="display:flex;gap:8px;justify-content:flex-end;">
           <button id="tm-pc-rule-cancel" style="border:0;border-radius:8px;padding:8px 12px;background:#475569;color:#fff;font-weight:700;cursor:pointer;">Cancel</button>
           <button id="tm-pc-rule-save" style="border:0;border-radius:8px;padding:8px 12px;background:#0891b2;color:#fff;font-weight:700;cursor:pointer;">Save Rule</button>
@@ -1205,6 +1270,8 @@
     const nameEl = $('#tm-pc-rule-name', overlay);
     const targetEl = $('#tm-pc-rule-target', overlay);
     const postModeEl = $('#tm-pc-rule-post-mode', overlay);
+    const resultFieldEl = $('#tm-pc-rule-result-field', overlay);
+    const resultValueEl = $('#tm-pc-rule-result-value', overlay);
     const customEl = $('#tm-pc-rule-custom', overlay);
     const cancelEl = $('#tm-pc-rule-cancel', overlay);
     const saveEl = $('#tm-pc-rule-save', overlay);
@@ -1217,6 +1284,15 @@
           : mode === 'custom_text'
             ? 'Text to save instead of the element content'
             : 'Optional override text';
+      }
+      if (resultValueEl) {
+        resultValueEl.placeholder = mode === 'full_element'
+          ? 'Leave blank to save the full element HTML'
+          : mode === 'presence_only'
+            ? 'Leave blank to save a default presence message'
+            : mode === 'custom_text'
+              ? 'Leave blank to reuse the custom text override'
+              : 'Leave blank to save the visible text';
       }
     };
 
@@ -1238,7 +1314,9 @@
         errorName: normalizeText(nameEl?.value || selectedBase.errorName || 'Selected rule'),
         ruleKind: normalizeText(kindEl?.value || 'error'),
         postMode: normalizeText(postModeEl?.value || 'visible_text'),
-        customMessage: normalizeText(customEl?.value || '')
+        customMessage: normalizeText(customEl?.value || ''),
+        resultField: normalizeText(resultFieldEl?.value || (product === 'auto' ? 'Auto' : 'Done?')),
+        resultValue: normalizeText(resultValueEl?.value || '')
       };
       const idBase = [
         rule.product,
@@ -1268,6 +1346,9 @@
 
   function buildStableSelector(el) {
     if (el.id) return `#${cssEscape(el.id)}`;
+
+    const gwMessageWrapper = el.closest?.('.gw-WebMessage, .gw-message--displayable, .gw-MessagesWidget--severity-sub-group, .gw-MessagesWidget--destination-group, .gw-MessagesWidget');
+    if (gwMessageWrapper?.id) return `#${cssEscape(gwMessageWrapper.id)}`;
 
     if (el.matches?.('label[for]')) {
       const forId = normalizeText(el.getAttribute('for') || '');
@@ -1430,6 +1511,8 @@
         source: 'selector-rule',
         postMode: normalizeText(rule.postMode || 'visible_text'),
         ruleKind: normalizeText(rule.ruleKind || 'error'),
+        resultField: normalizeText(rule.resultField || (product === 'auto' ? 'Auto' : 'Done?')),
+        resultValue: normalizeText(rule.resultValue || ''),
         customMessage: normalizeText(rule.customMessage || ''),
         capturedElementHtml: normalizeText((match.outerHTML || '').slice(0, 4000)),
         capturedText: normalizeText(match.innerText || match.textContent || '')
