@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Home Bot: UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.5
+// @version      1.6
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes the organizer's own panel in the dock.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
+// @match        https://app.agencyzoom.com/*
+// @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @noframes
@@ -23,7 +25,7 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: UI Dock Organizer';
-  const VERSION = '1.5';
+  const VERSION = '1.6';
 
   const CFG = {
     tickMs: 900,
@@ -103,7 +105,7 @@
 
     log('Organizer loaded');
     log('Viewport clamp enabled');
-    log('Organizer locked bottom-left');
+    log(isAgencyZoomOrigin() ? 'Organizer anchored by AgencyZoom profile link' : 'Organizer locked bottom-left');
 
     fullScanAndArrange();
     state.tickTimer = setInterval(tick, CFG.tickMs);
@@ -542,9 +544,48 @@
     return document.getElementById(UI.panelId);
   }
 
+  function isAgencyZoomOrigin() {
+    return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
+  }
+
+  function getAgencyZoomProfileAnchor() {
+    const candidates = Array.from(document.querySelectorAll('a'));
+    for (const el of candidates) {
+      if (!(el instanceof HTMLElement)) continue;
+      const nameEl = el.querySelector('em');
+      const iconEl = el.querySelector('i.fal.fa-user-circle, i.fa-user-circle');
+      if (!nameEl || !iconEl) continue;
+      if (!isVisible(el)) continue;
+      return el;
+    }
+    return null;
+  }
+
   function enforceOrganizerAnchor() {
     const panel = getOrganizerPanel();
     if (!panel) return;
+    if (isAgencyZoomOrigin()) {
+      const profileAnchor = getAgencyZoomProfileAnchor();
+      if (profileAnchor) {
+        const rect = profileAnchor.getBoundingClientRect();
+        const panelWidth = Math.max(1, panel.offsetWidth || 300);
+        const panelHeight = Math.max(1, panel.offsetHeight || 180);
+        const maxLeft = Math.max(CFG.sideGap, window.innerWidth - panelWidth - CFG.sideGap);
+        const maxTop = Math.max(CFG.topGap, window.innerHeight - panelHeight - CFG.bottomGap);
+        const left = clamp(Math.round(rect.right + CFG.itemGap), CFG.sideGap, maxLeft);
+        const top = clamp(Math.round(rect.top), CFG.topGap, maxTop);
+        try {
+          panel.style.setProperty('position', 'fixed', 'important');
+          panel.style.setProperty('left', `${left}px`, 'important');
+          panel.style.setProperty('top', `${top}px`, 'important');
+          panel.style.setProperty('right', 'auto', 'important');
+          panel.style.setProperty('bottom', 'auto', 'important');
+          panel.style.setProperty('transform', 'none', 'important');
+          panel.style.setProperty('margin', '0', 'important');
+        } catch {}
+        return;
+      }
+    }
     try {
       panel.style.setProperty('position', 'fixed', 'important');
       panel.style.setProperty('left', `${CFG.sideGap}px`, 'important');
