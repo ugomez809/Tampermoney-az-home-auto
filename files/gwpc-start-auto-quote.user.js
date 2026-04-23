@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         01 GWPC Start Auto Quote
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.7
+// @version      1.8
 // @description  Waits for Current Activities, reloads once, waits 2 seconds after Current Activities is visible again, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,11 +17,14 @@
   'use strict';
 
   const SCRIPT_NAME = '01 GWPC Start Auto Quote';
-  const VERSION = '1.7';
+  const VERSION = '1.8';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
 
   const KEYS = {
-    RELOADED: 'hb_gwpc_start_auto_quote_reloaded_v16'
+    RELOADED: 'hb_gwpc_start_auto_quote_reloaded_v16',
+    AUTO_ENTRY_CLICKED: 'hb_gwpc_start_auto_quote_auto_entry_clicked_v18'
   };
 
   const CFG = {
@@ -52,7 +55,7 @@
     armed: true,
     busy: false,
     done: false,
-    phase: 'wait-trigger', // wait-trigger | started | verify-select | done
+    phase: 'wait-home-ready', // wait-home-ready | wait-trigger | started | verify-select | done
     startClickedAt: 0,
     reloadTriggerSeenAt: 0,
     selectAttemptCount: 0,
@@ -82,7 +85,7 @@
     if (state.uiReady) return;
     state.uiReady = true;
     buildUi();
-    setStatus('Waiting for Current Activities');
+    setStatus('Waiting for home handoff to AUTO');
     syncUi();
   }
 
@@ -130,6 +133,38 @@
     if (!state.armed || state.busy || state.done) return;
     if (isGloballyPaused()) {
       setStatus('Paused by shared selector');
+      return;
+    }
+
+    if (state.phase === 'wait-home-ready') {
+      if (!isHomeReadyForAutoStart()) {
+        setStatus('Waiting for home handoff to AUTO');
+        return;
+      }
+
+      if (didClickAutoEntry()) {
+        state.phase = 'wait-trigger';
+        setStatus('Auto opened. Waiting for Current Activities');
+        return;
+      }
+
+      const autoEntry = findAutoEntryTarget();
+      if (!autoEntry) {
+        setStatus('Home handed off. Waiting for Auto entry');
+        return;
+      }
+
+      state.busy = true;
+      try {
+        markAutoEntryClicked();
+        markReloadOnce();
+        setStatus('Home handed off. Opening Auto and reloading once');
+        log('Home handoff ready. Clicking Auto entry, then reloading once');
+        strongClick(autoEntry);
+        setTimeout(safeReload, 120);
+      } finally {
+        state.busy = false;
+      }
       return;
     }
 
@@ -301,6 +336,14 @@
     }
   }
 
+  function didClickAutoEntry() {
+    try {
+      return sessionStorage.getItem(KEYS.AUTO_ENTRY_CLICKED) === '1';
+    } catch {
+      return false;
+    }
+  }
+
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
@@ -308,6 +351,12 @@
   function markReloadOnce() {
     try {
       sessionStorage.setItem(KEYS.RELOADED, '1');
+    } catch {}
+  }
+
+  function markAutoEntryClicked() {
+    try {
+      sessionStorage.setItem(KEYS.AUTO_ENTRY_CLICKED, '1');
     } catch {}
   }
 
@@ -491,6 +540,68 @@
     return docs;
   }
 
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function readCurrentJob() {
+    return normalizeCurrentJob(safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null));
+  }
+
+  function normalizeCurrentJob(raw) {
+    const out = {
+      'AZ ID': '',
+      'Name': '',
+      'Mailing Address': '',
+      'SubmissionNumber': '',
+      'updatedAt': ''
+    };
+
+    if (!isPlainObject(raw)) return out;
+    out['AZ ID'] = normText(raw['AZ ID'] || raw.ticketId || raw.masterId || raw.id || '');
+    out['Name'] = normText(raw['Name'] || raw.name || '');
+    out['Mailing Address'] = normText(raw['Mailing Address'] || raw.mailingAddress || '');
+    out['SubmissionNumber'] = normText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
+    out['updatedAt'] = normText(raw['updatedAt'] || raw.lastUpdatedAt || '');
+    return out;
+  }
+
+  function getCurrentBundle() {
+    const bundle = safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
+    return isPlainObject(bundle) ? bundle : null;
+  }
+
+  function hasHomeError(bundle) {
+    if (!isPlainObject(bundle?.home?.data)) {
+      return Array.isArray(bundle?.timeout?.events) &&
+        bundle.timeout.events.some((event) => normText(event?.product).toLowerCase() === 'home');
+    }
+
+    if (Array.isArray(bundle.home.data.errors) && bundle.home.data.errors.length) return true;
+    const latestError = bundle.home.data.latestError;
+    return !!(isPlainObject(latestError) && normText(latestError.errorType || latestError.errorName || latestError.errorText));
+  }
+
+  function isHomeReadyForAutoStart() {
+    const job = readCurrentJob();
+    if (!job['AZ ID']) return false;
+
+    const bundle = getCurrentBundle();
+    if (!isPlainObject(bundle)) return false;
+    if (normText(bundle['AZ ID']) !== job['AZ ID']) return false;
+
+    const homeReady = !!(bundle?.home?.ready && isPlainObject(bundle?.home?.data));
+    const autoReady = !!(bundle?.auto?.ready && isPlainObject(bundle?.auto?.data));
+    if (!homeReady || autoReady) return false;
+    if (hasHomeError(bundle)) return false;
+
+    return true;
+  }
+
   function queryAllDeep(selector, root = document, out = []) {
     try {
       out.push(...root.querySelectorAll(selector));
@@ -522,6 +633,20 @@
       }
     }
 
+    return null;
+  }
+
+  function findAutoEntryTarget() {
+    for (const doc of getAllDocuments()) {
+      const exact = queryAllDeep('.gw-label.gw-infoValue, .gw-infoValue, .gw-label', doc);
+      for (const el of exact) {
+        if (!isVisible(el)) continue;
+        if (normText(el.textContent) !== 'Auto') continue;
+        const host = resolveClickableHost(el);
+        if (host) return host;
+        return el;
+      }
+    }
     return null;
   }
 
