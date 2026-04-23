@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.2
+// @version      2.3
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.2';
+  const VERSION = '2.3';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -269,7 +269,7 @@
     buildUI();
     log('Script started');
     log('Auto-run armed');
-    setStatus('Waiting for Submission (Quoted)');
+    setStatus('Waiting for HOME quote-grabber trigger');
     setInterval(tick, CFG.tickMs);
     tick();
   }
@@ -290,17 +290,9 @@
       return;
     }
 
-    const quotedEl = findQuotedTriggerElement();
-
-    if (!quotedEl) {
-      state.triggerSince = 0;
-      setWaiting('Waiting for: Submission (Quoted)');
-      return;
-    }
-
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found: Submission (Quoted)');
+      log('Trigger found: HOME quote-grabber stage');
       setStatus('Trigger found, waiting 3 seconds');
       return;
     }
