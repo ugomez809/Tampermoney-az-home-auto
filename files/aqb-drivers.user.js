@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.8.6
-// @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Accepted, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles. Saves the Accepted driver name when present and sets localStorage aqb_step_drivers_done=1 when finished.
+// @version      1.8.7
+// @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Excluded Driver, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,14 +19,10 @@
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
-  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
-  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
-
   const DONE_KEY = 'aqb_step_drivers_done';
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
-  const ACCEPTED_DRIVER_KEY = 'aqb_step_accepted_driver_name';
 
-  const DRV_ACCEPT_REASON_TEXT = 'Accepted';
+  const DRV_ACCEPT_REASON_TEXT = 'Excluded Driver';
   const DRV_REL_TO_PNI_TEXT    = 'Resident Relative';
   const DRV_MARITAL_TEXT       = 'Single / Separated';
   const DRV_GENDER_WANT_TEXT   = 'Non-Binary';
@@ -50,39 +46,6 @@
   let mo    = null;
   let startDelayUntil = 0;
   let startDelayTimer = null;
-
-  function safeJsonParse(text, fallback = null) {
-    try { return JSON.parse(text); } catch { return fallback; }
-  }
-
-  function readCurrentAzId() {
-    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
-    return String(job?.['AZ ID'] || '').trim();
-  }
-
-  function readFlowStage() {
-    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
-    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
-  }
-
-  function matchesStage(product, step) {
-    const stage = readFlowStage();
-    if (String(stage.product || '').trim() !== product || String(stage.step || '').trim() !== step) return false;
-    if (!String(stage.azId || '').trim()) return true;
-    return String(stage.azId || '').trim() === readCurrentAzId();
-  }
-
-  function writeFlowStage(product, step) {
-    const next = {
-      product,
-      step,
-      azId: readCurrentAzId(),
-      updatedAt: new Date().toISOString(),
-      source: 'AQB Drivers',
-      version: '1.8.6'
-    };
-    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
-  }
 
   function armStartDelay() {
     startDelayUntil = Date.now() + INITIAL_START_DELAY_MS;
@@ -442,12 +405,6 @@
 
   function setDoneFlag() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
-    try {
-      const acceptedDriverName = findAcceptedDriverName();
-      if (acceptedDriverName) localStorage.setItem(ACCEPTED_DRIVER_KEY, acceptedDriverName);
-      else localStorage.removeItem(ACCEPTED_DRIVER_KEY);
-    } catch {}
-    writeFlowStage('auto', 'vehicles');
   }
 
   function clearDoneFlag() {

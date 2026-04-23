@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.3
-// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver from the Accepted driver row, then waits another 3s before handing off to Specialty. Retries until the Accepted driver is readable and matched instead of hard-stopping too early. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
+// @version      1.5.4
+// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver to the first non-<none> option, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -22,13 +22,9 @@
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
-  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
-  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
-
   const WAIT_KEY = 'aqb_step_drivers_done';
   const DONE_KEY = 'aqb_step_vehicles_done';
   const SPECIALTY_START_KEY = 'aqb_step_specialty_start';
-  const ACCEPTED_DRIVER_KEY = 'aqb_step_accepted_driver_name';
 
   const REMOVE_LABEL_ARIA = 'Remove Vehicle';
   const WAIT_AFTER_CHECKBOX_MS = 1000;
@@ -52,39 +48,6 @@
   let finished = false;
   let running = false;
   let lastRearmAt = 0;
-
-  function safeJsonParse(text, fallback = null) {
-    try { return JSON.parse(text); } catch { return fallback; }
-  }
-
-  function readCurrentAzId() {
-    const job = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
-    return String(job?.['AZ ID'] || '').trim();
-  }
-
-  function readFlowStage() {
-    const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
-    return stage && typeof stage === 'object' && !Array.isArray(stage) ? stage : {};
-  }
-
-  function matchesStage(product, step) {
-    const stage = readFlowStage();
-    if (String(stage.product || '').trim() !== product || String(stage.step || '').trim() !== step) return false;
-    if (!String(stage.azId || '').trim()) return true;
-    return String(stage.azId || '').trim() === readCurrentAzId();
-  }
-
-  function writeFlowStage(product, step) {
-    const next = {
-      product,
-      step,
-      azId: readCurrentAzId(),
-      updatedAt: new Date().toISOString(),
-      source: 'AQB Vehicles',
-      version: '1.5.3'
-    };
-    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
-  }
 
   function log(message) {
     try { console.log(`[${SCRIPT_NAME}] ${message}`); } catch {}
@@ -152,7 +115,7 @@
   }
 
   function gateOK() {
-    return matchesStage('auto', 'vehicles') && REQUIRED_LABELS.every(hasLabelExact);
+    return REQUIRED_LABELS.every(hasLabelExact);
   }
 
   function findHeaderEl() {
@@ -175,7 +138,6 @@
   function setDoneFlags() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
     try { localStorage.setItem(SPECIALTY_START_KEY, '1'); } catch {}
-    writeFlowStage('auto', 'specialty');
   }
 
   function clearDoneFlags() {
@@ -201,14 +163,6 @@
     for (let i = 0; i < ths.length; i++) {
       const txt = normalizeHeaderText(ths[i].textContent || '');
       if (txt.includes(wanted)) return i;
-    }
-    return -1;
-  }
-
-  function getColumnIndexByNames(table, wantedList) {
-    for (const wanted of wantedList) {
-      const idx = getColumnIndexByName(table, wanted);
-      if (idx >= 0) return idx;
     }
     return -1;
   }
@@ -286,62 +240,6 @@
     return Array.from(bodyRows).filter(tr =>
       tr.querySelector('input[name*="PAVehiclesExtPanelSet-VehiclesLV-"],select[name*="PAVehiclesExtPanelSet-VehiclesLV-"]')
     );
-  }
-
-  function findDriversTable() {
-    const any = document.querySelector(
-      'select[name*="PADriversExtPanelSet-DriversLV-"][name$="-maritalStatus"],' +
-      'select[name*="PADriversExtPanelSet-DriversLV-"][name$="-acceptReason"],' +
-      '[id$="PADriversExtPanelSet-DriversLV"]'
-    );
-    const root = any?.closest?.('[id$="PADriversExtPanelSet-DriversLV"]') || any;
-    return root?.closest?.('table') || any?.closest?.('table') || null;
-  }
-
-  function getDriverRows(table) {
-    if (!table) return [];
-    const bodyRows = table.querySelectorAll('tbody tr').length
-      ? table.querySelectorAll('tbody tr')
-      : table.querySelectorAll('tr');
-
-    return Array.from(bodyRows).filter(tr =>
-      tr.querySelector('select[name*="PADriversExtPanelSet-DriversLV-"],[id$="-Name"]')
-    );
-  }
-
-  function readDriverNameFromRow(tr, nameIdx) {
-    const tds = tr.querySelectorAll('td,th');
-    const fromCell = nameIdx >= 0 ? getCellValue(tds[nameIdx]) : '';
-    if (fromCell) return fromCell;
-
-    const byId = tr.querySelector('[id$="-Name"]');
-    return getCellValue(byId) || '';
-  }
-
-  function findAcceptedDriverName() {
-    try {
-      const cached = String(localStorage.getItem(ACCEPTED_DRIVER_KEY) || '').replace(/\s+/g, ' ').trim();
-      if (cached) return cached;
-    } catch {}
-
-    const table = findDriversTable();
-    if (!table) return '';
-
-    const reasonIdx = getColumnIndexByNames(table, ['Accept/Reject Reason', 'Accept Reject Reason', 'Accept / Reject Reason']);
-    const nameIdx = getColumnIndexByNames(table, ['Driver Name', 'Name', 'Driver']);
-    if (reasonIdx < 0) return '';
-
-    const rows = getDriverRows(table);
-    for (const tr of rows) {
-      const tds = tr.querySelectorAll('td,th');
-      const reason = getCellValue(tds[reasonIdx]);
-      if (String(reason || '').trim() !== 'Accepted') continue;
-
-      const name = readDriverNameFromRow(tr, nameIdx).replace(/\s+/g, ' ').trim();
-      if (name) return name;
-    }
-
-    return '';
   }
 
   function findRemoveVehicleClickable() {
@@ -439,13 +337,6 @@
   }
 
   function setPrimaryDriverAll() {
-    if (isGloballyPaused()) return;
-    const acceptedDriverName = findAcceptedDriverName();
-    if (!acceptedDriverName) {
-      log('Stopped: no Accepted driver found in Drivers table.');
-      return { ok: false, reason: 'no-accepted-driver' };
-    }
-
     const table = findVehiclesTable();
     if (!table) return { ok: false, reason: 'vehicles-table-missing' };
 
@@ -455,21 +346,21 @@
       if (!sel || sel.disabled) continue;
 
       const opts = Array.from(sel.options || []);
-      const pick = opts.find(o => (o.textContent || '').replace(/\s+/g, ' ').trim() === acceptedDriverName);
-      if (!pick) {
-        log(`Stopped: accepted driver "${acceptedDriverName}" not found in vehicle Primary Driver dropdown.`);
-        return { ok: false, reason: 'accepted-driver-dropdown-mismatch', acceptedDriverName };
-      }
+      const curText = (sel.selectedOptions?.[0]?.textContent || '').trim();
+      if (curText && curText !== '<none>') continue;
 
-      const curText = (sel.selectedOptions?.[0]?.textContent || '').replace(/\s+/g, ' ').trim();
-      if (curText !== acceptedDriverName) {
-        sel.value = pick.value;
-        dispatchAll(sel);
-      }
+      const pick = opts.find(o => {
+        const t = (o.textContent || '').trim();
+        return t !== '' && t !== '<none>';
+      });
+      if (!pick) continue;
+
+      sel.value = pick.value;
+      dispatchAll(sel);
     }
 
-    log(`Primary Driver set from Accepted driver: ${acceptedDriverName}`);
-    return { ok: true, acceptedDriverName };
+    log('Primary Driver set on vehicle rows');
+    return { ok: true };
   }
 
   // ---------- Main ----------
