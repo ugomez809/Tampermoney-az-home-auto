@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.7
-// @description  Dwelling step with Submission (Draft) gate, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, then Quote.
+// @version      3.8
+// @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, then Quote.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.7';
+  const VERSION = '3.8';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';
@@ -31,6 +31,7 @@
     fieldWaitMs: 25000,
     optionalFieldWaitMs: 2500,
     fieldsWaitAfterCreateMs: 30000,
+    afterLocationReportsMs: 3000,
     beforeQuoteWaitMs: 5000,
     afterQuoteWaitMs: 10000,
     afterGarageFixMs: 1200,
@@ -350,7 +351,45 @@
     return getCreateTargets().length > 0;
   }
 
+  function hasConfirmRiskAddressPrompt() {
+    return Array.from(document.querySelectorAll('.gw-VerbatimWidget--inner'))
+      .some(el => normalizeText(el.textContent) === 'Confirm Risk Address. Then click "Get Location Reports" to proceed.' && isVisible(el));
+  }
+
+  function getLocationReportTargets() {
+    const exact = Array.from(document.querySelectorAll('.gw-action--inner[role="button"], .gw-label'))
+      .filter(el => isVisible(el) && normalizeText(el.getAttribute?.('aria-label') || el.textContent) === 'Get Location Reports');
+
+    if (exact.length) return exact;
+
+    const fallback = findActionByText('Get Location Reports');
+    return fallback ? [fallback] : [];
+  }
+
+  async function clickGetLocationReportsIfNeeded() {
+    if (!hasConfirmRiskAddressPrompt()) return false;
+
+    const targets = getLocationReportTargets();
+    if (!targets.length) {
+      log('Confirm Risk Address prompt found but Get Location Reports button was not found');
+      return false;
+    }
+
+    for (const el of targets) {
+      const txt = normalizeText(el.textContent || el.getAttribute?.('aria-label') || '');
+      log(`Trying Get Location Reports -> ${txt || el.tagName.toLowerCase()}`);
+      if (!strongClick(el)) continue;
+      await sleep(CFG.afterLocationReportsMs);
+      log('Clicked Get Location Reports and waited 3s');
+      return true;
+    }
+
+    log('Get Location Reports click did not succeed');
+    return false;
+  }
+
   async function clickCreateValuation() {
+    await clickGetLocationReportsIfNeeded();
     const targets = getCreateTargets();
 
     if (!targets.length) {
