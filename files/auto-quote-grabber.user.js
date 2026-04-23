@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9
+// @version      2.9.1
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -87,7 +87,16 @@
       'Name': '',
       'Mailing Address': '',
       'SubmissionNumber': '',
-      'updatedAt': ''
+      'updatedAt': '',
+      'First Name': '',
+      'Last Name': '',
+      'Email': '',
+      'Phone': '',
+      'DOB': '',
+      'Street Address': '',
+      'City': '',
+      'State': '',
+      'Zip': ''
     };
 
     if (!isPlainObject(raw)) return out;
@@ -101,6 +110,15 @@
     out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
     out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || '');
     out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.lastUpdatedAt || raw?.meta?.createdAt || '');
+    out['First Name'] = normalizeText(raw['First Name'] || raw.firstName || az['First Name'] || az['AZ Name'] || '');
+    out['Last Name'] = normalizeText(raw['Last Name'] || raw.lastName || az['Last Name'] || az['AZ Last'] || '');
+    out['Email'] = normalizeText(raw['Email'] || raw.email || az['Email'] || az['AZ Email'] || '');
+    out['Phone'] = normalizeText(raw['Phone'] || raw.phone || az['Phone'] || az['AZ Phone'] || '');
+    out['DOB'] = normalizeText(raw['DOB'] || raw.dob || az['DOB'] || az['AZ DOB'] || '');
+    out['Street Address'] = normalizeText(raw['Street Address'] || raw.streetAddress || az['Street Address'] || az['AZ Street Address'] || '');
+    out['City'] = normalizeText(raw['City'] || raw.city || az['City'] || az['AZ City'] || '');
+    out['State'] = normalizeText(raw['State'] || raw.state || az['State'] || az['AZ State'] || '');
+    out['Zip'] = normalizeText(raw['Zip'] || raw.zip || raw.zipCode || az['Zip'] || az['AZ Postal Code'] || '');
     return out;
   }
 
@@ -139,7 +157,16 @@
       'Name': incoming['Name'] || current['Name'] || '',
       'Mailing Address': incoming['Mailing Address'] || current['Mailing Address'] || '',
       'SubmissionNumber': incoming['SubmissionNumber'] || current['SubmissionNumber'] || '',
-      'updatedAt': new Date().toISOString()
+      'updatedAt': new Date().toISOString(),
+      'First Name': incoming['First Name'] || current['First Name'] || '',
+      'Last Name': incoming['Last Name'] || current['Last Name'] || '',
+      'Email': incoming['Email'] || current['Email'] || '',
+      'Phone': incoming['Phone'] || current['Phone'] || '',
+      'DOB': incoming['DOB'] || current['DOB'] || '',
+      'Street Address': incoming['Street Address'] || current['Street Address'] || '',
+      'City': incoming['City'] || current['City'] || '',
+      'State': incoming['State'] || current['State'] || '',
+      'Zip': incoming['Zip'] || current['Zip'] || ''
     };
 
     return { ok: true, current, next: writeCurrentJob(next) };
@@ -615,7 +642,16 @@
       'AZ ID': currentJob['AZ ID'],
       'Name': currentJob['Name'] || primaryInsuredName,
       'Mailing Address': currentJob['Mailing Address'],
-      'SubmissionNumber': autoSubmissionNumber || currentJob['SubmissionNumber']
+      'SubmissionNumber': autoSubmissionNumber || currentJob['SubmissionNumber'],
+      'First Name': currentJob['First Name'],
+      'Last Name': currentJob['Last Name'],
+      'Email': currentJob['Email'],
+      'Phone': currentJob['Phone'],
+      'DOB': currentJob['DOB'],
+      'Street Address': currentJob['Street Address'],
+      'City': currentJob['City'],
+      'State': currentJob['State'],
+      'Zip': currentJob['Zip']
     });
     if (!mergeJob.ok) {
       throw new Error(mergeJob.reason || 'Current job merge failed');
