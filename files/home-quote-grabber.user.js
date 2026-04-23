@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      1.9
+// @version      2.0
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,10 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '1.9';
+  const VERSION = '2.0';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
+  const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
@@ -72,6 +75,168 @@
   };
 
   init();
+
+  function safeJsonParse(value, fallback = null) {
+    try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  function deepClone(value) {
+    try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function buildMailingAddress(address, city, stateValue, zipCode) {
+    const a = normalizeText(address);
+    const c = normalizeText(city);
+    const s = normalizeText(stateValue);
+    const z = normalizeText(zipCode);
+    if (a && c && s && z) return `${a}, ${c}, ${s} ${z}`.trim();
+    return [a, c, s, z].filter(Boolean).join(', ').trim();
+  }
+
+  function normalizeCurrentJob(raw) {
+    const out = {
+      'AZ ID': '',
+      'Name': '',
+      'Mailing Address': '',
+      'SubmissionNumber': '',
+      'updatedAt': ''
+    };
+
+    if (!isPlainObject(raw)) return out;
+
+    const az = isPlainObject(raw.az) ? raw.az : {};
+    const legacyName = [az['AZ Name'], az['AZ Last']].map(v => normalizeText(v)).filter(Boolean).join(' ').trim();
+    const legacyAddress = buildMailingAddress(az['AZ Street Address'], az['AZ City'], az['AZ State'], az['AZ Postal Code']);
+
+    out['AZ ID'] = normalizeText(raw['AZ ID'] || raw.ticketId || raw.masterId || raw.id || az['AZ ID'] || '');
+    out['Name'] = normalizeText(raw['Name'] || raw.name || legacyName || '');
+    out['Mailing Address'] = normalizeText(raw['Mailing Address'] || raw.mailingAddress || legacyAddress || '');
+    out['SubmissionNumber'] = normalizeText(raw['SubmissionNumber'] || raw.submissionNumber || raw['Submission Number'] || '');
+    out['updatedAt'] = normalizeText(raw['updatedAt'] || raw.lastUpdatedAt || raw?.meta?.lastUpdatedAt || raw?.meta?.createdAt || '');
+    return out;
+  }
+
+  function readCurrentJob() {
+    let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+    let job = normalizeCurrentJob(raw);
+    if (job['AZ ID']) return job;
+
+    raw = safeJsonParse(localStorage.getItem(LEGACY_SHARED_JOB_KEY), null);
+    job = normalizeCurrentJob(raw);
+    return job;
+  }
+
+  function writeCurrentJob(job) {
+    const next = normalizeCurrentJob(job);
+    next.updatedAt = next.updatedAt || new Date().toISOString();
+    try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
+
+  function mergeCurrentJob(update) {
+    const current = readCurrentJob();
+    const incoming = normalizeCurrentJob(update || {});
+
+    if (current['AZ ID'] && incoming['AZ ID'] && current['AZ ID'] !== incoming['AZ ID']) {
+      return { ok: false, reason: `AZ ID mismatch (${current['AZ ID']} != ${incoming['AZ ID']})`, current };
+    }
+
+    const next = {
+      'AZ ID': incoming['AZ ID'] || current['AZ ID'] || '',
+      'Name': incoming['Name'] || current['Name'] || '',
+      'Mailing Address': incoming['Mailing Address'] || current['Mailing Address'] || '',
+      'SubmissionNumber': incoming['SubmissionNumber'] || current['SubmissionNumber'] || '',
+      'updatedAt': new Date().toISOString()
+    };
+
+    return { ok: true, current, next: writeCurrentJob(next) };
+  }
+
+  function readBundle() {
+    return safeJsonParse(localStorage.getItem(BUNDLE_KEY), null);
+  }
+
+  function writeBundle(bundle) {
+    localStorage.setItem(BUNDLE_KEY, JSON.stringify(bundle, null, 2));
+    return bundle;
+  }
+
+  function emptyBundleForJob(job) {
+    return {
+      'AZ ID': normalizeText(job && job['AZ ID']),
+      'Name': normalizeText(job && job['Name']),
+      'Mailing Address': normalizeText(job && job['Mailing Address']),
+      'SubmissionNumber': normalizeText(job && job['SubmissionNumber']),
+      home: {},
+      auto: {},
+      timeout: { events: [] },
+      meta: {
+        updatedAt: new Date().toISOString(),
+        lastWriter: SCRIPT_NAME,
+        version: VERSION
+      }
+    };
+  }
+
+  function ensureBundleForJob(job) {
+    const azId = normalizeText(job && job['AZ ID']);
+    if (!azId) return null;
+
+    const bundle = readBundle();
+    if (!isPlainObject(bundle) || !normalizeText(bundle['AZ ID'])) {
+      return writeBundle(emptyBundleForJob(job));
+    }
+
+    if (normalizeText(bundle['AZ ID']) !== azId) {
+      return writeBundle(emptyBundleForJob(job));
+    }
+
+    bundle['Name'] = bundle['Name'] || normalizeText(job['Name']);
+    bundle['Mailing Address'] = bundle['Mailing Address'] || normalizeText(job['Mailing Address']);
+    bundle['SubmissionNumber'] = bundle['SubmissionNumber'] || normalizeText(job['SubmissionNumber']);
+    bundle.timeout = isPlainObject(bundle.timeout) ? bundle.timeout : { events: [] };
+    if (!Array.isArray(bundle.timeout.events)) bundle.timeout.events = [];
+    bundle.meta = isPlainObject(bundle.meta) ? bundle.meta : {};
+    bundle.meta.updatedAt = new Date().toISOString();
+    bundle.meta.lastWriter = SCRIPT_NAME;
+    bundle.meta.version = VERSION;
+    return writeBundle(bundle);
+  }
+
+  function saveBundleSection(sectionName, sectionValue, job, extra = {}) {
+    const bundle = ensureBundleForJob(job);
+    if (!bundle) return { ok: false, reason: 'Missing current AZ job' };
+
+    const next = deepClone(bundle);
+    next['Name'] = normalizeText(job['Name']) || next['Name'] || '';
+    next['Mailing Address'] = normalizeText(job['Mailing Address']) || next['Mailing Address'] || '';
+
+    if (extra.submissionNumber) {
+      next['SubmissionNumber'] = normalizeText(extra.submissionNumber);
+      mergeCurrentJob({ 'AZ ID': job['AZ ID'], 'SubmissionNumber': next['SubmissionNumber'] });
+    }
+
+    next[sectionName] = {
+      ready: true,
+      savedAt: new Date().toISOString(),
+      script: SCRIPT_NAME,
+      version: VERSION,
+      payloadKey: extra.payloadKey || '',
+      submissionNumber: normalizeText(extra.submissionNumber || ''),
+      data: deepClone(sectionValue)
+    };
+
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.updatedAt = new Date().toISOString();
+    next.meta.lastWriter = SCRIPT_NAME;
+    next.meta.version = VERSION;
+    writeBundle(next);
+    return { ok: true, bundle: next };
+  }
 
   function init() {
     buildUI();
@@ -194,9 +359,18 @@
       log('All fields grabbed successfully');
     }
 
+    const currentJob = readCurrentJob();
+    if (!currentJob['AZ ID']) {
+      throw new Error('Missing tm_pc_current_job_v1 / AZ ID');
+    }
+
     const payload = {
       script: SCRIPT_NAME,
       version: VERSION,
+      event: 'home_quote_gathered',
+      product: 'home',
+      'AZ ID': currentJob['AZ ID'],
+      currentJob,
       savedAt: new Date().toISOString(),
       page: {
         url: location.href,
@@ -213,8 +387,26 @@
       row
     };
 
+    const mergeJob = mergeCurrentJob({
+      'AZ ID': currentJob['AZ ID'],
+      'Name': currentJob['Name'] || row['Name'],
+      'Mailing Address': currentJob['Mailing Address'] || row['Mailing Address'],
+      'SubmissionNumber': row['Submission Number'] || currentJob['SubmissionNumber']
+    });
+    if (!mergeJob.ok) {
+      throw new Error(mergeJob.reason || 'Current job merge failed');
+    }
+
     localStorage.setItem(KEYS.payload, JSON.stringify(payload, null, 2));
+    const bundleSave = saveBundleSection('home', payload, mergeJob.next || currentJob, {
+      submissionNumber: row['Submission Number'] || '',
+      payloadKey: KEYS.payload
+    });
+    if (!bundleSave.ok) {
+      throw new Error(bundleSave.reason || 'Bundle save failed');
+    }
     log(`Payload saved: ${KEYS.payload}`);
+    log('Bundle merged: tm_pc_webhook_bundle_v1.home');
     setStatus('Grab complete');
     state.doneThisLoad = true;
   }

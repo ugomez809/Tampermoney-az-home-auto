@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      1.22
+// @version      1.23
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '1.22';
+  const VERSION = '1.23';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -81,6 +81,7 @@
   }
 
   function onReady() {
+    clearStaleSharedPause();
     buildUi();
     log('Script started');
     log('Shared-payload error gatherer armed');
@@ -485,6 +486,20 @@
     try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
     try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
     log(`Force send requested: ${request.reason}`);
+  }
+
+  function hasForceSendRequest() {
+    const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    return !!(request && typeof request === 'object' && request.requestedAt);
+  }
+
+  function clearStaleSharedPause() {
+    if (hasForceSendRequest()) return;
+    try {
+      if (localStorage.getItem(GLOBAL_PAUSE_KEY) === '1') {
+        localStorage.removeItem(GLOBAL_PAUSE_KEY);
+      }
+    } catch {}
   }
 
   function resetSubmissionState(submission, product, header) {
