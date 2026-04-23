@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber V2.2
 // @namespace    home.bot.auto.quote.grabber
-// @version      2.5
+// @version      2.6
 // @description  Shared-payload AUTO gatherer. Clicks Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber V2.2';
-  const VERSION = '2.5';
+  const VERSION = '2.6';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 
   const KEYS = {
@@ -245,6 +245,10 @@
 
   const IDS = {
     policyInfoTab: 'SubmissionWizard-LOBWizardStepGroup-PolicyInfo',
+    autoDataPrefillTab: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PriorCarrier_Ext',
+    driversTab: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-PADrivers',
+    vehiclesTab: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-PAVehicles',
+    paCoveragesTab: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-PersonalAuto',
     quoteTab: 'SubmissionWizard-ViewQuote',
 
     policyInfoNameWrap: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
@@ -635,6 +639,7 @@
     await navigateToTab(
       'Auto Data Prefill',
       [
+        () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoDataPrefillTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('Auto Data Prefill'),
         () => findTabActionByExactText('Auto Data Prefill'),
         () => findActionByText('Auto Data Prefill')
@@ -647,6 +652,7 @@
     await navigateToTab(
       'Drivers',
       [
+        () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.driversTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('Drivers'),
         () => findTabActionByExactText('Drivers'),
         () => findActionByText('Drivers')
@@ -659,6 +665,7 @@
     await navigateToTab(
       'Vehicles',
       [
+        () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.vehiclesTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('Vehicles'),
         () => findTabActionByExactText('Vehicles'),
         () => findActionByText('Vehicles')
@@ -671,6 +678,7 @@
     await navigateToTab(
       'PA Coverages',
       [
+        () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.paCoveragesTab)} > div.gw-action--inner`)),
         () => findTabActionByVisibleLabel('PA Coverages'),
         () => findTabActionByExactText('PA Coverages'),
         () => findActionByText('PA Coverages')
