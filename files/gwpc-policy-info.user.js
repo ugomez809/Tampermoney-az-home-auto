@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Policy Info
 // @namespace    homebot.gwpc-policy-info
-// @version      2.1
+// @version      2.2
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Policy Info';
-  const VERSION = '2.1';
+  const VERSION = '2.2';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -28,6 +28,7 @@
   const HARD_STOP_LABEL = 'Submission (Quoted)';
   const POLICY_INFO_TAB_TEXT = 'Policy Info';
   const TAB_NUDGE_COOLDOWN_MS = 1500;
+  const TAB_NUDGE_SETTLE_MS = 2500;
 
   // ----- HOME MODE -----
   const SEL_GENDER =
@@ -577,6 +578,7 @@
       hardStopAndFinish();
       return;
     }
+    if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_SETTLE_MS) return;
     if (nudgePolicyInfoTabIfNeeded()) return;
     runSequence();
   }

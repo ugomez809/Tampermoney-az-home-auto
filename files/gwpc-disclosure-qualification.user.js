@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.1
+// @version      2.2
 // @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,7 +19,7 @@
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Disclosure Qualification';
-  const VERSION = '2.1';
+  const VERSION = '2.2';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 
@@ -29,6 +29,7 @@
   const HARD_STOP_LABEL_QUOTED = 'Submission (Quoted)';
   const TRIGGER_TITLE_STARTS_WITH = 'Disclosure & Qualification';
   const TAB_NUDGE_COOLDOWN_MS = 1500;
+  const TAB_NUDGE_SETTLE_MS = 2500;
   const DISCLOSURE_TAB_TEXT = 'Disclosure & Qualification';
 
   const PRIMARY_YES_INPUT_ID =
@@ -554,6 +555,7 @@
   function tick() {
     if (done) return;
     if (hardStopIfQuoted()) return;
+    if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_SETTLE_MS) return;
     const stage = readFlowStage();
     if (!norm(stage.product) && hasHomeownersAnyDoc() && titleIsDisclosureAnyDoc()) {
       writeFlowStage('home', 'disclosure');
