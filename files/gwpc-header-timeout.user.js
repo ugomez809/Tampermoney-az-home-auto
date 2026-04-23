@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.0.1
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
+// @version      2.1
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, can persistently enable or disable automatic timeout posting, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '2.0.1';
+  const VERSION = '2.1';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -39,7 +39,8 @@
     runtime: 'tm_pc_header_timeout_runtime_v2',
     pendingPost: 'tm_pc_header_timeout_pending_post_v2',
     sentEvents: 'tm_pc_header_timeout_sent_events_v2',
-    selectorPauseState: 'tm_pc_header_timeout_selector_pause_state_v1'
+    selectorPauseState: 'tm_pc_header_timeout_selector_pause_state_v1',
+    timeoutEnabled: 'tm_pc_header_timeout_enabled_v1'
   };
 
   const CFG = {
@@ -63,6 +64,7 @@
     runtimeStarted: false,
     destroyed: false,
     running: true,
+    timeoutEnabled: true,
     logs: [],
     els: {},
     panel: null,
@@ -134,6 +136,7 @@
     }
 
     state.runtimeStarted = true;
+    state.timeoutEnabled = readTimeoutEnabled();
     restoreStaleSelectorPause();
     state.pending = readPendingPost();
     log(`Script started v${VERSION}`);
@@ -328,6 +331,26 @@
       state.els.logs.scrollTop = 0;
     }
     console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
+
+  function readTimeoutEnabled() {
+    try {
+      const raw = localStorage.getItem(KEYS.timeoutEnabled);
+      if (raw == null || raw === '') return true;
+      if (raw === '1' || raw === 'true') return true;
+      if (raw === '0' || raw === 'false') return false;
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
+  function writeTimeoutEnabled(enabled) {
+    state.timeoutEnabled = !!enabled;
+    try { localStorage.setItem(KEYS.timeoutEnabled, state.timeoutEnabled ? '1' : '0'); } catch {}
+    renderButtons();
+    renderAll();
+    return state.timeoutEnabled;
   }
 
   function logWait(key, message) {
@@ -829,6 +852,16 @@
     return state.pending;
   }
 
+  function clearForceSendRequestIfOwned(reasonPrefix = '') {
+    const current = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    if (!isPlainObject(current)) return;
+    const source = normalizeText(current.source || '');
+    const reason = normalizeText(current.reason || '');
+    if (source !== SCRIPT_NAME) return;
+    if (reasonPrefix && !reason.startsWith(reasonPrefix)) return;
+    try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
+  }
+
   function readSentEventsStore() {
     const current = safeJsonParse(localStorage.getItem(KEYS.sentEvents), null);
     if (!isPlainObject(current)) {
@@ -1235,6 +1268,12 @@
     }
 
     try {
+      const rollback = {
+        product: context.product,
+        payloadKey: context.product === 'home' ? KEYS.homePayload : KEYS.autoPayload,
+        payloadValue: readProductPayload(context.product).value,
+        bundleValue: readBundle()
+      };
       saveEventToPayload(context.product, context.job, event);
       const bundle = saveEventToBundle(context.product, context.job, event);
       const signature = buildSignatureJobBundle(context.job, bundle);
@@ -1253,7 +1292,8 @@
         errorText: normalizeText(event.errorText || ''),
         headerText: normalizeText(event.headerText || ''),
         submissionNumber: normalizeText(event.submissionNumber || ''),
-        attempts: 1
+        attempts: 1,
+        rollback
       });
 
       log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event`);
@@ -1270,6 +1310,7 @@
   }
 
   function processHeaderTimeout() {
+    if (!state.timeoutEnabled) return;
     const context = buildEventContext();
     if (!context.ok) {
       logWait(`timeout:${context.reason}`, context.reason);
@@ -1286,12 +1327,45 @@
     dispatchEvent(event);
   }
 
+  function restorePendingRollback(pending) {
+    const rollback = isPlainObject(pending?.rollback) ? pending.rollback : null;
+    if (!rollback) return false;
+    try {
+      if (rollback.payloadKey) {
+        if (rollback.payloadValue == null) localStorage.removeItem(rollback.payloadKey);
+        else localStorage.setItem(rollback.payloadKey, JSON.stringify(rollback.payloadValue, null, 2));
+      }
+      if (rollback.bundleValue == null) localStorage.removeItem(BUNDLE_KEY);
+      else localStorage.setItem(BUNDLE_KEY, JSON.stringify(rollback.bundleValue, null, 2));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function cancelPendingTimeoutFlow(reason) {
+    const pending = readPendingPost();
+    if (!pending || normalizeText(pending.source || '') !== 'timeout') return false;
+    restorePendingRollback(pending);
+    clearForceSendRequestIfOwned();
+    writePendingPost(null);
+    state.lastFailedWaitLogKey = '';
+    log(reason);
+    setStatus('Watching header');
+    return true;
+  }
+
   function processPendingSend() {
     const pending = readPendingPost();
     state.pending = pending;
     if (!pending) {
       state.lastFailedWaitLogKey = '';
       renderButtons();
+      return;
+    }
+
+    if (!state.timeoutEnabled && normalizeText(pending.source || '') === 'timeout') {
+      cancelPendingTimeoutFlow('Automatic timeout disabled. Pending timeout post canceled.');
       return;
     }
 
@@ -1954,6 +2028,7 @@
       <div ${UI_MARKER_ATTR}="1" style="padding:12px;">
         <div ${UI_MARKER_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">STOP</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-enable-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">TIMEOUT ON</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-retry" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">RETRY POST</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
@@ -1980,6 +2055,7 @@
   function bindUi(panel) {
     state.panel = panel;
     state.els.toggle = $('#tm-timeout-toggle', panel);
+    state.els.timeoutEnableToggle = $('#tm-timeout-enable-toggle', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
     state.els.retry = $('#tm-timeout-retry', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
@@ -2012,6 +2088,20 @@
       renderAll();
     };
 
+    state.els.timeoutEnableToggle.onclick = () => {
+      const enabled = writeTimeoutEnabled(!state.timeoutEnabled);
+      if (!enabled) {
+        cancelPendingTimeoutFlow('Automatic timeout disabled. Timeout auto-post and auto-close are OFF.');
+        log('Automatic timeout posting disabled');
+      } else {
+        log('Automatic timeout posting enabled');
+        scheduleScan('timeout-enabled');
+      }
+      setStatus(state.running ? 'Watching header' : 'Stopped');
+      renderButtons();
+      renderAll();
+    };
+
     state.els.selector.onclick = () => {
       if (state.selectorMode || state.modalOpen) {
         closeSelectorSession('Selector canceled');
@@ -2031,6 +2121,12 @@
     if (!state.els.toggle) return;
     state.els.toggle.textContent = state.running ? 'STOP' : 'START';
     state.els.toggle.style.background = state.running ? '#dc2626' : '#16a34a';
+
+    if (state.els.timeoutEnableToggle) {
+      state.els.timeoutEnableToggle.textContent = state.timeoutEnabled ? 'TIMEOUT ON' : 'TIMEOUT OFF';
+      state.els.timeoutEnableToggle.style.background = state.timeoutEnabled ? '#16a34a' : '#475569';
+      state.els.timeoutEnableToggle.style.color = '#fff';
+    }
 
     if (state.els.selector) {
       state.els.selector.textContent = state.selectorMode || state.modalOpen ? 'CANCEL SELECTOR' : 'SELECTOR MODE';
