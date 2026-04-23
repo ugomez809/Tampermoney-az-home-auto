@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.5
-// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits before requote, retries in-tab after failures, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      3.6
+// @description  End-to-end Home quote driver. Detects the Coverages page, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, clicks the Quote action after auto discount, retries in-tab after failures, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.5';
+  const VERSION = '3.6';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -729,12 +729,12 @@
 
   function findQuoteCandidates() {
     const out = [];
-    const exactInner = q('#SubmissionWizard-Quote > div.gw-action--inner.gw-hasDivider');
+    const exactInner = findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteButtonHost)} > div.gw-action--inner.gw-hasDivider`));
     if (exactInner) out.unshift(exactInner);
-    const host = byId(IDS.quoteButtonHost);
+    const host = findInDocs((doc) => doc.getElementById(IDS.quoteButtonHost));
     if (host) out.unshift(host);
-    out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
-    const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
+    out.push(...Array.from(document.querySelectorAll('.gw-label[aria-label="Quote"]')));
+    const nextLab = findInDocs((doc) => doc.querySelector('.gw-label[aria-label="Next"]'));
     if (nextLab) {
       let p = nextLab;
       for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
@@ -746,6 +746,34 @@
       }
     }
     return Array.from(new Set(out));
+  }
+
+  async function clickQuoteActionToOpenQuote() {
+    for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
+      setStatus(`Clicking Quote action (${attempt}/${CFG.maxQuoteAttempts})`);
+      const clicked = clickQuoteOnce();
+      if (!clicked) {
+        await sleep(CFG.betweenQuoteAttemptsMs);
+        continue;
+      }
+
+      await sleep(CFG.afterQuoteWaitMs);
+      const opened = await waitFor(
+        () => !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote'),
+        CFG.quoteTransitionTimeoutMs,
+        `Quote action transition (attempt ${attempt})`
+      );
+
+      if (opened) {
+        log('Quote action opened Quote screen');
+        return true;
+      }
+
+      log(`Quote action did not open Quote screen on attempt ${attempt}`);
+      if (attempt < CFG.maxQuoteAttempts) await sleep(CFG.betweenQuoteAttemptsMs);
+    }
+
+    return false;
   }
 
   function upgradeToClickable(el) {
@@ -1140,6 +1168,9 @@
   }
 
   async function goToQuote() {
+    const openedByAction = await clickQuoteActionToOpenQuote();
+    if (openedByAction) return;
+
     await navigateToTab(
       'Quote',
       [
