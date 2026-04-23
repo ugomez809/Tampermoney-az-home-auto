@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.5
+// @version      2.7
 // @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.5';
+  const VERSION = '2.7';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -76,8 +76,14 @@
     activeHandoffRequestedAt: '',
     lastWaitReason: '',
     logLines: [],
-    ui: null
+    ui: null,
+    tickCount: 0,
+    lastSnapshotTick: 0,
+    lastTriggerSource: '',
+    announcedSkipReason: ''
   };
+
+  const SNAPSHOT_EVERY_TICKS = 10;
 
   init();
 
@@ -135,9 +141,17 @@
     if (gm && ls) {
       const gmAt = normalizeText(gm.requestedAt || '');
       const lsAt = normalizeText(ls.requestedAt || '');
-      return (lsAt && lsAt > gmAt) ? ls : gm;
+      if (lsAt && lsAt > gmAt) {
+        state.lastTriggerSource = 'localStorage';
+        return ls;
+      }
+      state.lastTriggerSource = 'GM';
+      return gm;
     }
-    return gm || ls || {};
+    if (gm) { state.lastTriggerSource = 'GM'; return gm; }
+    if (ls) { state.lastTriggerSource = 'localStorage'; return ls; }
+    state.lastTriggerSource = '';
+    return {};
   }
 
   function getUsableHomeQuoteGrabberHandoff(azId = '') {
@@ -335,15 +349,53 @@
 
   function init() {
     buildUI();
-    log('Script started');
+    log(`Script started v${VERSION}`);
+    log(`Origin: ${location.origin}`);
+    log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}, GM_deleteValue=${typeof GM_deleteValue}`);
     log('Auto-run armed');
     setStatus('Waiting for HOME quote-grabber trigger');
-    setInterval(tick, CFG.tickMs);
-    tick();
+    setInterval(() => {
+      try { tick(); } catch (err) {
+        log(`tick() crashed: ${err?.message || err}`);
+        setStatus('Tick error (see log)');
+      }
+    }, CFG.tickMs);
+    try { tick(); } catch (err) {
+      log(`tick() crashed: ${err?.message || err}`);
+      setStatus('Tick error (see log)');
+    }
+  }
+
+  function announceSkipReason(reason) {
+    if (state.announcedSkipReason === reason) return;
+    state.announcedSkipReason = reason;
+    log(`Tick skipped: ${reason}`);
+  }
+
+  function logTriggerSnapshot(currentJob) {
+    const gm = readHomeQuoteGrabberTriggerFromGm();
+    const ls = readHomeQuoteGrabberTriggerFromLocalStorage();
+    const stage = readFlowStage();
+    function describe(t) {
+      if (!t) return 'none';
+      const consumed = t.consumed === true ? 'consumed' : 'fresh';
+      return `@${t.requestedAt || '?'} azId=${t.azId || '(empty)'} from=${t.from || '(n/a)'} to=${t.to || '(n/a)'} [${consumed}]`;
+    }
+    const parts = [
+      `job.AZ=${currentJob['AZ ID'] || '(empty)'}`,
+      `GM=${describe(gm)}`,
+      `LS=${describe(ls)}`,
+      `stage=${normalizeText(stage.product) || '(none)'}/${normalizeText(stage.step) || '(none)'}`
+    ];
+    log(`Snapshot: ${parts.join(' | ')}`);
   }
 
   function tick() {
-    if (!state.running || state.busy || state.doneThisLoad) return;
+    state.tickCount++;
+    if (!state.running) { announceSkipReason('state.running=false'); return; }
+    if (state.busy) { announceSkipReason('state.busy=true'); return; }
+    if (state.doneThisLoad) { announceSkipReason('doneThisLoad=true (reload tab for another quote)'); return; }
+    state.announcedSkipReason = '';
 
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
@@ -353,12 +405,17 @@
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = '';
       setWaiting('Waiting for HOME quote-grabber trigger');
+      if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
+        state.lastSnapshotTick = state.tickCount;
+        logTriggerSnapshot(currentJob);
+      }
       return;
     }
 
     if (handoff && !stageReady) {
       writeFlowStage('home', 'quote_grabber', currentJob['AZ ID']);
-      log('Recovered quote-grabber stage from direct handoff');
+      const src = state.lastTriggerSource || '?';
+      log(`Recovered quote-grabber stage from direct handoff (source=${src})`);
     }
 
     if (hasVisibleExactLabel('Personal Auto')) {
@@ -371,7 +428,8 @@
     if (currentRequestedAt && currentRequestedAt !== state.activeHandoffRequestedAt) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = currentRequestedAt;
-      log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')}`);
+      const src = state.lastTriggerSource || '?';
+      log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')} (source=${src})`);
     }
 
     if (!state.triggerSince) {
@@ -388,6 +446,7 @@
     }
 
     state.busy = true;
+    log(`Starting runGrab on ${location.origin}${location.pathname}`);
     runGrab()
       .catch((err) => {
         log(`Failed: ${err?.message || err}`);
@@ -396,6 +455,33 @@
       .finally(() => {
         state.busy = false;
       });
+  }
+
+  function hasVisibleExactLabel(labelText) {
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      try {
+        const nodes = doc.querySelectorAll('.gw-label');
+        for (const el of nodes) {
+          if (!isVisibleEl(el)) continue;
+          if (normalizeText(el.textContent || '') === labelText) return true;
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  function isVisibleEl(el) {
+    if (!el || !(el instanceof Element)) return false;
+    try {
+      const r = el.getBoundingClientRect?.();
+      if (!r || r.width === 0 || r.height === 0) return false;
+      const win = el.ownerDocument?.defaultView || window;
+      const cs = win.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+      if (el.closest?.('[aria-hidden="true"]')) return false;
+      return true;
+    } catch { return false; }
   }
 
   async function runGrab() {

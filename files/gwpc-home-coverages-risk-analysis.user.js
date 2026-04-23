@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         04 GWPC Home Coverages Quote + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      1.3.4
+// @version      1.3.6
 // @description  On Home Coverages, clicks Edit All, applies required coverage changes, clicks Quote, then clicks Risk Analysis.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -18,7 +18,7 @@
   'use strict';
 
   const SCRIPT_NAME = '04 GWPC Home Coverages Quote + Risk Analysis';
-  const VERSION = '1.3.4';
+  const VERSION = '1.3.6';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const HOME_QUOTE_GRABBER_TRIGGER_KEY = 'tm_pc_home_quote_grabber_trigger_v1';
@@ -148,13 +148,20 @@
       version: VERSION
     };
     const serialized = JSON.stringify(next, null, 2);
-    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized); } catch {}
+
+    let lsOk = false;
+    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized); lsOk = true; }
+    catch (err) { log(`localStorage write failed: ${err?.message || err}`); }
+
+    let gmStatus = 'skipped (no grant)';
     try {
       if (typeof GM_setValue === 'function') {
         GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized);
+        gmStatus = 'ok';
       }
-    } catch {}
-    log(`Home Quote Grabber handoff sent${azId ? ` | AZ ID ${azId}` : ''}${submissionNumber ? ` | Submission ${submissionNumber}` : ''}`);
+    } catch (err) { gmStatus = `err: ${err?.message || err}`; }
+
+    log(`Handoff sent | azId=${azId || '(empty)'}${submissionNumber ? ` | Submission ${submissionNumber}` : ''} | LS=${lsOk ? 'ok' : 'fail'} | GM=${gmStatus}`);
   }
 
   function fanOutHomeQuoteGrabberTrigger() {
@@ -175,7 +182,9 @@
   function init() {
     if (window.top !== window.self) return;
     buildUI();
-    log(`Loaded ${SCRIPT_NAME}`);
+    log(`Loaded ${SCRIPT_NAME} v${VERSION}`);
+    log(`Origin: ${location.origin}`);
+    log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}`);
     setStatus('Waiting for Coverages');
     setInterval(tick, CFG.tickMs);
     tick();
