@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.1.1
+// @version      2.1.2
 // @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, requests the existing sender, and only closes after a confirmed successful post.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -2183,9 +2183,9 @@
     if (state.els.selector) {
       state.els.selector.textContent = state.selectorMode || state.modalOpen ? 'CANCEL SELECTOR' : 'SELECTOR MODE';
       state.els.selector.style.background = state.selectorMode || state.modalOpen ? '#f59e0b' : '#0891b2';
-      state.els.selector.disabled = !!(state.pending?.status === 'waiting');
-      state.els.selector.style.opacity = state.els.selector.disabled ? '0.55' : '1';
-      state.els.selector.style.cursor = state.els.selector.disabled ? 'not-allowed' : 'pointer';
+      state.els.selector.disabled = false;
+      state.els.selector.style.opacity = '1';
+      state.els.selector.style.cursor = 'pointer';
     }
 
     if (state.els.retry) {
