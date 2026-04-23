@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.6
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, then enriches the current job from GWPC identity. APEX ignored.
+// @version      1.7
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'AZ TO GWPC Shared Ticket Handoff';
-  const VERSION = '1.6';
+  const VERSION = '1.7';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -324,6 +324,58 @@
     return false;
   }
 
+  function readGwpcHomePayload() {
+    const payload = safeJsonParse(localStorage.getItem(GWPC_KEYS.homePayload), null);
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  }
+
+  function readGwpcBundle() {
+    const bundle = safeJsonParse(localStorage.getItem(GWPC_KEYS.bundle), null);
+    return bundle && typeof bundle === 'object' && !Array.isArray(bundle) ? bundle : null;
+  }
+
+  function getHomeGatherState(azId) {
+    const wantedAzId = clean(azId);
+    const payload = readGwpcHomePayload();
+    const bundle = readGwpcBundle();
+
+    const payloadAzId = clean(payload?.['AZ ID'] || payload?.currentJob?.['AZ ID'] || '');
+    const bundleAzId = clean(bundle?.['AZ ID'] || '');
+    const payloadMatches = !!wantedAzId && payloadAzId === wantedAzId;
+    const bundleMatches = !!wantedAzId && bundleAzId === wantedAzId;
+
+    const row =
+      (payloadMatches && payload?.row && typeof payload.row === 'object' ? payload.row : null) ||
+      (bundleMatches && bundle?.home?.data?.row && typeof bundle.home.data.row === 'object' ? bundle.home.data.row : null) ||
+      {};
+
+    const progress =
+      (payloadMatches && payload?.meta?.progress && typeof payload.meta.progress === 'object' ? payload.meta.progress : null) ||
+      (bundleMatches && bundle?.home?.data?.meta?.progress && typeof bundle.home.data.meta.progress === 'object' ? bundle.home.data.meta.progress : null) ||
+      {};
+
+    const pass1Ready =
+      progress.pass1PricingCaptured === true ||
+      (!!clean(row['Standard Pricing No Auto Discount']) && !!clean(row['Enhance Pricing No Auto Discount']));
+
+    const pass2Ready =
+      progress.pass2PricingCaptured === true ||
+      (!!clean(row['Standard Pricing Auto Discount']) && !!clean(row['Enhance Pricing Auto Discount']));
+
+    const payloadReady = payloadMatches && payload?.ready === true;
+    const bundleReady = bundleMatches && bundle?.home?.ready === true;
+
+    return {
+      payloadMatches,
+      bundleMatches,
+      pass1Ready,
+      pass2Ready,
+      payloadReady,
+      bundleReady,
+      finalReady: pass1Ready && pass2Ready && payloadReady && bundleReady
+    };
+  }
+
   function maybeAdvanceGwpcFlow(job) {
     const azId = clean(job && job['AZ ID']);
     if (!azId) return;
@@ -346,7 +398,10 @@
     }
 
     if (clean(stage.product) === 'home' && clean(stage.step) === 'handoff') {
-      writeFlowStage('home', 'sender', azId);
+      const homeState = getHomeGatherState(azId);
+      if (homeState.finalReady) {
+        writeFlowStage('auto', 'start', azId);
+      }
       return;
     }
 

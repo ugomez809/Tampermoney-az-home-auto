@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      3.9.1
-// @description  Triggered Home quote driver. Waits for a fresh Dwelling Water Rule trigger, sets required coverages, runs the initial Quote, grabs pre/post auto-discount pricing through Edit Quote, waits for the Quote action to become clickable after auto discount, checks FAIR Plan Companion Endorsement, and saves the HOME payload to localStorage.
+// @version      4.0
+// @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '3.9.1';
+  const VERSION = '4.0';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -129,6 +129,7 @@
     announcedSkipReason: '',
     coverageTriggerSince: 0,
     pageLoadedAtMs: Date.now(),
+    currentAzId: '',
     lastQuoteClickAt: 0,
     lastTabNudgeAt: 0
   };
@@ -351,6 +352,277 @@
     };
   }
 
+  function emptyHomeRow() {
+    return {
+      'Name': '',
+      'Mailing Address': '',
+      'Fire Code': '',
+      'Protection Class': '',
+      'CFP?': '',
+      'Reconstruction Cost': '',
+      'Year Built': '',
+      'Square FT': '',
+      '# of Story': '',
+      'Water Device?': '',
+      'Standard Pricing No Auto Discount': '',
+      'Enhance Pricing No Auto Discount': '',
+      'Standard Pricing Auto Discount': '',
+      'Enhance Pricing Auto Discount': '',
+      'Submission Number': '',
+      'Auto Discount': '',
+      'Date Processed?': '',
+      'Done?': '',
+      'Result': ''
+    };
+  }
+
+  function emptyHomeProgress() {
+    return {
+      earlyPolicyInfoCaptured: false,
+      earlyDwellingCaptured: false,
+      pass1PricingCaptured: false,
+      pass2PricingCaptured: false,
+      finalRefreshComplete: false
+    };
+  }
+
+  function emptyHomeTabsUsed() {
+    return {
+      coveragesEditedAndQuotedInitially: false,
+      coveragesNoAutoDiscount: false,
+      policyInfo: false,
+      editQuote: false,
+      quoteAfterAutoDiscount: false,
+      dwelling: false,
+      coveragesAutoDiscount: false,
+      exclusionsAndConditions: false,
+      quoteFinal: false,
+      fairPlanCompanionEndorsementDetected: false
+    };
+  }
+
+  function readHomePayloadRaw() {
+    return safeJsonParse(localStorage.getItem(KEYS.payload), null);
+  }
+
+  function createHomePayloadBase(job) {
+    const currentJob = normalizeCurrentJob(job);
+    const now = new Date().toISOString();
+    return {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      event: 'home_quote_gathered',
+      product: 'home',
+      ready: false,
+      'AZ ID': currentJob['AZ ID'],
+      currentJob,
+      savedAt: now,
+      page: {
+        url: location.href,
+        title: document.title
+      },
+      flow: 'background',
+      meta: {
+        phase: 'idle',
+        progress: emptyHomeProgress(),
+        updatedAt: now,
+        lastWriter: SCRIPT_NAME,
+        version: VERSION
+      },
+      quoteAfterDiscount: {},
+      tabsUsed: emptyHomeTabsUsed(),
+      row: emptyHomeRow()
+    };
+  }
+
+  function ensureHomePayloadForJob(job) {
+    const currentJob = normalizeCurrentJob(job);
+    const azId = normalizeText(currentJob['AZ ID']);
+    const current = readHomePayloadRaw();
+    const currentAzId = normalizeText(current?.['AZ ID'] || current?.currentJob?.['AZ ID'] || '');
+
+    if (!azId || !isPlainObject(current) || currentAzId !== azId) {
+      return createHomePayloadBase(currentJob);
+    }
+
+    const next = createHomePayloadBase({
+      ...(isPlainObject(current.currentJob) ? current.currentJob : {}),
+      ...currentJob,
+      'AZ ID': azId
+    });
+
+    next.ready = current.ready === true;
+    next.savedAt = normalizeText(current.savedAt || '') || next.savedAt;
+    next.page = isPlainObject(current.page) ? current.page : next.page;
+    next.flow = normalizeText(current.flow || next.flow) || next.flow;
+    next.row = {
+      ...emptyHomeRow(),
+      ...(isPlainObject(current.row) ? current.row : {})
+    };
+    next.quoteAfterDiscount = isPlainObject(current.quoteAfterDiscount)
+      ? current.quoteAfterDiscount
+      : {};
+    next.tabsUsed = {
+      ...emptyHomeTabsUsed(),
+      ...(isPlainObject(current.tabsUsed) ? current.tabsUsed : {})
+    };
+    next.meta = isPlainObject(current.meta) ? current.meta : {};
+    next.meta.phase = normalizeText(next.meta.phase || '') || 'idle';
+    next.meta.progress = {
+      ...emptyHomeProgress(),
+      ...(isPlainObject(current.meta?.progress) ? current.meta.progress : {})
+    };
+    next.meta.updatedAt = normalizeText(next.meta.updatedAt || '') || next.meta.updatedAt || next.savedAt;
+    next.meta.lastWriter = normalizeText(next.meta.lastWriter || '') || SCRIPT_NAME;
+    next.meta.version = normalizeText(next.meta.version || '') || VERSION;
+    return next;
+  }
+
+  function mergeHomeRow(baseRow, updates) {
+    const next = {
+      ...emptyHomeRow(),
+      ...(isPlainObject(baseRow) ? baseRow : {})
+    };
+
+    if (!isPlainObject(updates)) return next;
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (value == null) continue;
+      const text = typeof value === 'string' ? value : String(value);
+      if (!text && key !== 'Done?' && key !== 'Result') continue;
+      next[key] = text;
+    }
+
+    return next;
+  }
+
+  function mergeBooleanProgress(baseProgress, updates) {
+    const next = {
+      ...emptyHomeProgress(),
+      ...(isPlainObject(baseProgress) ? baseProgress : {})
+    };
+
+    if (!isPlainObject(updates)) return next;
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (typeof value === 'boolean') next[key] = value;
+    }
+
+    return next;
+  }
+
+  function mergeTabsUsed(baseTabs, updates) {
+    const next = {
+      ...emptyHomeTabsUsed(),
+      ...(isPlainObject(baseTabs) ? baseTabs : {})
+    };
+
+    if (!isPlainObject(updates)) return next;
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (typeof value === 'boolean') next[key] = value;
+    }
+
+    return next;
+  }
+
+  function isPayloadRowChanged(currentRow, updates) {
+    if (!isPlainObject(updates)) return false;
+    const row = {
+      ...emptyHomeRow(),
+      ...(isPlainObject(currentRow) ? currentRow : {})
+    };
+
+    return Object.entries(updates).some(([key, value]) => {
+      const nextValue = typeof value === 'string' ? value : String(value ?? '');
+      if (!nextValue && key !== 'Done?' && key !== 'Result') return false;
+      return normalizeText(row[key]) !== normalizeText(nextValue);
+    });
+  }
+
+  function normalizeHomeState(job) {
+    const payload = ensureHomePayloadForJob(job);
+    const row = payload.row || emptyHomeRow();
+    const progress = payload.meta?.progress || emptyHomeProgress();
+    return {
+      payload,
+      row,
+      progress,
+      ready: payload.ready === true,
+      pass1Ready: progress.pass1PricingCaptured === true || (!!row['Standard Pricing No Auto Discount'] && !!row['Enhance Pricing No Auto Discount']),
+      pass2Ready: progress.pass2PricingCaptured === true || (!!row['Standard Pricing Auto Discount'] && !!row['Enhance Pricing Auto Discount']),
+      finalRefreshReady: progress.finalRefreshComplete === true
+    };
+  }
+
+  function saveHomeState(job, options = {}) {
+    const currentJob = normalizeCurrentJob(job);
+    if (!currentJob['AZ ID']) return { ok: false, reason: 'Missing current AZ job' };
+
+    const now = new Date().toISOString();
+    const next = ensureHomePayloadForJob(currentJob);
+    next.script = SCRIPT_NAME;
+    next.version = VERSION;
+    next.event = 'home_quote_gathered';
+    next.product = 'home';
+    next.flow = 'background';
+    next['AZ ID'] = currentJob['AZ ID'];
+    next.currentJob = normalizeCurrentJob({
+      ...(isPlainObject(next.currentJob) ? next.currentJob : {}),
+      ...currentJob
+    });
+    next.row = mergeHomeRow(next.row, options.rowUpdates || {});
+    next.quoteAfterDiscount = isPlainObject(options.quoteAfterDiscount)
+      ? {
+        ...(isPlainObject(next.quoteAfterDiscount) ? next.quoteAfterDiscount : {}),
+        ...options.quoteAfterDiscount
+      }
+      : (isPlainObject(next.quoteAfterDiscount) ? next.quoteAfterDiscount : {});
+    next.tabsUsed = mergeTabsUsed(next.tabsUsed, options.tabsUsed || {});
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.phase = normalizeText(options.phase || next.meta.phase || 'idle') || 'idle';
+    next.meta.progress = mergeBooleanProgress(next.meta.progress, options.progressUpdates || {});
+    next.meta.updatedAt = now;
+    next.meta.lastWriter = SCRIPT_NAME;
+    next.meta.version = VERSION;
+    next.ready = options.ready === true ? true : options.ready === false ? false : next.ready === true;
+    next.savedAt = now;
+    next.page = {
+      url: location.href,
+      title: document.title
+    };
+
+    localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
+
+    const bundleSave = saveBundleSection('home', next, next.currentJob, {
+      submissionNumber: next.row['Submission Number'] || next.currentJob['SubmissionNumber'] || '',
+      payloadKey: KEYS.payload,
+      ready: next.ready === true,
+      phase: next.meta.phase,
+      progress: next.meta.progress
+    });
+
+    if (!bundleSave.ok) return { ok: false, reason: bundleSave.reason || 'Bundle save failed', payload: next };
+    return { ok: true, payload: next, bundle: bundleSave.bundle };
+  }
+
+  function buildFinalRowResult(row) {
+    const nextRow = mergeHomeRow(emptyHomeRow(), row || {});
+    const missing = Object.entries(nextRow)
+      .filter(([key, value]) => !normalizeText(value) && key !== 'Done?' && key !== 'Result')
+      .map(([key]) => key);
+
+    if (missing.length) {
+      nextRow['Done?'] = 'No';
+      nextRow['Result'] = `Missing: ${missing.join(', ')}`;
+      return { row: nextRow, ready: false, missing };
+    }
+
+    nextRow['Done?'] = 'Yes';
+    nextRow['Result'] = 'Grabbed (background flow)';
+    return { row: nextRow, ready: true, missing: [] };
+  }
+
   function ensureBundleForJob(job) {
     const azId = normalizeText(job && job['AZ ID']);
     if (!azId) return null;
@@ -390,13 +662,17 @@
     }
 
     next[sectionName] = {
-      ready: true,
+      ready: extra.ready === true,
       savedAt: new Date().toISOString(),
       script: SCRIPT_NAME,
       version: VERSION,
       payloadKey: extra.payloadKey || '',
       submissionNumber: normalizeText(extra.submissionNumber || ''),
-      data: deepClone(sectionValue)
+      data: deepClone(sectionValue),
+      meta: {
+        phase: normalizeText(extra.phase || ''),
+        progress: isPlainObject(extra.progress) ? deepClone(extra.progress) : {}
+      }
     };
 
     next.meta = isPlainObject(next.meta) ? next.meta : {};
@@ -413,7 +689,7 @@
     log(`Origin: ${location.origin}`);
     log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}, GM_deleteValue=${typeof GM_deleteValue}`);
     log('Auto-run armed');
-    setStatus('Waiting for Dwelling Water Rule trigger');
+    setStatus('Background gatherer armed');
     setInterval(() => {
       try { tick(); } catch (err) {
         log(`tick() crashed: ${err?.message || err}`);
@@ -432,101 +708,110 @@
     log(`Tick skipped: ${reason}`);
   }
 
-  function logTriggerSnapshot(currentJob) {
-    const gm = readHomeQuoteGrabberTriggerFromGm();
-    const ls = readHomeQuoteGrabberTriggerFromLocalStorage();
+  function logHomeSnapshot(currentJob, homeState) {
     const stage = readFlowStage();
-    function describe(t) {
-      if (!t) return 'none';
-      const consumed = t.consumed === true ? 'consumed' : 'fresh';
-      return `@${t.requestedAt || '?'} azId=${t.azId || '(empty)'} from=${t.from || '(n/a)'} to=${t.to || '(n/a)'} [${consumed}]`;
-    }
+    const progress = homeState?.progress || emptyHomeProgress();
+    const flags = [
+      progress.earlyPolicyInfoCaptured ? 'policy' : '',
+      progress.earlyDwellingCaptured ? 'dwelling' : '',
+      progress.pass1PricingCaptured ? 'pass1' : '',
+      progress.pass2PricingCaptured ? 'pass2' : '',
+      progress.finalRefreshComplete ? 'final' : ''
+    ].filter(Boolean).join(',');
     const parts = [
       `job.AZ=${currentJob['AZ ID'] || '(empty)'}`,
-      `GM=${describe(gm)}`,
-      `LS=${describe(ls)}`,
-      `stage=${normalizeText(stage.product) || '(none)'}/${normalizeText(stage.step) || '(none)'}`
+      `phase=${normalizeText(homeState?.payload?.meta?.phase || '') || '(idle)'}`,
+      `ready=${homeState?.ready === true ? 'yes' : 'no'}`,
+      `progress=${flags || '(none)'}`,
+      `stage=${normalizeText(stage.product) || '(none)'}/${normalizeText(stage.step) || '(none)'}`,
+      `header=${getHeaderText() || '(none)'}`
     ];
     log(`Snapshot: ${parts.join(' | ')}`);
+  }
+
+  function syncAzContext(currentJob) {
+    const azId = normalizeText(currentJob?.['AZ ID'] || '');
+    if (!azId) {
+      state.currentAzId = '';
+      return;
+    }
+
+    if (azId === state.currentAzId) return;
+
+    log(`AZ context changed: ${state.currentAzId || '(none)'} -> ${azId}`);
+    state.currentAzId = azId;
+    state.doneThisLoad = false;
+    state.flowStartedThisLoad = false;
+    state.triggerSince = 0;
+    state.activeHandoffRequestedAt = '';
+    state.announcedSkipReason = '';
   }
 
   function tick() {
     state.tickCount++;
     if (!state.running) { announceSkipReason('state.running=false'); return; }
     if (state.busy) { announceSkipReason('state.busy=true'); return; }
-    if (state.doneThisLoad) { announceSkipReason('doneThisLoad=true (reload tab for another quote)'); return; }
     state.announcedSkipReason = '';
 
-    if (state.flowStartedThisLoad) {
-      announceSkipReason('flowStartedThisLoad=true (run in progress)');
-      return;
-    }
-
     const currentJob = readCurrentJob();
-    const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
-    const stage = readFlowStage();
-    const handoffFresh = !!handoff && isFreshTriggerTimestamp(handoff.requestedAt);
-    const stageReady = matchesStage('home', 'coverages', currentJob['AZ ID']);
-    const stageFresh = stageReady && isFreshTriggerTimestamp(stage.updatedAt);
+    syncAzContext(currentJob);
 
-    if (!handoffFresh && !stageFresh) {
-      state.triggerSince = 0;
-      state.activeHandoffRequestedAt = '';
-      setWaiting('Waiting for Dwelling Water Rule trigger');
+    if (!currentJob['AZ ID']) {
+      setWaiting('Waiting for current job handoff');
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
         state.lastSnapshotTick = state.tickCount;
-        logTriggerSnapshot(currentJob);
+        logHomeSnapshot(currentJob, normalizeHomeState(currentJob));
       }
       return;
     }
 
-    if (handoffFresh && !stageReady) {
-      writeFlowStage('home', 'coverages', currentJob['AZ ID']);
-      const src = state.lastTriggerSource || '?';
-      log(`Recovered coverages stage from direct handoff (source=${src})`);
-    }
-
     if (hasVisibleExactLabel('Personal Auto')) {
-      state.triggerSince = 0;
       setWaiting('Blocked: Personal Auto present');
       return;
     }
 
-    const triggerMarker = normalizeText((handoffFresh && handoff?.requestedAt) || (stageFresh && stage.updatedAt) || '');
-    if (triggerMarker && triggerMarker !== state.activeHandoffRequestedAt) {
-      state.triggerSince = 0;
-      state.activeHandoffRequestedAt = triggerMarker;
-      const src = state.lastTriggerSource || '?';
-      if (handoffFresh) {
-        log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')} (source=${src})`);
-      } else {
-        log('Dwelling Water Rule trigger detected from flow stage');
-      }
-    }
+    maybeCaptureVisiblePolicyInfo(currentJob);
+    maybeCaptureVisibleDwelling(currentJob);
 
-    if (!state.triggerSince) {
-      state.triggerSince = Date.now();
-      log('Trigger found: Dwelling Water Rule -> home/coverages');
-      setStatus('Trigger found, waiting 3 seconds');
+    const homeState = normalizeHomeState(readCurrentJob());
+    if (homeState.ready === true) {
+      state.doneThisLoad = true;
+      setStatus('Home gather complete');
+      if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
+        state.lastSnapshotTick = state.tickCount;
+        logHomeSnapshot(currentJob, homeState);
+      }
       return;
     }
 
-    const elapsed = Date.now() - state.triggerSince;
-    if (elapsed < CFG.triggerDelayMs) {
-      setStatus(`Trigger stable... ${Math.ceil((CFG.triggerDelayMs - elapsed) / 1000)}s`);
+    if (state.doneThisLoad) {
+      announceSkipReason('doneThisLoad=true (current AZ already complete)');
+      return;
+    }
+
+    if (state.flowStartedThisLoad) {
+      announceSkipReason('flowStartedThisLoad=true (background flow in progress)');
+      return;
+    }
+
+    if (!homeState.pass1Ready && !isOnCoverageEditPage()) {
+      setWaiting('Monitoring for Home Coverages pass 1');
+      if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
+        state.lastSnapshotTick = state.tickCount;
+        logHomeSnapshot(currentJob, homeState);
+      }
       return;
     }
 
     state.flowStartedThisLoad = true;
     state.busy = true;
-    log(`Starting full flow from Dwelling Water Rule trigger on ${location.origin}${location.pathname}`);
-    runGrab({ fullFlow: true })
+    log(`Starting background Home flow for AZ ID ${currentJob['AZ ID']} (phase=${homeState.pass1Ready ? 'pass2/final' : 'pass1'})`);
+    runGrab({ currentJob })
       .catch((err) => {
-        log(`Full flow failed: ${err?.message || err}`);
+        log(`Background flow failed: ${err?.message || err}`);
         setStatus('Failed');
         state.flowStartedThisLoad = false;
-        state.triggerSince = 0;
-        log('Full flow unlocked for same-tab retry');
+        log('Background flow unlocked for same-tab retry');
       })
       .finally(() => {
         state.busy = false;
@@ -939,14 +1224,104 @@
     if (!quoteOK) throw new Error('Initial Quote click did not move off Coverages');
   }
 
-  async function runGrab(opts = {}) {
-    const fullFlow = !!opts.fullFlow;
-    log(`Starting ${fullFlow ? 'full flow (coverage edits + quote grab)' : 'legacy grab (post-trigger)'}`);
+  function hasAnyNonEmptyHomeValues(values) {
+    if (!isPlainObject(values)) return false;
+    return Object.values(values).some((value) => !!normalizeText(value));
+  }
 
-    if (fullFlow) {
-      setStatus('Phase 1: editing coverages and quoting');
-      await driveCoveragesAndQuote();
+  function mergeJobForHomeUpdates(job, rowUpdates) {
+    const update = {
+      'AZ ID': normalizeText(job?.['AZ ID'] || ''),
+      'Name': normalizeText(rowUpdates?.['Name'] || job?.['Name'] || ''),
+      'Mailing Address': normalizeText(rowUpdates?.['Mailing Address'] || job?.['Mailing Address'] || ''),
+      'SubmissionNumber': normalizeText(rowUpdates?.['Submission Number'] || job?.['SubmissionNumber'] || '')
+    };
+
+    const merged = mergeCurrentJob(update);
+    if (merged.ok && merged.next?.['AZ ID']) return merged.next;
+    return normalizeCurrentJob(update);
+  }
+
+  function withProcessedDate(rowUpdates, currentRow) {
+    const next = mergeHomeRow(currentRow, rowUpdates || {});
+    next['Date Processed?'] = normalizeText(next['Date Processed?']) || normalizeText(currentRow?.['Date Processed?']) || formatDate(new Date());
+    return next;
+  }
+
+  function maybeCaptureVisiblePolicyInfo(job) {
+    if (!findByIdInDocs(IDS.name) && !findByIdInDocs(IDS.mailingAddress)) return false;
+
+    const homeState = normalizeHomeState(job);
+    if (homeState.ready === true) return false;
+
+    const policyInfoData = extractPolicyInfoFields();
+    if (!hasAnyNonEmptyHomeValues(policyInfoData)) return false;
+
+    const fullyCaptured = !!policyInfoData['Name'] && !!policyInfoData['Mailing Address'];
+    const shouldSave =
+      isPayloadRowChanged(homeState.row, policyInfoData) ||
+      (fullyCaptured && !homeState.progress.earlyPolicyInfoCaptured);
+
+    if (!shouldSave) return false;
+
+    const targetJob = mergeJobForHomeUpdates(job, policyInfoData);
+    const save = saveHomeState(targetJob, {
+      rowUpdates: policyInfoData,
+      progressUpdates: fullyCaptured ? { earlyPolicyInfoCaptured: true } : {},
+      tabsUsed: { policyInfo: true },
+      phase: normalizeText(homeState.payload?.meta?.phase || '') || 'observing-policy-info',
+      ready: false
+    });
+
+    if (!save.ok) {
+      log(`Early Policy Info save failed: ${save.reason || 'unknown error'}`);
+      return false;
     }
+
+    log(`Early Policy Info saved: ${JSON.stringify(policyInfoData)}`);
+    return true;
+  }
+
+  function maybeCaptureVisibleDwelling(job) {
+    if (!findByIdInDocs(IDS.fireCode) && !findByIdInDocs(IDS.reconstruction) && !findByIdInDocs(IDS.yearBuilt)) return false;
+
+    const homeState = normalizeHomeState(job);
+    if (homeState.ready === true) return false;
+
+    const dwellingData = extractDwellingFields();
+    if (!hasAnyNonEmptyHomeValues(dwellingData)) return false;
+
+    const shouldSave =
+      isPayloadRowChanged(homeState.row, dwellingData) ||
+      !homeState.progress.earlyDwellingCaptured;
+
+    if (!shouldSave) return false;
+
+    const targetJob = mergeJobForHomeUpdates(job, dwellingData);
+    const save = saveHomeState(targetJob, {
+      rowUpdates: dwellingData,
+      progressUpdates: { earlyDwellingCaptured: true },
+      tabsUsed: { dwelling: true },
+      phase: normalizeText(homeState.payload?.meta?.phase || '') || 'observing-dwelling',
+      ready: false
+    });
+
+    if (!save.ok) {
+      log(`Early Dwelling save failed: ${save.reason || 'unknown error'}`);
+      return false;
+    }
+
+    log(`Early Dwelling saved: ${JSON.stringify(dwellingData)}`);
+    return true;
+  }
+
+  async function capturePass1Pricing(job) {
+    if (!isOnCoverageEditPage()) {
+      throw new Error('Home Coverages edit page is not ready for pass 1');
+    }
+
+    setStatus('Phase 1: editing coverages and quoting');
+    await driveCoveragesAndQuote();
 
     const submissionNumberEarly = extractSubmissionNumber();
     if (submissionNumberEarly) log(`Submission Number found: ${submissionNumberEarly}`);
@@ -957,11 +1332,63 @@
     const pricingNoAutoData = extractPricingFields();
     log(`Pricing before auto discount: ${JSON.stringify(pricingNoAutoData)}`);
 
+    if (!pricingNoAutoData['Standard Pricing'] || !pricingNoAutoData['Enhance Pricing']) {
+      throw new Error('Missing no-auto pricing after initial Quote');
+    }
+
+    const homeState = normalizeHomeState(job);
+    const rowUpdates = withProcessedDate({
+      'Standard Pricing No Auto Discount': pricingNoAutoData['Standard Pricing'] || '',
+      'Enhance Pricing No Auto Discount': pricingNoAutoData['Enhance Pricing'] || '',
+      'Submission Number': submissionNumberEarly || homeState.row['Submission Number'] || ''
+    }, homeState.row);
+    const targetJob = mergeJobForHomeUpdates(job, rowUpdates);
+    const save = saveHomeState(targetJob, {
+      rowUpdates,
+      progressUpdates: { pass1PricingCaptured: true },
+      tabsUsed: {
+        coveragesEditedAndQuotedInitially: true,
+        coveragesNoAutoDiscount: true
+      },
+      phase: 'pass1',
+      ready: false
+    });
+
+    if (!save.ok) {
+      throw new Error(save.reason || 'Could not save pass 1 Home state');
+    }
+
+    log(`Pass 1 saved: ${JSON.stringify({
+      'Standard Pricing No Auto Discount': rowUpdates['Standard Pricing No Auto Discount'],
+      'Enhance Pricing No Auto Discount': rowUpdates['Enhance Pricing No Auto Discount'],
+      'Submission Number': rowUpdates['Submission Number']
+    })}`);
+    writeFlowStage('home', 'handoff', targetJob['AZ ID']);
+    setStatus('Pass 1 saved (handoff checkpoint)');
+  }
+
+  async function capturePass2AndFinalize(job) {
     setStatus('Opening Policy Info');
     await goToPolicyInfo();
     await sleep(CFG.afterClickMs);
     const policyInfoData = extractPolicyInfoFields();
     log(`Policy Info fields read: ${JSON.stringify(policyInfoData)}`);
+
+    const jobAfterPolicy = mergeJobForHomeUpdates(job, policyInfoData);
+    const policyState = normalizeHomeState(jobAfterPolicy);
+    if (hasAnyNonEmptyHomeValues(policyInfoData) &&
+        (isPayloadRowChanged(policyState.row, policyInfoData) || !policyState.progress.earlyPolicyInfoCaptured)) {
+      const policySave = saveHomeState(jobAfterPolicy, {
+        rowUpdates: policyInfoData,
+        progressUpdates: (!!policyInfoData['Name'] && !!policyInfoData['Mailing Address'])
+          ? { earlyPolicyInfoCaptured: true }
+          : {},
+        tabsUsed: { policyInfo: true },
+        phase: 'pass2',
+        ready: false
+      });
+      if (!policySave.ok) throw new Error(policySave.reason || 'Could not save Policy Info during pass 2');
+    }
 
     setStatus('Opening Edit Quote');
     await goToEditQuote();
@@ -986,13 +1413,31 @@
     const dwellingData = extractDwellingFields();
     log(`Dwelling fields read: ${JSON.stringify(dwellingData)}`);
 
+    const jobAfterDwelling = mergeJobForHomeUpdates(jobAfterPolicy, dwellingData);
+    const dwellingState = normalizeHomeState(jobAfterDwelling);
+    if (hasAnyNonEmptyHomeValues(dwellingData) &&
+        (isPayloadRowChanged(dwellingState.row, dwellingData) || !dwellingState.progress.earlyDwellingCaptured)) {
+      const dwellingSave = saveHomeState(jobAfterDwelling, {
+        rowUpdates: dwellingData,
+        progressUpdates: { earlyDwellingCaptured: true },
+        tabsUsed: { dwelling: true },
+        phase: 'pass2',
+        ready: false
+      });
+      if (!dwellingSave.ok) throw new Error(dwellingSave.reason || 'Could not save Dwelling during pass 2');
+    }
+
     setStatus('Opening Coverages (Auto Discount)');
     await goToCoverages();
     await sleep(CFG.afterClickMs);
     const pricingAutoData = extractPricingFields();
-    const submissionNumber = extractSubmissionNumber() || submissionNumberEarly || '';
+    const submissionNumber = extractSubmissionNumber() || normalizeHomeState(jobAfterDwelling).row['Submission Number'] || '';
     log(`Pricing after auto discount: ${JSON.stringify(pricingAutoData)}`);
     if (submissionNumber) log(`Submission Number confirmed: ${submissionNumber}`);
+
+    if (!pricingAutoData['Standard Pricing'] || !pricingAutoData['Enhance Pricing']) {
+      throw new Error('Missing auto-discount pricing after re-quote');
+    }
 
     setStatus('Opening Exclusions and Conditions');
     await goToExclusionsAndConditions();
@@ -1006,76 +1451,40 @@
     const quoteData = extractQuoteFields();
     log(`Final quote fields read: ${JSON.stringify(quoteData)}`);
 
-    const row = {
+    const finalBaseState = normalizeHomeState(jobAfterDwelling);
+    const finalRow = withProcessedDate({
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
       'Protection Class': dwellingData['Protection Class'] || '',
-      'CFP?': cfpValue,
+      'CFP?': cfpValue || '',
       'Reconstruction Cost': dwellingData['Reconstruction Cost'] || '',
       'Year Built': dwellingData['Year Built'] || '',
       'Square FT': dwellingData['Square FT'] || '',
       '# of Story': dwellingData['# of Story'] || '',
       'Water Device?': dwellingData['Water Device?'] || '',
-      'Standard Pricing No Auto Discount': pricingNoAutoData['Standard Pricing'] || '',
-      'Enhance Pricing No Auto Discount': pricingNoAutoData['Enhance Pricing'] || '',
       'Standard Pricing Auto Discount': pricingAutoData['Standard Pricing'] || '',
       'Enhance Pricing Auto Discount': pricingAutoData['Enhance Pricing'] || '',
       'Submission Number': submissionNumber || '',
-      'Auto Discount': quoteData['Auto Discount'] || quoteAfterDiscountData['Auto Discount'] || '',
-      'Date Processed?': formatDate(new Date()),
-      'Done?': '',
-      'Result': ''
+      'Auto Discount': quoteData['Auto Discount'] || quoteAfterDiscountData['Auto Discount'] || ''
+    }, finalBaseState.row);
+    const finalResult = buildFinalRowResult(finalRow);
+    const targetJob = mergeJobForHomeUpdates(jobAfterDwelling, finalResult.row);
+    const finalProgressUpdates = {
+      pass2PricingCaptured: true,
+      finalRefreshComplete: true
     };
-
-    const missing = Object.entries(row)
-      .filter(([key, value]) => !value && key !== 'Done?' && key !== 'Result')
-      .map(([key]) => key);
-
-    if (missing.length) {
-      row['Done?'] = 'No';
-      row['Result'] = `Missing: ${missing.join(', ')}`;
-      log(`Missing fields: ${missing.join(', ')}`);
-    } else {
-      row['Done?'] = 'Yes';
-      row['Result'] = fullFlow ? 'Grabbed (full flow)' : 'Grabbed (legacy)';
-      log('All fields grabbed successfully');
+    if (policyInfoData['Name'] && policyInfoData['Mailing Address']) {
+      finalProgressUpdates.earlyPolicyInfoCaptured = true;
     }
-
-    let currentJob = readCurrentJob();
-    if (!currentJob['AZ ID']) {
-      const handoffNow = readHomeQuoteGrabberTrigger();
-      const handoffAzId = normalizeText(handoffNow?.azId || '');
-      if (handoffAzId) {
-        log(`current_job missing AZ ID; bootstrapping from handoff (azId=${handoffAzId})`);
-        currentJob = writeCurrentJob({
-          'AZ ID': handoffAzId,
-          'Name': row['Name'] || '',
-          'Mailing Address': row['Mailing Address'] || '',
-          'SubmissionNumber': row['Submission Number'] || normalizeText(handoffNow?.submissionNumber || '')
-        });
-      }
+    if (hasAnyNonEmptyHomeValues(dwellingData)) {
+      finalProgressUpdates.earlyDwellingCaptured = true;
     }
-    if (!currentJob['AZ ID']) {
-      throw new Error('Missing tm_pc_current_job_v1 / AZ ID (handoff also had no azId)');
-    }
-
-    const payload = {
-      script: SCRIPT_NAME,
-      version: VERSION,
-      event: 'home_quote_gathered',
-      product: 'home',
-      'AZ ID': currentJob['AZ ID'],
-      currentJob,
-      savedAt: new Date().toISOString(),
-      page: {
-        url: location.href,
-        title: document.title
-      },
-      flow: fullFlow ? 'full' : 'legacy',
+    const save = saveHomeState(targetJob, {
+      rowUpdates: finalResult.row,
+      quoteAfterDiscount: quoteAfterDiscountData,
+      progressUpdates: finalProgressUpdates,
       tabsUsed: {
-        coveragesEditedAndQuotedInitially: fullFlow,
-        coveragesNoAutoDiscount: true,
         policyInfo: true,
         editQuote: true,
         quoteAfterAutoDiscount: true,
@@ -1085,34 +1494,52 @@
         quoteFinal: true,
         fairPlanCompanionEndorsementDetected: cfpValue === 'YES'
       },
-      quoteAfterDiscount: quoteAfterDiscountData,
-      row
-    };
-
-    const mergeJob = mergeCurrentJob({
-      'AZ ID': currentJob['AZ ID'],
-      'Name': currentJob['Name'] || row['Name'],
-      'Mailing Address': currentJob['Mailing Address'] || row['Mailing Address'],
-      'SubmissionNumber': row['Submission Number'] || currentJob['SubmissionNumber']
+      phase: finalResult.ready ? 'complete' : 'pass2',
+      ready: finalResult.ready
     });
-    if (!mergeJob.ok) {
-      throw new Error(mergeJob.reason || 'Current job merge failed');
+
+    if (!save.ok) {
+      throw new Error(save.reason || 'Could not save pass 2 Home state');
     }
 
-    localStorage.setItem(KEYS.payload, JSON.stringify(payload, null, 2));
-    const bundleSave = saveBundleSection('home', payload, mergeJob.next || currentJob, {
-      submissionNumber: row['Submission Number'] || '',
-      payloadKey: KEYS.payload
-    });
-    if (!bundleSave.ok) {
-      throw new Error(bundleSave.reason || 'Bundle save failed');
+    if (finalResult.missing.length) {
+      log(`Final Home payload still missing: ${finalResult.missing.join(', ')}`);
+    } else {
+      log('Final Home payload complete');
     }
-    log(`Payload saved: ${KEYS.payload}`);
-    log('Bundle merged: tm_pc_webhook_bundle_v1.home');
-    writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
-    consumeHomeQuoteGrabberHandoff((mergeJob.next || currentJob)['AZ ID']);
-    setStatus('Grab complete (handed off to shared-ticket-handoff)');
-    state.doneThisLoad = true;
+
+    writeFlowStage('home', 'handoff', targetJob['AZ ID']);
+    setStatus(finalResult.ready ? 'Home ready for handoff' : 'Home partial after pass 2');
+    state.doneThisLoad = finalResult.ready === true;
+  }
+
+  async function runGrab(opts = {}) {
+    let currentJob = normalizeCurrentJob(opts.currentJob || readCurrentJob());
+    if (!currentJob['AZ ID']) {
+      throw new Error('Missing tm_pc_current_job_v1 / AZ ID');
+    }
+
+    const homeState = normalizeHomeState(currentJob);
+    log(`Background gather state: pass1=${homeState.pass1Ready ? 'yes' : 'no'} | pass2=${homeState.pass2Ready ? 'yes' : 'no'} | ready=${homeState.ready ? 'yes' : 'no'}`);
+
+    if (!homeState.pass1Ready) {
+      await capturePass1Pricing(currentJob);
+      currentJob = readCurrentJob();
+    }
+
+    const afterPass1 = normalizeHomeState(currentJob);
+    if (!afterPass1.pass2Ready || !afterPass1.finalRefreshReady || !afterPass1.ready) {
+      await capturePass2AndFinalize(currentJob);
+    }
+
+    const finalState = normalizeHomeState(readCurrentJob());
+    if (finalState.ready) {
+      state.doneThisLoad = true;
+      setStatus('Home gather complete');
+    } else {
+      state.flowStartedThisLoad = false;
+      setStatus('Home gather incomplete');
+    }
   }
 
   async function goToPolicyInfo() {

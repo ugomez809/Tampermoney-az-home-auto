@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.15
-// @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
+// @version      1.16
+// @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.15';
+  const VERSION = '1.16';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -463,6 +463,7 @@
   function buildHomeOnlySyntheticBundle(job, homePayload) {
     const row = isPlainObject(homePayload?.row) ? homePayload.row : null;
     if (!row) return null;
+    if (homePayload?.ready !== true) return null;
 
     const payloadAzId = normalizeText(homePayload?.['AZ ID'] || homePayload?.currentJob?.['AZ ID'] || '');
     if (!payloadAzId || payloadAzId !== job['AZ ID']) return null;
@@ -696,9 +697,7 @@
   }
 
   async function afterSuccess(job, bundle) {
-    const homeSuccessOnly = hasHomeSuccess(bundle) && !hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
-    if (homeSuccessOnly) writeFlowStage('auto', 'start', job['AZ ID']);
-    else writeFlowStage('auto', 'done', job['AZ ID']);
+    writeFlowStage('auto', 'done', job['AZ ID']);
 
     state.running = false;
     sessionStorage.setItem(CFG.stoppedKey, '1');
