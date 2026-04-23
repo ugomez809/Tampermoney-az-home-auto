@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.8.5
-// @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles. Saves the Accepted driver name when present and sets localStorage aqb_step_drivers_done=1 when finished.
+// @version      1.8.6
+// @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Accepted, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles. Saves the Accepted driver name when present and sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -26,7 +26,7 @@
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
   const ACCEPTED_DRIVER_KEY = 'aqb_step_accepted_driver_name';
 
-  const DRV_ACCEPT_REASON_TEXT = 'Excluded Driver';
+  const DRV_ACCEPT_REASON_TEXT = 'Accepted';
   const DRV_REL_TO_PNI_TEXT    = 'Resident Relative';
   const DRV_MARITAL_TEXT       = 'Single / Separated';
   const DRV_GENDER_WANT_TEXT   = 'Non-Binary';
@@ -79,7 +79,7 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Drivers',
-      version: '1.8.5'
+      version: '1.8.6'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
