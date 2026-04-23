@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
 // @namespace    homebot.aqb-vehicles
-// @version      1.5
-// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, then set Primary Driver to first non-<none>. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
+// @version      1.5.1
+// @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again. Sets aqb_step_vehicles_done=1 and aqb_step_specialty_start=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -31,6 +31,8 @@
   const WAIT_AFTER_CHECKBOX_MS = 1000;
   const WAIT_AFTER_REMOVE_MS = 2200;
   const WAIT_AFTER_CONFIRM_MS = 1200;
+  const WAIT_BEFORE_PRIMARY_DRIVER_MS = 3000;
+  const WAIT_BEFORE_SPECIALTY_TRIGGER_MS = 3000;
 
   const VEH_PRIMARY_DRIVER_SUFFIX = '-PrimaryDriverLV';
 
@@ -76,7 +78,7 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Vehicles',
-      version: '1.5'
+      version: '1.5.1'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
@@ -405,7 +407,16 @@
 
     try {
       await removeVehiclesWithAnyEmptyCoreCell();
+      if (!armed || isGloballyPaused()) return;
+
+      await sleep(WAIT_BEFORE_PRIMARY_DRIVER_MS);
+      if (!armed || isGloballyPaused()) return;
+
       setPrimaryDriverAll();
+
+      await sleep(WAIT_BEFORE_SPECIALTY_TRIGGER_MS);
+      if (!armed || isGloballyPaused()) return;
+
       setDoneFlags();
       finished = true;
     } finally {

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
 // @namespace    homebot.aqb-drivers
-// @version      1.8
-// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Sets localStorage aqb_step_drivers_done=1 when finished.
+// @version      1.8.1
+// @description  Gate: Submission (Draft) + Personal Auto + header "Auto Data Prefill". Drivers only: set dropdowns, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 5s before handing off to Vehicles. Sets localStorage aqb_step_drivers_done=1 when finished.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -35,12 +35,14 @@
   const DRV_MIN_AGE_LIC        = 16;
   const DRV_MAX_AGE_LIC_RANDOM_MIN = 16;
   const DRV_MAX_AGE_LIC_RANDOM_MAX = 22;
+  const AFTER_DONE_TRIGGER_WAIT_MS = 5000;
 
   const BTN_TEXT_ON  = 'AQB: STOP';
   const BTN_TEXT_OFF = 'AQB: START';
 
   let armed = true;
   let done  = false;
+  let running = false;
   let mo    = null;
 
   function safeJsonParse(text, fallback = null) {
@@ -71,7 +73,7 @@
       azId: readCurrentAzId(),
       updatedAt: new Date().toISOString(),
       source: 'AQB Drivers',
-      version: '1.8'
+      version: '1.8.1'
     };
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
@@ -386,22 +388,30 @@
   }
 
   async function runSequence() {
-    if (done || !armed || isGloballyPaused()) return;
+    if (done || running || !armed || isGloballyPaused()) return;
     if (!gateOK() || !headerOK()) return;
 
-    const start = Date.now();
-    while (Date.now() - start < 1200) {
+    running = true;
+    try {
+      const start = Date.now();
+      while (Date.now() - start < 1200) {
+        if (!armed || done || isGloballyPaused()) return;
+        applyDriversOnce();
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      await new Promise(r => setTimeout(r, AFTER_DONE_TRIGGER_WAIT_MS));
       if (!armed || done || isGloballyPaused()) return;
-      applyDriversOnce();
-      await new Promise(r => setTimeout(r, 200));
-    }
 
-    setDoneFlag();
+      setDoneFlag();
 
-    done = true;
-    if (mo) {
-      try { mo.disconnect(); } catch {}
-      mo = null;
+      done = true;
+      if (mo) {
+        try { mo.disconnect(); } catch {}
+        mo = null;
+      }
+    } finally {
+      running = false;
     }
   }
 
