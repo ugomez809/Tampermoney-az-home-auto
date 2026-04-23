@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Auto Quote Grabber
 // @namespace    homebot.auto-quote-grabber
-// @version      2.8
-// @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Reads insured names + drivers + vehicles + PA coverages + quote fields and saves AUTO payload + bundle data without sending.
+// @version      2.9
+// @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber';
-  const VERSION = '2.8';
+  const VERSION = '2.9';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
@@ -329,21 +329,22 @@
     }
 
     const currentJob = readCurrentJob();
-    if (!matchesStage('auto', 'quote_grabber', currentJob['AZ ID'])) {
+    if (!currentJob['AZ ID']) {
       state.triggerSince = 0;
-      setWaiting('Waiting for AUTO quote-grabber trigger');
+      setWaiting('Waiting for tm_pc_current_job_v1 / AZ ID');
       return;
     }
 
-    if (!hasVisibleExactLabel('Submission (Quoted)') || !hasVisibleExactLabel('Personal Auto')) {
+    const trigger = getAutoQuoteTriggerState(currentJob);
+    if (!trigger.ready) {
       state.triggerSince = 0;
-      setWaiting('Waiting for: Submission (Quoted) + Personal Auto');
+      setWaiting(trigger.waitingReason);
       return;
     }
 
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found');
+      log(trigger.logReason);
       setStatus('Trigger found, waiting 5 seconds');
       return;
     }
@@ -354,11 +355,17 @@
       return;
     }
 
-    if (!hasVisibleExactLabel('Submission (Quoted)') || !hasVisibleExactLabel('Personal Auto')) {
+    const stableTrigger = getAutoQuoteTriggerState(currentJob);
+    if (!stableTrigger.ready) {
       state.triggerSince = 0;
       log('Trigger reset');
       setStatus('Trigger reset');
       return;
+    }
+
+    if (!stableTrigger.stageReady) {
+      writeFlowStage('auto', 'quote_grabber', currentJob['AZ ID']);
+      log('Recovered auto/quote_grabber stage from Quote page');
     }
 
     state.busy = true;
@@ -1076,6 +1083,47 @@
     return false;
   }
 
+  function getAutoQuoteTriggerState(currentJob) {
+    const stageReady = matchesStage('auto', 'quote_grabber', currentJob['AZ ID']);
+    const quotedAutoReady = hasVisibleExactLabel('Submission (Quoted)') && hasVisibleExactLabel('Personal Auto');
+    const quoteHeaderReady = hasVisibleTitleExact('Quote');
+    const quotePageReady = quotedAutoReady && quoteHeaderReady;
+
+    if (stageReady && quotedAutoReady) {
+      return {
+        ready: true,
+        stageReady: true,
+        logReason: quotePageReady ? 'Trigger found (stage + Quote page)' : 'Trigger found (stage)',
+        waitingReason: ''
+      };
+    }
+
+    if (quotePageReady) {
+      return {
+        ready: true,
+        stageReady: false,
+        logReason: 'Trigger found (Quote page fallback)',
+        waitingReason: ''
+      };
+    }
+
+    if (quotedAutoReady) {
+      return {
+        ready: false,
+        stageReady,
+        logReason: '',
+        waitingReason: 'Waiting for AUTO Quote header'
+      };
+    }
+
+    return {
+      ready: false,
+      stageReady,
+      logReason: '',
+      waitingReason: 'Waiting for: Submission (Quoted) + Personal Auto'
+    };
+  }
+
   function findTabActionByExactText(text) {
     return findInDocs((doc) => {
       const wanted = normalizeText(text);
@@ -1480,8 +1528,9 @@
         <div style="opacity:.8;">V${VERSION}</div>
       </div>
       <div style="padding:8px 10px;">
-        <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:8px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
           <button id="hb-auto-quote-grabber-toggle-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#dc2626;color:#fff;">STOP</button>
+          <button id="hb-auto-quote-grabber-copylogs-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff;">COPY LOGS</button>
         </div>
         <div id="hb-auto-quote-grabber-status-v22" style="margin-bottom:8px;padding:6px 8px;border-radius:8px;background:#1f2937;">Waiting...</div>
         <div id="hb-auto-quote-grabber-logs-v22" style="max-height:240px;overflow:auto;background:#0b1220;border:1px solid #243041;border-radius:8px;padding:6px;"></div>
@@ -1492,6 +1541,7 @@
 
     const head = panel.querySelector('#hb-auto-quote-grabber-head-v22');
     const toggleBtn = panel.querySelector('#hb-auto-quote-grabber-toggle-v22');
+    const copyLogsBtn = panel.querySelector('#hb-auto-quote-grabber-copylogs-v22');
 
     toggleBtn.addEventListener('click', () => {
       state.running = !state.running;
@@ -1501,6 +1551,16 @@
       setStatus(state.running ? 'Running' : 'Stopped');
       state.triggerSince = 0;
       state.doneThisLoad = false;
+    });
+
+    copyLogsBtn.addEventListener('click', async () => {
+      try {
+        const text = [...state.logLines].reverse().join('\n');
+        await navigator.clipboard.writeText(text);
+        log('Logs copied');
+      } catch {
+        log('Copy logs failed');
+      }
     });
 
     makeDraggable(panel, head);
