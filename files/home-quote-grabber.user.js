@@ -73,6 +73,7 @@
     busy: false,
     doneThisLoad: false,
     triggerSince: 0,
+    activeHandoffRequestedAt: '',
     lastWaitReason: '',
     logLines: [],
     ui: null
@@ -139,25 +140,37 @@
     return gm || ls || {};
   }
 
-  function hasDirectHomeQuoteGrabberTrigger(azId = '') {
-    const trigger = readHomeQuoteGrabberTrigger();
-    const triggerAt = normalizeText(trigger.requestedAt || '');
-    if (!triggerAt) return false;
-    const triggerAzId = normalizeText(trigger.azId || '');
-    if (!triggerAzId || !normalizeText(azId)) return true;
-    return triggerAzId === normalizeText(azId);
+  function getUsableHomeQuoteGrabberHandoff(azId = '') {
+    const handoff = readHomeQuoteGrabberTrigger();
+    const requestedAt = normalizeText(handoff.requestedAt || '');
+    if (!requestedAt) return null;
+    if (handoff.consumed === true) return null;
+    if (normalizeText(handoff.to || '') && normalizeText(handoff.to || '') !== normalizeText(SCRIPT_NAME)) return null;
+
+    const handoffAzId = normalizeText(handoff.azId || '');
+    if (handoffAzId && normalizeText(azId) && handoffAzId !== normalizeText(azId)) return null;
+
+    return handoff;
   }
 
-  function clearDirectHomeQuoteGrabberTrigger(azId = '') {
-    const trigger = readHomeQuoteGrabberTrigger();
-    const triggerAzId = normalizeText(trigger.azId || '');
-    if (triggerAzId && normalizeText(azId) && triggerAzId !== normalizeText(azId)) return;
-    try { localStorage.removeItem(HOME_QUOTE_GRABBER_TRIGGER_KEY); } catch {}
+  function consumeHomeQuoteGrabberHandoff(azId = '') {
+    const handoff = readHomeQuoteGrabberTrigger();
+    const requestedAt = normalizeText(handoff.requestedAt || '');
+    if (!requestedAt) return;
+    const handoffAzId = normalizeText(handoff.azId || '');
+    if (handoffAzId && normalizeText(azId) && handoffAzId !== normalizeText(azId)) return;
+
+    const next = {
+      ...handoff,
+      consumed: true,
+      consumedAt: new Date().toISOString(),
+      consumedBy: SCRIPT_NAME
+    };
+    const serialized = JSON.stringify(next, null, 2);
+    try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized); } catch {}
     try {
-      if (typeof GM_deleteValue === 'function') {
-        GM_deleteValue(HOME_QUOTE_GRABBER_TRIGGER_KEY);
-      } else if (typeof GM_setValue === 'function') {
-        GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, null);
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized);
       }
     } catch {}
   }
@@ -333,18 +346,19 @@
     if (!state.running || state.busy || state.doneThisLoad) return;
 
     const currentJob = readCurrentJob();
+    const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
     const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
-    const directTriggerReady = hasDirectHomeQuoteGrabberTrigger(currentJob['AZ ID']);
 
-    if (!stageReady && !directTriggerReady) {
+    if (!handoff && !stageReady) {
       state.triggerSince = 0;
+      state.activeHandoffRequestedAt = '';
       setWaiting('Waiting for HOME quote-grabber trigger');
       return;
     }
 
-    if (!stageReady && directTriggerReady) {
+    if (handoff && !stageReady) {
       writeFlowStage('home', 'quote_grabber', currentJob['AZ ID']);
-      log('Recovered quote-grabber stage from direct trigger');
+      log('Recovered quote-grabber stage from direct handoff');
     }
 
     if (hasVisibleExactLabel('Personal Auto')) {
@@ -353,9 +367,16 @@
       return;
     }
 
+    const currentRequestedAt = normalizeText(handoff?.requestedAt || '');
+    if (currentRequestedAt && currentRequestedAt !== state.activeHandoffRequestedAt) {
+      state.triggerSince = 0;
+      state.activeHandoffRequestedAt = currentRequestedAt;
+      log(`Handoff received from ${normalizeText(handoff?.from || 'unknown sender')}`);
+    }
+
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found: HOME quote-grabber stage');
+      log('Trigger found: HOME quote-grabber handoff');
       setStatus('Trigger found, waiting 3 seconds');
       return;
     }
@@ -497,7 +518,7 @@
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.home');
     writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
-    clearDirectHomeQuoteGrabberTrigger((mergeJob.next || currentJob)['AZ ID']);
+    consumeHomeQuoteGrabberHandoff((mergeJob.next || currentJob)['AZ ID']);
     setStatus('Grab complete');
     state.doneThisLoad = true;
   }

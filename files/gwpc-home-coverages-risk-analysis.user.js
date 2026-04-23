@@ -125,24 +125,36 @@
     try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
   }
 
+  function extractSubmissionNumber() {
+    const titleEl = Array.from(document.querySelectorAll('div.gw-Wizard--Title'))
+      .find((el) => normalizeText(el.textContent).match(/^Submission\s+\d+/i));
+    if (!titleEl) return '';
+    const match = normalizeText(titleEl.textContent).match(/Submission\s+(\d+)/i);
+    return match ? match[1] : '';
+  }
+
   function writeHomeQuoteGrabberTrigger() {
     const azId = readCurrentAzId();
+    const submissionNumber = extractSubmissionNumber();
     const next = {
+      from: SCRIPT_NAME,
+      to: 'Home Bot: Home Quote Grabber',
       azId,
+      submissionNumber,
       requestedAt: new Date().toISOString(),
+      consumed: false,
+      consumedAt: '',
       source: SCRIPT_NAME,
       version: VERSION
     };
     const serialized = JSON.stringify(next, null, 2);
     try { localStorage.setItem(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized); } catch {}
-    // Also bridge cross-origin via Tampermonkey storage so the grabber tab
-    // sees the trigger even when it's on a different PolicyCenter subdomain.
     try {
       if (typeof GM_setValue === 'function') {
         GM_setValue(HOME_QUOTE_GRABBER_TRIGGER_KEY, serialized);
       }
     } catch {}
-    log(`Home Quote Grabber trigger saved${azId ? ` | AZ ID ${azId}` : ''}`);
+    log(`Home Quote Grabber handoff sent${azId ? ` | AZ ID ${azId}` : ''}${submissionNumber ? ` | Submission ${submissionNumber}` : ''}`);
   }
 
   function fanOutHomeQuoteGrabberTrigger() {
