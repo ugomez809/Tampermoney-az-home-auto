@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout
 // @namespace    homebot.gwpc-header-timeout
-// @version      1.24
+// @version      1.25
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '1.24';
+  const VERSION = '1.25';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -1319,7 +1319,7 @@
     }
 
     const parts = [];
-    let current = el;
+    current = el;
     while (current && current.nodeType === 1 && current !== document.body && parts.length < 6) {
       let part = current.tagName.toLowerCase();
       if (current.id) {
