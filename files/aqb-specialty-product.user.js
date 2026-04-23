@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         03 AQB - Specialty Product → Remove if needed, then Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.1
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses a stronger Quote target resolver and retries if the header stays on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.3
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -27,6 +27,7 @@
   const AFTER_REMOVE_WAIT_MS = 3000; // wait 3s after clicking Remove
   const AFTER_QUOTE_WAIT_MS  = 3000; // wait 3s after clicking Quote to see if header changed
   const MAX_QUOTE_ATTEMPTS   = 3;    // total Quote clicks
+  const INACTIVITY_FORCE_QUOTE_MS = 60000;
 
   const LV_ID_SUFFIX = 'ForemostVehiclesLV';
   const EMPTY_TEXT = 'No data to display';
@@ -45,6 +46,7 @@
   let armed = true;
   let finished = false;
   let running = false;
+  let lastActivityAt = Date.now();
 
   // track "flag became 1" moment
   let sawFlagAt = 0;
@@ -106,8 +108,56 @@
     return REQUIRED_LABELS.every(hasLabelExact);
   }
 
+  function isProbablyClickable(el) {
+    if (!el || !isVisible(el)) return false;
+    return (
+      el.matches?.('button, a, input[type="button"], input[type="submit"], [role="button"], [role="tab"], [role="menuitem"]') ||
+      el.classList?.contains('gw-action--inner') ||
+      el.classList?.contains('gw-TabWidget') ||
+      el.classList?.contains('gw-ButtonWidget') ||
+      el.hasAttribute?.('onclick') ||
+      el.getAttribute?.('tabindex') === '0'
+    );
+  }
+
+  function getClickableOwner(el) {
+    if (!el) return null;
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 10) {
+      if (isProbablyClickable(cur)) return cur;
+      cur = cur.parentElement;
+      depth++;
+    }
+    return el;
+  }
+
+  function findClickableOwnerByLabel(labelText) {
+    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${labelText}"]`)).filter(isVisible);
+    for (const label of direct) {
+      const owner = getClickableOwner(label);
+      if (owner && isVisible(owner)) return owner;
+    }
+
+    const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
+    for (const el of generic) {
+      const aria = String(el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const txt = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      if ((aria === labelText || txt === labelText) && isVisible(el)) {
+        const owner = getClickableOwner(el);
+        if (owner && isVisible(owner)) return owner;
+      }
+    }
+    return null;
+  }
+
   function log(message) {
     try { console.log(`[AQB Specialty] ${message}`); } catch {}
+  }
+
+  function markActivity(message = '') {
+    lastActivityAt = Date.now();
+    if (message) log(message);
   }
 
   function waitKeyReady() {
@@ -173,7 +223,11 @@
 
     const origConfirm = window.confirm;
     try { window.confirm = () => true; } catch {}
-    try { return strongClick(removeEl); }
+    try {
+      const clicked = strongClick(removeEl);
+      if (clicked) markActivity('Clicked Remove Specialty product');
+      return clicked;
+    }
     finally { try { window.confirm = origConfirm; } catch {} }
   }
 
@@ -190,11 +244,15 @@
 
   function findQuoteCandidates() {
     const out = [];
-    out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
-    out.push(...document.querySelectorAll('.gw-action--inner[aria-label="Quote"], [role="button"][aria-label="Quote"], [role="menuitem"][aria-label="Quote"]'));
+    const exactInner = document.querySelector('#SubmissionWizard-Quote > div.gw-action--inner.gw-hasDivider');
+    if (exactInner) out.unshift(exactInner);
 
     const host = document.getElementById('SubmissionWizard-Quote');
     if (host) out.unshift(host);
+
+    out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
+    out.push(...document.querySelectorAll('.gw-action--inner[aria-label="Quote"], [role="button"][aria-label="Quote"], [role="menuitem"][aria-label="Quote"]'));
+    out.push(...document.querySelectorAll('.gw-action--inner.gw-hasDivider'));
 
     const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
     if (nextLab) {
@@ -214,8 +272,14 @@
   function upgradeToClickable(el) {
     if (!el) return null;
 
+    if (el.matches?.('.gw-action--inner') && el.getAttribute('aria-disabled') !== 'true' && isVisible(el)) {
+      return el;
+    }
+
     if (el.querySelector) {
-      const inner = el.querySelector('.gw-action--inner[aria-disabled="false"]');
+      const inner = Array.from(el.querySelectorAll('.gw-action--inner')).find(node =>
+        node.getAttribute('aria-disabled') !== 'true' && isVisible(node)
+      );
       if (inner && isVisible(inner)) return inner;
     }
 
@@ -235,9 +299,15 @@
       const target = upgradeToClickable(el);
       if (target && strongClick(target)) {
         markQuoteClicked();
-        log('Quote clicked');
+        markActivity('Quote clicked');
         return true;
       }
+    }
+    const fallback = findClickableOwnerByLabel('Quote');
+    if (fallback && strongClick(fallback)) {
+      markQuoteClicked();
+      markActivity('Quote clicked via label fallback');
+      return true;
     }
     log('Quote target not found or not clickable');
     return false;
@@ -262,10 +332,33 @@
     return false;
   }
 
+  async function maybeForceQuoteFromInactivity() {
+    if (!armed || finished || running || isGloballyPaused()) return false;
+    if (!gateOK()) return false;
+    if (!headerStillAutoDataPrefill()) return false;
+    if ((Date.now() - lastActivityAt) < INACTIVITY_FORCE_QUOTE_MS) return false;
+
+    running = true;
+    markActivity('1 minute inactivity on Auto Data Prefill. Forcing Quote.');
+    try {
+      const ok = await clickQuoteUpTo3IfStuck();
+      if (ok) {
+        setDoneFlag();
+        finished = true;
+      }
+    } finally {
+      running = false;
+    }
+    return true;
+  }
+
   // ---------- Main ----------
   async function runOnce() {
     if (!armed || finished || running || isGloballyPaused()) return;
     if (!gateOK()) return;
+
+    const forced = await maybeForceQuoteFromInactivity();
+    if (forced) return;
 
     if (!waitKeyReady()) {
       sawFlagAt = 0;
@@ -274,6 +367,7 @@
 
     if (!sawFlagAt) {
       sawFlagAt = Date.now();
+      markActivity('Specialty start flag detected');
       return;
     }
 
