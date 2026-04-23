@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Home Bot: Home Quote Grabber
 // @namespace    homebot.home-quote-grabber
-// @version      2.7
-// @description  Waits for exact .gw-label = Submission (Quoted), grabs Policy Info + Home quote fields from Dwelling/Coverages/Quote, clicks Exclusions and Conditions, defaults CFP to NO, normalizes Water Device to Yes/No, and saves payload to localStorage.
+// @version      3.0
+// @description  End-to-end Home quote driver. Detects the Coverages page, sets the 8 required coverage values, runs the initial Quote, grabs initial pricing + Policy Info, clicks the Auto radio in the Job Wizard Info Bar, re-Quotes, grabs Dwelling + final pricing, checks FAIR Plan Companion Endorsement on Exclusions and Conditions, grabs Quote tab info, and writes flow stage 'home/handoff' for shared-ticket-handoff to continue. Replaces 04 GWPC Home Coverages Quote + Risk Analysis.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Home Bot: Home Quote Grabber';
-  const VERSION = '2.7';
+  const VERSION = '3.0';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -39,7 +39,41 @@
     waitTimeoutMs: 20000,
     waitPollMs: 250,
     afterClickMs: 800,
-    maxLogLines: 24
+    maxLogLines: 24,
+    // Coverage edit phase timings (formerly in writer):
+    afterEditAllMs: 1200,
+    afterFieldMs: 250,
+    afterQuoteWaitMs: 1200,
+    maxQuoteAttempts: 6,
+    quoteTransitionTimeoutMs: 25000,
+    betweenQuoteAttemptsMs: 1500,
+    triggerStableMs: 1000,
+    tabNudgeCooldownMs: 1500,
+    tabNudgeSettleMs: 2500,
+    // Wait for the re-Quote (post auto-discount) to settle before navigating
+    afterRequoteSettleMs: 4000
+  };
+
+  const SEL = {
+    stdAllPerils:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-0-lineCovTermRow-0-0-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhAllPerils:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-0-lineCovTermRow-0-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhSplitWater:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-0-lineCovTermRow-1-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhSeparateStructures:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-2-lineCovRow-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhPersonalPropertyLimit:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-3-lineCovTermRow-0-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhPersonalLiability:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-5-lineCovRow-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    enhExtendedReplacementCheckbox:
+      'input[type="checkbox"][name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-8-lineCovRow-1-targetedCovTermId-SideBySideCovTermInputSet-covTermEnabledId"]',
+    enhExtendedReplacementSelect:
+      'select[name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV-lineLevelCoverages-8-lineCovRow-1-targetedCovTermId-SideBySideCovTermInputSet-SideBySideRangeCovTermValue"]',
+    personalInjuryCheckbox:
+      'input[type="checkbox"][name="SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideScreenBasePanelSet-SideBySideScreenPanelSet-HOSideBySideAddnCoveragesPanelSet-1-HOCoverageInputSet-CovPatternInputGroup-_checkbox"]',
+    fairPlanLabelClass: '.gw-InputGroup--header--label'
   };
 
   const IDS = {
@@ -48,6 +82,15 @@
     coveragesTab: 'SubmissionWizard-LOBWizardStepGroup-HOCoveragesSideBySide',
     exclusionsTab: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideScreenBasePanelSet-SideBySideScreenPanelSet-HOPolicyLevelExclusionsAndConditionsCardTab',
     quoteTab: 'SubmissionWizard-ViewQuote',
+
+    // Coverage edit phase (formerly in 04 GWPC Home Coverages Quote + Risk Analysis):
+    coveragesHeader: 'Coverages',
+    coveragesScreen: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen',
+    mainArea: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV',
+    quoteButtonHost: 'SubmissionWizard-Quote',
+
+    // Job Wizard Info Bar Auto link (clicked to apply the auto cross-sell discount):
+    autoRadio: 'SubmissionWizard-JobWizardInfoBar-ViewAuto',
 
     name: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
     mailingAddress: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-PolicyAddressDisplayInputSet-PolicyAddress_Ext_Input',
@@ -72,6 +115,7 @@
     running: true,
     busy: false,
     doneThisLoad: false,
+    flowStartedThisLoad: false,
     triggerSince: 0,
     activeHandoffRequestedAt: '',
     lastWaitReason: '',
@@ -80,7 +124,11 @@
     tickCount: 0,
     lastSnapshotTick: 0,
     lastTriggerSource: '',
-    announcedSkipReason: ''
+    announcedSkipReason: '',
+    // Coverage edit phase (formerly in writer):
+    coverageTriggerSince: 0,
+    lastQuoteClickAt: 0,
+    lastTabNudgeAt: 0
   };
 
   const SNAPSHOT_EVERY_TICKS = 10;
@@ -397,6 +445,36 @@
     if (state.doneThisLoad) { announceSkipReason('doneThisLoad=true (reload tab for another quote)'); return; }
     state.announcedSkipReason = '';
 
+    // PRIMARY PATH (v3.0): we are sitting on the Coverages edit page with a
+    // Homeowners line visible -> drive the full 9-step flow ourselves.
+    if (!state.flowStartedThisLoad && isOnCoverageEditPage()) {
+      if (!state.coverageTriggerSince) {
+        state.coverageTriggerSince = Date.now();
+        setStatus('Coverages detected, stabilizing...');
+        log('Coverages detected, stabilizing...');
+        return;
+      }
+      if ((Date.now() - state.coverageTriggerSince) < CFG.triggerStableMs) {
+        setStatus('Coverages stable...');
+        return;
+      }
+      state.flowStartedThisLoad = true;
+      state.busy = true;
+      log(`Starting full flow on ${location.origin}${location.pathname}`);
+      runGrab({ fullFlow: true })
+        .catch((err) => {
+          log(`Full flow failed: ${err?.message || err}`);
+          setStatus('Failed');
+        })
+        .finally(() => {
+          state.busy = false;
+        });
+      return;
+    }
+    state.coverageTriggerSince = 0;
+
+    // LEGACY PATH: an older standalone writer fired a direct trigger. Run
+    // the grab phase only (skip coverage edits, since the writer did them).
     const currentJob = readCurrentJob();
     const handoff = getUsableHomeQuoteGrabberHandoff(currentJob['AZ ID']);
     const stageReady = matchesStage('home', 'quote_grabber', currentJob['AZ ID']);
@@ -404,7 +482,7 @@
     if (!handoff && !stageReady) {
       state.triggerSince = 0;
       state.activeHandoffRequestedAt = '';
-      setWaiting('Waiting for HOME quote-grabber trigger');
+      setWaiting('Waiting for Coverages page or legacy trigger');
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
         state.lastSnapshotTick = state.tickCount;
         logTriggerSnapshot(currentJob);
@@ -434,7 +512,7 @@
 
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
-      log('Trigger found: HOME quote-grabber handoff');
+      log('Trigger found: HOME quote-grabber handoff (legacy path)');
       setStatus('Trigger found, waiting 3 seconds');
       return;
     }
@@ -445,11 +523,12 @@
       return;
     }
 
+    state.flowStartedThisLoad = true;
     state.busy = true;
-    log(`Starting runGrab on ${location.origin}${location.pathname}`);
-    runGrab()
+    log(`Starting legacy grab on ${location.origin}${location.pathname}`);
+    runGrab({ fullFlow: false })
       .catch((err) => {
-        log(`Failed: ${err?.message || err}`);
+        log(`Legacy grab failed: ${err?.message || err}`);
         setStatus('Failed');
       })
       .finally(() => {
@@ -463,7 +542,7 @@
       try {
         const nodes = doc.querySelectorAll('.gw-label');
         for (const el of nodes) {
-          if (!isVisibleEl(el)) continue;
+          if (!isVisible(el)) continue;
           if (normalizeText(el.textContent || '') === labelText) return true;
         }
       } catch {}
@@ -471,7 +550,7 @@
     return false;
   }
 
-  function isVisibleEl(el) {
+  function isVisible(el) {
     if (!el || !(el instanceof Element)) return false;
     try {
       const r = el.getBoundingClientRect?.();
@@ -484,56 +563,493 @@
     } catch { return false; }
   }
 
-  async function runGrab() {
-    log('Starting grab flow');
+  // ===========================================================================
+  // Coverage edit phase (formerly in 04 GWPC Home Coverages Quote + Risk Analysis)
+  // ===========================================================================
+
+  function byId(id) {
+    try { return document.getElementById(id); } catch { return null; }
+  }
+
+  function q(sel, root = document) {
+    try { return root.querySelector(sel); } catch { return null; }
+  }
+
+  function queryFirstVisible(selector) {
+    try {
+      return Array.from(document.querySelectorAll(selector)).find(isVisible) || null;
+    } catch { return null; }
+  }
+
+  function getHeaderText() {
+    const nodes = Array.from(document.querySelectorAll('.gw-TitleBar--title'));
+    const el = nodes.find(isVisible) || null;
+    return normalizeText(el?.textContent || '');
+  }
+
+  function headerStillCoverages() {
+    const titles = Array.from(document.querySelectorAll('.gw-TitleBar--title')).filter(isVisible);
+    return titles.some(t => normalizeText(t.textContent || '') === IDS.coveragesHeader);
+  }
+
+  function isOnCoverageEditPage() {
+    return getHeaderText() === IDS.coveragesHeader &&
+      !!byId(IDS.coveragesScreen) &&
+      !!byId(IDS.mainArea) &&
+      hasVisibleExactLabel('Homeowners');
+  }
+
+  function cssAttrEscape(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function strongClick(el) {
+    if (!el) return false;
+    try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+    try { el.click?.(); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
+    return true;
+  }
+
+  function dispatchValueEvents(el) {
+    try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
+  }
+
+  function gatherContextText(el) {
+    const parts = [];
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 9) {
+      if (cur.nodeType === 1) {
+        const id = cur.id ? ` ${cur.id} ` : '';
+        const aria = cur.getAttribute ? (cur.getAttribute('aria-label') || '') : '';
+        const txt = normalizeText(cur.textContent || '');
+        if (id) parts.push(id);
+        if (aria) parts.push(aria);
+        if (txt) parts.push(txt);
+      }
+      cur = cur.parentElement;
+      depth++;
+    }
+    return normalizeText(parts.join(' | '));
+  }
+
+  function verifyContextLabels(el, expectedLabels) {
+    if (!expectedLabels || !expectedLabels.length) return true;
+    const context = gatherContextText(el).toLowerCase();
+    return expectedLabels.every(label => context.includes(String(label).toLowerCase()));
+  }
+
+  function getSelectedText(selectEl) {
+    if (!selectEl) return '';
+    const opt = selectEl.options?.[selectEl.selectedIndex];
+    return normalizeText(opt?.textContent || opt?.innerText || '');
+  }
+
+  function optionCanon(text) {
+    return normalizeText(text).toLowerCase().replace(/ /g, '').replace(/\s+/g, '').replace(/,/g, '').replace(/\$/g, '');
+  }
+
+  function optionMatchesText(text, desiredTexts) {
+    const actual = optionCanon(text);
+    return desiredTexts.some(want => actual === optionCanon(want));
+  }
+
+  function findMatchingOption(selectEl, desiredTexts) {
+    const options = Array.from(selectEl?.options || []);
+    for (const opt of options) {
+      const txt = normalizeText(opt.textContent || opt.innerText || '');
+      if (optionMatchesText(txt, desiredTexts)) return opt;
+    }
+    return null;
+  }
+
+  function isProbablyClickable(el) {
+    if (!el || !(el instanceof Element) || !isVisible(el)) return false;
+    return (
+      el.matches('button, a, input[type="button"], input[type="submit"], [role="button"], [role="tab"], [role="menuitem"]') ||
+      el.classList.contains('gw-action--inner') ||
+      el.classList.contains('gw-TabWidget') ||
+      el.classList.contains('gw-ButtonWidget') ||
+      el.hasAttribute('onclick') ||
+      el.getAttribute('tabindex') === '0'
+    );
+  }
+
+  function getClickableOwner(el) {
+    if (!el) return null;
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 10) {
+      if (isProbablyClickable(cur)) return cur;
+      cur = cur.parentElement;
+      depth++;
+    }
+    return el;
+  }
+
+  function findClickableOwnerByLabel(labelText) {
+    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisible);
+    for (const label of direct) {
+      const owner = getClickableOwner(label);
+      if (owner && isVisible(owner)) return owner;
+    }
+    const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
+    for (const el of generic) {
+      const aria = normalizeText(el.getAttribute?.('aria-label') || '');
+      const txt = normalizeText(el.textContent || '');
+      if ((aria === labelText || txt === labelText) && isVisible(el)) {
+        const owner = getClickableOwner(el);
+        if (owner && isVisible(owner)) return owner;
+      }
+    }
+    return null;
+  }
+
+  function findEditAllTarget() {
+    return findClickableOwnerByLabel('Edit All');
+  }
+
+  function nudgeCoveragesTabIfNeeded() {
+    if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeCooldownMs) return false;
+    const target = findActionByText('Coverages');
+    if (!target) return false;
+    state.lastTabNudgeAt = Date.now();
+    strongClick(target);
+    log('Clicked Coverages tab helper');
+    return true;
+  }
+
+  function quoteRecentlyClicked() {
+    return Date.now() - state.lastQuoteClickAt < 1500;
+  }
+
+  function markQuoteClicked() {
+    state.lastQuoteClickAt = Date.now();
+  }
+
+  function findQuoteCandidates() {
+    const out = [];
+    const exactInner = q('#SubmissionWizard-Quote > div.gw-action--inner.gw-hasDivider');
+    if (exactInner) out.unshift(exactInner);
+    const host = byId(IDS.quoteButtonHost);
+    if (host) out.unshift(host);
+    out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
+    const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
+    if (nextLab) {
+      let p = nextLab;
+      for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
+        const qEl = p.querySelector?.('.gw-label[aria-label="Quote"]');
+        if (qEl) {
+          out.unshift(qEl);
+          break;
+        }
+      }
+    }
+    return Array.from(new Set(out));
+  }
+
+  function upgradeToClickable(el) {
+    if (!el) return null;
+    if (el.matches?.('.gw-action--inner') && el.getAttribute('aria-disabled') !== 'true' && isVisible(el)) return el;
+    if (el.querySelector) {
+      const inner = el.querySelector('.gw-action--inner[aria-disabled="false"]');
+      if (inner && isVisible(inner)) return inner;
+    }
+    let p = el;
+    for (let i = 0; i < 12 && p; i++, p = p.parentElement) {
+      if (p.matches?.('.gw-action--inner') && p.getAttribute('aria-disabled') !== 'true' && isVisible(p)) return p;
+    }
+    return isVisible(el) ? el : null;
+  }
+
+  function clickQuoteOnce() {
+    if (quoteRecentlyClicked()) return false;
+    const candidates = findQuoteCandidates();
+    for (const el of candidates) {
+      const target = upgradeToClickable(el);
+      if (target && strongClick(target)) {
+        markQuoteClicked();
+        log('Quote clicked');
+        return true;
+      }
+    }
+    log('Quote target not found');
+    return false;
+  }
+
+  async function clickQuoteUntilTransition() {
+    for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
+      setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
+      const clicked = clickQuoteOnce();
+      if (!clicked) {
+        await sleep(CFG.betweenQuoteAttemptsMs);
+        continue;
+      }
+      await sleep(CFG.afterQuoteWaitMs);
+      const movedOff = await waitFor(() => !headerStillCoverages(), CFG.quoteTransitionTimeoutMs, `Quote transition (attempt ${attempt})`);
+      if (movedOff) {
+        log('Quote succeeded (moved off Coverages)');
+        return true;
+      }
+      log(`Still on Coverages after Quote attempt ${attempt}`);
+      if (attempt < CFG.maxQuoteAttempts) {
+        setStatus(`Waiting to retry Quote (${attempt}/${CFG.maxQuoteAttempts})`);
+        await sleep(CFG.betweenQuoteAttemptsMs);
+      }
+    }
+    return false;
+  }
+
+  // After the Auto radio is clicked the page stays on its current screen, so
+  // clickQuoteUntilTransition's "moved off Coverages" criterion does not apply.
+  // We just click the Quote button and sleep for the re-quote to settle.
+  async function clickQuoteRequote() {
+    state.lastQuoteClickAt = 0; // reset cooldown so clickQuoteOnce is allowed
+    for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
+      setStatus(`Re-Quote click (${attempt}/${CFG.maxQuoteAttempts})`);
+      if (clickQuoteOnce()) {
+        log('Re-Quote click sent, waiting to settle');
+        await sleep(CFG.afterRequoteSettleMs);
+        return true;
+      }
+      await sleep(CFG.betweenQuoteAttemptsMs);
+    }
+    throw new Error('Could not click Quote for re-quote');
+  }
+
+  async function ensureEditMode() {
+    const editTarget = findEditAllTarget();
+    if (editTarget) {
+      log('Clicking Edit All');
+      strongClick(editTarget);
+      await sleep(CFG.afterEditAllMs);
+    } else if (queryFirstVisible(SEL.stdAllPerils)) {
+      log('Edit All not visible. Controls already editable.');
+      return;
+    } else {
+      throw new Error('Edit All not found');
+    }
+    const ok = await waitFor(
+      () => !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox),
+      CFG.waitTimeoutMs,
+      'editable coverage controls'
+    );
+    if (!ok) throw new Error('Edit mode did not become ready');
+    log('Edit mode ready');
+  }
+
+  async function waitForField(selector, expectedLabels, label) {
+    const ok = await waitFor(
+      () => {
+        const el = queryFirstVisible(selector);
+        if (!el) return false;
+        return verifyContextLabels(el, expectedLabels);
+      },
+      CFG.waitTimeoutMs,
+      label
+    );
+    if (!ok) throw new Error(`${label}: field not found or context mismatch`);
+    const el = queryFirstVisible(selector);
+    if (!el) throw new Error(`${label}: field vanished`);
+    if (!verifyContextLabels(el, expectedLabels)) throw new Error(`${label}: context mismatch`);
+    return el;
+  }
+
+  async function setSelectVerified(selector, expectedLabels, desiredTexts, label) {
+    const el = await waitForField(selector, expectedLabels, label);
+    const match = findMatchingOption(el, desiredTexts);
+    if (!match) throw new Error(`${label}: option not found (${desiredTexts.join(' / ')})`);
+    if (optionMatchesText(getSelectedText(el), desiredTexts)) {
+      log(`${label}: already set to ${getSelectedText(el)}`);
+      return;
+    }
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus({ preventScroll: true }); } catch {}
+    try { el.value = match.value; } catch {}
+    try { match.selected = true; } catch {}
+    dispatchValueEvents(el);
+    await sleep(CFG.afterFieldMs);
+    if (!optionMatchesText(getSelectedText(el), desiredTexts)) {
+      try { el.selectedIndex = match.index; } catch {}
+      try { el.value = match.value; } catch {}
+      try { match.selected = true; } catch {}
+      dispatchValueEvents(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    const finalText = getSelectedText(el);
+    if (!optionMatchesText(finalText, desiredTexts)) throw new Error(`${label}: failed to stick (${finalText || 'blank'})`);
+    log(`${label}: set to ${finalText}`);
+  }
+
+  async function ensureCheckboxVerified(selector, expectedLabels, label) {
+    const el = await waitForField(selector, expectedLabels, label);
+    if (el.checked) {
+      log(`${label}: already checked`);
+      return;
+    }
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    strongClick(el);
+    await sleep(CFG.afterFieldMs);
+    if (!el.checked) {
+      try { el.checked = true; } catch {}
+      dispatchValueEvents(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    if (!el.checked) {
+      strongClick(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    if (!el.checked) throw new Error(`${label}: failed to stay checked`);
+    log(`${label}: checked`);
+  }
+
+  async function driveCoveragesAndQuote() {
+    log('Phase 1: editing coverages');
+    await ensureEditMode();
+    await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
+    await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
+    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], ['$10,000', '10000'], 'Enhanced / Split Water');
+    await setSelectVerified(SEL.enhSeparateStructures, ['Separate Structures'], ['5%'], 'Enhanced / Separate Structures');
+    await setSelectVerified(SEL.enhPersonalPropertyLimit, ['Personal Property', 'Limit'], ['40%'], 'Enhanced / Personal Property Limit');
+    await setSelectVerified(SEL.enhPersonalLiability, ['Personal Liability'], ['$1,000,000', '1000000'], 'Enhanced / Personal Liability');
+    await ensureCheckboxVerified(SEL.enhExtendedReplacementCheckbox, ['Extended Replacement Cost'], 'Enhanced / Extended Replacement Cost checkbox');
+    await setSelectVerified(SEL.enhExtendedReplacementSelect, ['Extended Replacement Cost'], ['120%', '120'], 'Enhanced / Extended Replacement Cost value');
+    await ensureCheckboxVerified(SEL.personalInjuryCheckbox, ['Personal Injury'], 'Additional / Personal Injury');
+    log('Phase 1: clicking initial Quote');
+    const quoteOK = await clickQuoteUntilTransition();
+    if (!quoteOK) throw new Error('Initial Quote click did not move off Coverages');
+  }
+
+  // ===========================================================================
+  // Auto-discount step + Fair Plan check (new in v3.0)
+  // ===========================================================================
+
+  async function clickAutoRadio() {
+    const target = await waitFor(
+      () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoRadio)} > div`)),
+      CFG.waitTimeoutMs,
+      'Auto radio (Job Wizard Info Bar)'
+    );
+    if (!target) throw new Error('Auto radio not found');
+    log('Clicking Auto radio (Job Wizard Info Bar)');
+    strongClick(target);
+    await sleep(CFG.afterClickMs);
+  }
+
+  function hasFairPlanCompanionEndorsement() {
+    return !!findInDocs((doc) => {
+      const labels = doc.querySelectorAll(SEL.fairPlanLabelClass);
+      for (const el of labels) {
+        if (!isVisible(el)) continue;
+        if (normalizeText(el.textContent || '') === 'FAIR Plan Companion Endorsement') return el;
+      }
+      return null;
+    });
+  }
+
+  function extractExclusionsFields() {
+    return { 'CFP?': hasFairPlanCompanionEndorsement() ? 'YES' : 'NO' };
+  }
+
+  // Top-level orchestrator. Two entry shapes:
+  //   - fullFlow=true: drive coverage edits + initial Quote first, then run
+  //     the new 9-step grab (dual pricing + auto radio + fair plan check).
+  //   - fullFlow=false: legacy path, used when the old separate writer fired
+  //     a direct trigger. Skips coverage edits and runs a single-pricing grab
+  //     with the fair-plan check.
+  async function runGrab(opts = {}) {
+    const fullFlow = !!opts.fullFlow;
+    log(`Starting ${fullFlow ? 'full flow (coverage edits + 9-step grab)' : 'legacy grab (post-trigger)'}`);
+
+    if (fullFlow) {
+      setStatus('Phase 1: editing coverages and quoting');
+      await driveCoveragesAndQuote();
+    }
 
     const submissionNumberEarly = extractSubmissionNumber();
-    if (submissionNumberEarly) log(`Submission Number found: ${submissionNumberEarly}`);
+    if (submissionNumberEarly) log(`Submission Number found early: ${submissionNumberEarly}`);
 
-    setStatus('Opening Policy Info');
+    // Step 1: Coverages → INITIAL prices (only meaningful in full flow)
+    let initialPricing = { 'Standard Pricing': '', 'Enhance Pricing': '' };
+    if (fullFlow) {
+      setStatus('Step 1: Coverages (initial pricing)');
+      await goToCoverages();
+      await sleep(CFG.afterClickMs);
+      initialPricing = extractPricingFields();
+      log(`Initial pricing: ${JSON.stringify(initialPricing)}`);
+    }
+
+    // Step 2: Policy Info → Name, Mailing Address
+    setStatus('Step 2: Policy Info');
     await goToPolicyInfo();
     await sleep(CFG.afterClickMs);
     const policyInfoData = extractPolicyInfoFields();
-    log(`Policy Info fields read: ${JSON.stringify(policyInfoData)}`);
+    log(`Policy Info fields: ${JSON.stringify(policyInfoData)}`);
 
-    setStatus('Opening Dwelling');
+    // Steps 3-4: Click Auto radio + Re-Quote (only meaningful in full flow)
+    if (fullFlow) {
+      setStatus('Step 3: clicking Auto radio (Policy Level Discount)');
+      await clickAutoRadio();
+      setStatus('Step 4: re-Quote with Auto discount');
+      await clickQuoteRequote();
+    }
+
+    // Step 5: Dwelling → fields
+    setStatus('Step 5: Dwelling');
     await goToDwelling();
     await sleep(CFG.afterClickMs);
     const dwellingData = extractDwellingFields();
-    log(`Dwelling fields read: ${JSON.stringify(dwellingData)}`);
+    log(`Dwelling fields: ${JSON.stringify(dwellingData)}`);
 
-    setStatus('Opening Coverages');
+    // Step 6: Coverages → FINAL prices (the only pricing in legacy mode)
+    setStatus(fullFlow ? 'Step 6: Coverages (final pricing, with auto discount)' : 'Coverages pricing');
     await goToCoverages();
     await sleep(CFG.afterClickMs);
-    const pricingData = extractPricingFields();
+    const finalPricing = extractPricingFields();
+    log(`Final pricing: ${JSON.stringify(finalPricing)}`);
+
     const submissionNumber = extractSubmissionNumber() || submissionNumberEarly || '';
-    log(`Pricing fields read: ${JSON.stringify(pricingData)}`);
     if (submissionNumber) log(`Submission Number confirmed: ${submissionNumber}`);
 
-    setStatus('Opening Exclusions and Conditions');
+    // Step 7: Exclusions and Conditions → check FAIR Plan Companion Endorsement
+    setStatus('Step 7: Exclusions and Conditions (Fair Plan check)');
     await goToExclusionsAndConditions();
     await sleep(CFG.afterClickMs);
-    log('Exclusions and Conditions clicked');
+    const exclusionsData = extractExclusionsFields();
+    log(`Exclusions fields: ${JSON.stringify(exclusionsData)}`);
 
-    setStatus('Opening Quote');
+    // Step 8: Quote tab → Auto Discount value
+    setStatus('Step 8: Quote tab');
     await goToQuote();
     await sleep(CFG.afterClickMs);
     const quoteData = extractQuoteFields();
-    log(`Quote fields read: ${JSON.stringify(quoteData)}`);
+    log(`Quote fields: ${JSON.stringify(quoteData)}`);
 
+    // Build the row. Initial pricing fields are blank in legacy mode (they
+    // weren't captured because the old writer's pre-trigger pricing wasn't
+    // accessible by the time the grab started).
     const row = {
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
       'Protection Class': dwellingData['Protection Class'] || '',
-      'CFP?': 'NO',
+      'CFP?': exclusionsData['CFP?'] || 'NO',
       'Reconstruction Cost': dwellingData['Reconstruction Cost'] || '',
       'Year Built': dwellingData['Year Built'] || '',
       'Square FT': dwellingData['Square FT'] || '',
       '# of Story': dwellingData['# of Story'] || '',
       'Water Device?': dwellingData['Water Device?'] || '',
-      'Standard Pricing': pricingData['Standard Pricing'] || '',
-      'Enhance Pricing': pricingData['Enhance Pricing'] || '',
+      'Standard Pricing Initial': initialPricing['Standard Pricing'] || '',
+      'Enhance Pricing Initial': initialPricing['Enhance Pricing'] || '',
+      'Standard Pricing': finalPricing['Standard Pricing'] || '',
+      'Enhance Pricing': finalPricing['Enhance Pricing'] || '',
       'Submission Number': submissionNumber || '',
       'Auto Discount': quoteData['Auto Discount'] || '',
       'Date Processed?': formatDate(new Date()),
@@ -541,8 +1057,15 @@
       'Result': ''
     };
 
+    // In legacy mode the initial pricing fields are expected to be blank, so
+    // exclude them from the missing-field check.
+    const skipMissingKeys = new Set(['Done?', 'Result']);
+    if (!fullFlow) {
+      skipMissingKeys.add('Standard Pricing Initial');
+      skipMissingKeys.add('Enhance Pricing Initial');
+    }
     const missing = Object.entries(row)
-      .filter(([key, value]) => !value && key !== 'Done?' && key !== 'Result')
+      .filter(([key, value]) => !value && !skipMissingKeys.has(key))
       .map(([key]) => key);
 
     if (missing.length) {
@@ -551,7 +1074,7 @@
       log(`Missing fields: ${missing.join(', ')}`);
     } else {
       row['Done?'] = 'Yes';
-      row['Result'] = 'Grabbed to localStorage';
+      row['Result'] = fullFlow ? 'Grabbed (full flow)' : 'Grabbed (legacy)';
       log('All fields grabbed successfully');
     }
 
@@ -572,13 +1095,17 @@
         url: location.href,
         title: document.title
       },
+      flow: fullFlow ? 'full' : 'legacy',
       tabsUsed: {
+        coveragesInitial: fullFlow,
         policyInfo: true,
+        autoRadioClicked: fullFlow,
+        requoted: fullFlow,
         dwelling: true,
-        coverages: true,
+        coveragesFinal: true,
         exclusionsAndConditions: true,
         quote: true,
-        cfpDefaultedToNo: true
+        cfpFromFairPlanEndorsement: true
       },
       row
     };
@@ -603,9 +1130,11 @@
     }
     log(`Payload saved: ${KEYS.payload}`);
     log('Bundle merged: tm_pc_webhook_bundle_v1.home');
+    // shared-ticket-handoff watches for product='home' step='handoff' and
+    // advances the flow to 'home/sender'. This is the exit handoff.
     writeFlowStage('home', 'handoff', (mergeJob.next || currentJob)['AZ ID']);
     consumeHomeQuoteGrabberHandoff((mergeJob.next || currentJob)['AZ ID']);
-    setStatus('Grab complete');
+    setStatus('Grab complete (handed off to shared-ticket-handoff)');
     state.doneThisLoad = true;
   }
 
