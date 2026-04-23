@@ -931,13 +931,21 @@
   // Auto-discount step + Fair Plan check (new in v3.0)
   // ===========================================================================
 
+  function findAutoRadioTarget() {
+    return findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoRadio)} > div`));
+  }
+
   async function clickAutoRadio() {
-    const target = await waitFor(
-      () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.autoRadio)} > div`)),
+    // waitFor only returns true/false in this script, so look up the element
+    // fresh once the wait succeeds.
+    const ok = await waitFor(
+      () => !!findAutoRadioTarget(),
       CFG.waitTimeoutMs,
       'Auto radio (Job Wizard Info Bar)'
     );
-    if (!target) throw new Error('Auto radio not found');
+    if (!ok) throw new Error('Auto radio not found within timeout');
+    const target = findAutoRadioTarget();
+    if (!target) throw new Error('Auto radio vanished after wait');
     log('Clicking Auto radio (Job Wizard Info Bar)');
     strongClick(target);
     await sleep(CFG.afterClickMs);
