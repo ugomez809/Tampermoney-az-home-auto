@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.3
+// @version      1.4
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes the organizer's own panel in the dock.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Home Bot: UI Dock Organizer';
-  const VERSION = '1.3';
+  const VERSION = '1.4';
 
   const CFG = {
     tickMs: 900,
@@ -43,7 +43,8 @@
     maxLogs: 12,
     uiZ: 2147483647,
     posKey: 'tm_ui_dock_organizer_panel_pos_v13',
-    logsOpenKey: 'tm_ui_dock_organizer_logs_open_v13'
+    logsOpenKey: 'tm_ui_dock_organizer_logs_open_v13',
+    hiddenKey: 'tm_ui_dock_organizer_hidden_v14'
   };
 
   const UI = {
@@ -52,6 +53,7 @@
     statusId: 'hb-ui-dock-organizer-status-v13',
     countId: 'hb-ui-dock-organizer-count-v13',
     toggleId: 'hb-ui-dock-organizer-toggle-v13',
+    hideId: 'hb-ui-dock-organizer-hide-v14',
     rescanId: 'hb-ui-dock-organizer-rescan-v13',
     logsBtnId: 'hb-ui-dock-organizer-logs-btn-v13',
     logsWrapId: 'hb-ui-dock-organizer-logs-wrap-v13',
@@ -68,7 +70,8 @@
     mo: null,
     drag: null,
     lastRescanAt: 0,
-    lastDockedCount: -1
+    lastDockedCount: -1,
+    uiHidden: false
   };
 
   function clamp(n, min, max) {
@@ -90,6 +93,7 @@
   init();
 
   function init() {
+    state.uiHidden = loadHiddenMode();
     injectStyle();
     buildUI();
     bindUI();
@@ -107,6 +111,11 @@
 
   function tick() {
     if (!state.running) return;
+    if (state.uiHidden) {
+      applyHiddenMode();
+      updateUI();
+      return;
+    }
 
     const now = Date.now();
     if (now - state.lastRescanAt >= CFG.rescanMs) {
@@ -198,6 +207,7 @@
 
     for (const el of Array.from(state.registry.keys())) {
       if (!el || !el.isConnected || !seen.has(el) || !isDockCandidate(el)) {
+        restoreHiddenElement(el);
         state.registry.delete(el);
       }
     }
@@ -331,6 +341,10 @@
     updateUI();
 
     if (!items.length) return;
+    if (state.uiHidden) {
+      applyHiddenMode();
+      return;
+    }
 
     const placements = buildPlacements(items);
 
@@ -485,6 +499,43 @@
     } catch {}
   }
 
+  function isOrganizerPanel(el) {
+    return !!(el && el.id === UI.panelId);
+  }
+
+  function hideElement(el) {
+    if (!(el instanceof HTMLElement) || !el.isConnected || isOrganizerPanel(el)) return;
+    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevDisplay')) {
+      el.dataset.hbUiDockPrevDisplay = el.style.display || '';
+    }
+    if (!Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevVisibility')) {
+      el.dataset.hbUiDockPrevVisibility = el.style.visibility || '';
+    }
+    el.style.setProperty('display', 'none', 'important');
+    el.style.setProperty('visibility', 'hidden', 'important');
+  }
+
+  function restoreHiddenElement(el) {
+    if (!(el instanceof HTMLElement)) return;
+    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevDisplay')) {
+      if (el.dataset.hbUiDockPrevDisplay) el.style.display = el.dataset.hbUiDockPrevDisplay;
+      else el.style.removeProperty('display');
+      delete el.dataset.hbUiDockPrevDisplay;
+    }
+    if (Object.prototype.hasOwnProperty.call(el.dataset, 'hbUiDockPrevVisibility')) {
+      if (el.dataset.hbUiDockPrevVisibility) el.style.visibility = el.dataset.hbUiDockPrevVisibility;
+      else el.style.removeProperty('visibility');
+      delete el.dataset.hbUiDockPrevVisibility;
+    }
+  }
+
+  function applyHiddenMode() {
+    for (const el of state.registry.keys()) {
+      if (state.uiHidden) hideElement(el);
+      else restoreHiddenElement(el);
+    }
+  }
+
   function clampElementIntoViewport(el) {
     if (!el || !el.isConnected) return;
 
@@ -570,6 +621,8 @@
       }
       #${UI.toggleId}.on{ background:#166534; }
       #${UI.toggleId}.off{ background:#991b1b; }
+      #${UI.hideId}.on{ background:#7c3aed; }
+      #${UI.hideId}.off{ background:#0f766e; }
       #${UI.rescanId}{ background:#1d4ed8; }
       #${UI.logsBtnId}{ background:#374151; }
       #${UI.logsWrapId}{
@@ -612,6 +665,7 @@
         </div>
         <div class="btns">
           <button id="${UI.toggleId}" class="on" type="button">STOP</button>
+          <button id="${UI.hideId}" class="off" type="button">HIDE UI</button>
           <button id="${UI.rescanId}" type="button">RESCAN</button>
           <button id="${UI.logsBtnId}" type="button">LOGS</button>
         </div>
@@ -636,6 +690,15 @@
       if (state.running) fullScanAndArrange();
     });
 
+    document.getElementById(UI.hideId)?.addEventListener('click', () => {
+      state.uiHidden = !state.uiHidden;
+      saveHiddenMode(state.uiHidden);
+      applyHiddenMode();
+      log(state.uiHidden ? 'All docked UIs hidden' : 'All docked UIs shown');
+      updateUI();
+      if (!state.uiHidden && state.running) fullScanAndArrange();
+    });
+
     document.getElementById(UI.rescanId)?.addEventListener('click', () => {
       log('Manual rescan');
       fullScanAndArrange();
@@ -653,6 +716,7 @@
     const status = document.getElementById(UI.statusId);
     const count = document.getElementById(UI.countId);
     const toggle = document.getElementById(UI.toggleId);
+    const hide = document.getElementById(UI.hideId);
 
     if (status) {
       status.textContent = state.running ? 'RUNNING' : 'STOPPED';
@@ -667,6 +731,12 @@
       toggle.textContent = state.running ? 'STOP' : 'START';
       toggle.classList.toggle('on', state.running);
       toggle.classList.toggle('off', !state.running);
+    }
+
+    if (hide) {
+      hide.textContent = state.uiHidden ? 'SHOW UI' : 'HIDE UI';
+      hide.classList.toggle('on', state.uiHidden);
+      hide.classList.toggle('off', !state.uiHidden);
     }
 
     renderLogs();
@@ -693,6 +763,14 @@
     const wrap = document.getElementById(UI.logsWrapId);
     if (wrap) wrap.style.display = open ? 'block' : 'none';
     try { localStorage.setItem(CFG.logsOpenKey, open ? '1' : '0'); } catch {}
+  }
+
+  function loadHiddenMode() {
+    try { return localStorage.getItem(CFG.hiddenKey) === '1'; } catch { return false; }
+  }
+
+  function saveHiddenMode(hidden) {
+    try { localStorage.setItem(CFG.hiddenKey, hidden ? '1' : '0'); } catch {}
   }
 
   function restorePanelPos(panel) {
