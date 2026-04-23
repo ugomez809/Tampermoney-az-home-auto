@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         01 GWPC Start Auto Quote
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.9
-// @description  Waits for Current Activities, reloads once, waits 2 seconds after Current Activities is visible again, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
+// @version      1.10
+// @description  Waits for Current Activities, clicks the Auto entry first, reloads once only after Current Activities is visible, waits 2 seconds after reload, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = '01 GWPC Start Auto Quote';
-  const VERSION = '1.9';
+  const VERSION = '1.10';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -157,11 +157,10 @@
       state.busy = true;
       try {
         markAutoEntryClicked();
-        markReloadOnce();
-        setStatus('AUTO start triggered. Opening Auto and reloading once');
-        log('AUTO start triggered. Clicking Auto entry, then reloading once');
+        setStatus('AUTO start triggered. Opening Auto');
+        log('AUTO start triggered. Clicking Auto entry');
         strongClick(autoEntry);
-        setTimeout(safeReload, 120);
+        state.phase = 'wait-trigger';
       } finally {
         state.busy = false;
       }
