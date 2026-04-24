@@ -26,13 +26,13 @@ The web app writes these columns:
 11. `updatedBy`
 12. `clientId`
 
-## Before Deploying
+## Shared Key
 
-In [Code.gs](C:/Users/JKira26/Desktop/Tampermoney-az-home-auto/apps-script/gwpc-timeout-shared-rules/Code.gs), replace:
+This scaffold already includes a generated shared key:
 
-- `CHANGE_ME_SHARED_KEY`
+- `gwpc-timeout-rules-24apr2026-jkira-91x7p`
 
-with a real shared key that you will also enter later into the timeout script config on each machine.
+You do not need to change it unless you want a different one.
 
 ## Deploy Steps
 
@@ -65,7 +65,7 @@ Query string:
 Example:
 
 ```text
-https://SCRIPT_URL?action=listRules&key=YOUR_SHARED_KEY
+https://SCRIPT_URL?action=listRules&key=gwpc-timeout-rules-24apr2026-jkira-91x7p
 ```
 
 ### GET all rules including disabled
@@ -81,7 +81,7 @@ Query string:
 ```json
 {
   "action": "upsertRule",
-  "key": "YOUR_SHARED_KEY",
+  "key": "gwpc-timeout-rules-24apr2026-jkira-91x7p",
   "rule": {
     "ruleId": "rule_abc123",
     "label": "Garage type mismatch",
@@ -109,7 +109,7 @@ Query string:
 ```json
 {
   "action": "disableRule",
-  "key": "YOUR_SHARED_KEY",
+  "key": "gwpc-timeout-rules-24apr2026-jkira-91x7p",
   "ruleId": "rule_abc123",
   "updatedBy": "JKira",
   "clientId": "pc-01"

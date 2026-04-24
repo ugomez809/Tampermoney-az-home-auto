@@ -1,7 +1,7 @@
 const CONFIG = {
   spreadsheetId: '151rbB6RHol3o53Ic9p1a-6QwEivdC640ePWhK2AU824',
   sheetName: 'Sheet1',
-  sharedKey: 'CHANGE_ME_SHARED_KEY',
+  sharedKey: 'gwpc-timeout-rules-24apr2026-jkira-91x7p',
   maxRows: 5000
 };
 
