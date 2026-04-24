@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.8
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and resumes immediately when the finisher closes the ticket or posts its cleanup trigger.
+// @version      2.5.9
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and reloads after 40s of no visible AZ page changes while frontmost.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.8';
+  const VERSION = '2.5.9';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -39,7 +39,7 @@
     ticketClosePollMs: 1200,
     ticketCloseLogEveryMs: 8000,
     nextRunAfterCloseMs: 3000,
-    frontIdleReloadMs: 5 * 60 * 1000,
+    frontIdleReloadMs: 40 * 1000,
     frontIdlePollMs: 1000,
     gapMs: 220,
     maxLogLines: 18,
@@ -188,6 +188,7 @@
     frontIdleActivityHandler: null,
     frontIdleFocusHandler: null,
     frontIdleBlurHandler: null,
+    frontIdleMutationObserver: null,
     frontIdleFrontSinceAt: 0,
     frontIdleLastActivityAt: Date.now(),
     frontIdleLastSignature: '',
@@ -288,6 +289,7 @@
     try { document.removeEventListener('input', state.frontIdleActivityHandler, true); } catch {}
     try { window.removeEventListener('focus', state.frontIdleFocusHandler, true); } catch {}
     try { window.removeEventListener('blur', state.frontIdleBlurHandler, true); } catch {}
+    try { state.frontIdleMutationObserver?.disconnect(); } catch {}
 
     const panel = document.getElementById('hb-az-stage-runner-panel');
     if (panel) panel.remove();
@@ -346,13 +348,34 @@
 
   function getFrontIdleSignature() {
     const info = getOpenTicketInfo();
+    const stageLabel = norm(getStagePageLabel() || '');
+    const savedQuery = norm(getCurrentSavedQueryLabel() || '');
     return [
       location.pathname,
       location.search,
       location.hash,
       isTicketDrawerOpen() ? 'open' : 'closed',
-      norm(info.ticketId || '')
+      norm(info.ticketId || ''),
+      stageLabel,
+      savedQuery
     ].join('|');
+  }
+
+  function isInsideStageRunnerPanel(node) {
+    if (!node) return false;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    return !!element?.closest?.('#hb-az-stage-runner-panel');
+  }
+
+  function mutationTouchesAzPage(records) {
+    for (const record of records) {
+      if (isInsideStageRunnerPanel(record.target)) continue;
+      if (record.type === 'attributes') return true;
+      if ([...record.addedNodes].some(node => !isInsideStageRunnerPanel(node))) return true;
+      if ([...record.removedNodes].some(node => !isInsideStageRunnerPanel(node))) return true;
+      if (record.type === 'characterData') return true;
+    }
+    return false;
   }
 
   function setupFrontIdleReloadWatchdog() {
@@ -378,6 +401,20 @@
     };
     window.addEventListener('focus', state.frontIdleFocusHandler, true);
     window.addEventListener('blur', state.frontIdleBlurHandler, true);
+
+    if (document.body && typeof MutationObserver === 'function') {
+      state.frontIdleMutationObserver = new MutationObserver((records) => {
+        if (!isPipelinePage()) return;
+        if (!mutationTouchesAzPage(records)) return;
+        markFrontIdleActivity();
+      });
+      state.frontIdleMutationObserver.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true
+      });
+    }
 
     state.frontIdleLastSignature = getFrontIdleSignature();
     state.frontIdleLastActivityAt = Date.now();
@@ -419,7 +456,7 @@
 
     if (!state.frontIdleArmedLogged && frontForMs >= 1000) {
       state.frontIdleArmedLogged = true;
-      log('Front idle reload armed: 5m unchanged on visible AZ page', 'info');
+      log('Front idle reload armed: 40s unchanged on visible AZ page', 'info');
     }
 
     if (frontForMs < CFG.frontIdleReloadMs || idleForMs < CFG.frontIdleReloadMs) return;
