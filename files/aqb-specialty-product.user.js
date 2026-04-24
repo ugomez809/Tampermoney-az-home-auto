@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.12
+// @version      1.8.13
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, falls back to page-state specialty start if the handoff flag disappears, and shows a live debug panel with deduped detailed logs. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-idle
 // @noframes
-// @grant        GM_getValue
-// @grant        GM_setValue
+// @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
 // ==/UserScript==
@@ -19,7 +18,7 @@
 
   /************* CONFIG *************/
   const SCRIPT_NAME = 'GWPC Auto Specialty Quote';
-  const VERSION = '1.8.12';
+  const VERSION = '1.8.13';
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
 

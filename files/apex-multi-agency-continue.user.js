@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         APEX Multi-Agency Continue
 // @namespace    homebot.apex-multi-agency-continue
-// @version      1.0.1
+// @version      1.0.2
 // @description  Detects the Salesforce Multi-Agency flow and clicks Next automatically when it appears.
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @noframes
-// @grant        GM_getValue
-// @grant        GM_setValue
+// @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-multi-agency-continue.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-multi-agency-continue.user.js
 // ==/UserScript==
@@ -19,7 +18,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Multi-Agency Continue';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_apex_multi_agency_continue_logs_v1';
