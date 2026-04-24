@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.9
+// @version      1.0.10
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.9';
+  const VERSION = '1.0.10';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -223,7 +223,9 @@
   }
 
   function buildSignalKey(signal) {
-    return `${norm(signal?.azId || '')}|${norm(signal?.postedAt || '')}`;
+    const explicit = norm(signal?.signalKey || '');
+    if (explicit) return explicit;
+    return `${norm(signal?.azId || '')}|${norm(signal?.postedAt || signal?.signalPostedAt || '')}`;
   }
 
   function isFreshSuccessSignal(signal) {
