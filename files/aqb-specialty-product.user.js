@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.9
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, and now shows a live debug panel with detailed logs. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.11
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, falls back to page-state specialty start if the handoff flag disappears, and shows a live debug panel with deduped detailed logs. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -32,6 +32,7 @@
   const INACTIVITY_FORCE_QUOTE_MS = 60000;
   const QUOTE_RETRY_EVERY_MS = 5000;
   const QUOTE_RETRY_WINDOW_MS = 60000;
+  const INFER_START_FROM_PAGE_MS = 8000;
 
   const LV_ID_SUFFIX = 'ForemostVehiclesLV';
   const EMPTY_TEXT = 'No data to display';
@@ -56,6 +57,7 @@
   let lastWaitKey = '';
   let logs = [];
   let ui = {};
+  let inferStartSeenAt = 0;
 
   // track "flag became 1" moment
   let sawFlagAt = 0;
@@ -113,7 +115,7 @@
     });
 
     ui.copy?.addEventListener('click', async () => {
-      const text = logs.join('\n');
+      const text = logs.map(formatLogLine).join('\n');
       try {
         await navigator.clipboard.writeText(text);
         log('Logs copied to clipboard');
@@ -135,8 +137,14 @@
 
   function renderLogs() {
     if (!ui.logs) return;
-    ui.logs.value = logs.join('\n');
+    ui.logs.value = logs.map(formatLogLine).join('\n');
     ui.logs.scrollTop = 0;
+  }
+
+  function formatLogLine(entry) {
+    if (!entry) return '';
+    const suffix = entry.count > 1 ? ` (x${entry.count})` : '';
+    return `[${entry.time}] ${entry.message}${suffix}`;
   }
 
   function setStatus(text) {
@@ -144,11 +152,20 @@
   }
 
   function log(message) {
-    const line = `[${timeNow()}] ${message}`;
-    logs.unshift(line);
-    logs = logs.slice(0, MAX_LOG_LINES);
+    const text = String(message || '');
+    if (logs[0] && logs[0].message === text) {
+      logs[0].time = timeNow();
+      logs[0].count = Number(logs[0].count || 1) + 1;
+    } else {
+      logs.unshift({
+        time: timeNow(),
+        message: text,
+        count: 1
+      });
+      logs = logs.slice(0, MAX_LOG_LINES);
+    }
     renderLogs();
-    try { console.log(`[AQB Specialty] ${message}`); } catch {}
+    try { console.log(`[AQB Specialty] ${text}`); } catch {}
   }
 
   function logWait(key, message, statusText = message) {
@@ -319,6 +336,10 @@
 
   function waitKeyReady() {
     try { return localStorage.getItem(WAIT_KEY) === '1'; } catch { return false; }
+  }
+
+  function canInferSpecialtyStartFromPage() {
+    return headerStillAutoDataPrefill() && !!findLVRoot();
   }
 
   function setDoneFlag() {
@@ -594,9 +615,36 @@
     clearWaitLog();
 
     if (!waitKeyReady()) {
-      logWait('wait-flag', 'Waiting for aqb_step_specialty_start=1', 'Waiting for specialty trigger');
-      sawFlagAt = 0;
-      return;
+      if (!canInferSpecialtyStartFromPage()) {
+        inferStartSeenAt = 0;
+        logWait('wait-flag', 'Waiting for aqb_step_specialty_start=1', 'Waiting for specialty trigger');
+        sawFlagAt = 0;
+        return;
+      }
+
+      if (!inferStartSeenAt) {
+        inferStartSeenAt = Date.now();
+        logWait('wait-flag-fallback', 'Specialty start flag missing. Watching page-state fallback.', 'Waiting for specialty trigger');
+        sawFlagAt = 0;
+        return;
+      }
+
+      const inferRemaining = INFER_START_FROM_PAGE_MS - (Date.now() - inferStartSeenAt);
+      if (inferRemaining > 0) {
+        logWait(`wait-flag-fallback:${Math.ceil(inferRemaining / 1000)}`, `Specialty start flag missing. Inferring start from page in ${Math.max(0, Math.ceil(inferRemaining / 1000))}s`, 'Waiting for specialty trigger');
+        sawFlagAt = 0;
+        return;
+      }
+
+      if (!sawFlagAt) {
+        sawFlagAt = Date.now();
+        markActivity('Specialty start inferred from page state (flag missing)');
+        setStatus('Waiting 3s after fallback trigger');
+        clearWaitLog();
+        return;
+      }
+    } else {
+      inferStartSeenAt = 0;
     }
 
     if (!sawFlagAt) {
