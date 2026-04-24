@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.21
+// @version      1.0.22
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.21';
+  const VERSION = '1.0.22';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -815,6 +815,22 @@
 
   function buildStableSelector(el) {
     if (!(el instanceof Element)) return '';
+
+    const insideTagForm = !!el.closest(SEL.tagForm);
+    const role = norm(el.getAttribute('role') || '');
+    const classList = Array.from(el.classList || []);
+    const isDropdownOption = insideTagForm && (
+      role === 'option' ||
+      classList.includes('dropdown-item') ||
+      !!el.closest('.dropdown-menu')
+    );
+
+    if (isDropdownOption) {
+      const tag = el.tagName.toLowerCase();
+      const classSelector = classList.includes('dropdown-item') ? '.dropdown-item' : '';
+      return `${SEL.tagForm} ${tag}${classSelector}${role ? `[role="${cssEscape(role)}"]` : ''}`;
+    }
+
     if (el.id) return `#${cssEscape(el.id)}`;
 
     const name = norm(el.getAttribute('name') || '');
@@ -823,7 +839,6 @@
       if (isUniqueSelector(selector)) return selector;
     }
 
-    const role = norm(el.getAttribute('role') || '');
     const aria = norm(el.getAttribute('aria-label') || '');
     if (role && aria) {
       const selector = `${el.tagName.toLowerCase()}[role="${cssEscape(role)}"][aria-label="${cssEscape(aria)}"]`;
