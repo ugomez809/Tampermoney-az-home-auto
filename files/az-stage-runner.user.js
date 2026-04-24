@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.4
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
+// @version      2.5.5
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, waits for the finisher to close the ticket before continuing, and preserves timeout-generated quote data during bootstrap clears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
 // @noframes
+// @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
@@ -19,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.4';
+  const VERSION = '2.5.5';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -439,6 +440,25 @@
     try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }
 
+  function readStorageJson(storageObj, key, fallback = null) {
+    try {
+      const raw = storageObj?.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function readGmJson(key, fallback = null) {
+    try {
+      const raw = GM_getValue(key, null);
+      if (raw == null || raw === '') return fallback;
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      return fallback;
+    }
+  }
+
   function nowIso() {
     return new Date().toISOString();
   }
@@ -461,13 +481,59 @@
     return CLEAR_PREFIXES.some(prefix => key.startsWith(prefix));
   }
 
-  function clearStorageWorkflowKeys(storageObj) {
+  function isTimeoutAutoPayload(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    const event = lower(payload.event || '');
+    const script = lower(payload.script || '');
+    const latestErrorType = lower(payload.latestError?.errorType || '');
+    const errorTypes = Array.isArray(payload.errors)
+      ? payload.errors.map((entry) => lower(entry?.errorType || ''))
+      : [];
+
+    return (
+      event === 'gwpc_timeout_gathered' ||
+      script.includes('timeout') ||
+      latestErrorType === 'headertimeout' ||
+      errorTypes.includes('headertimeout')
+    );
+  }
+
+  function isTimeoutFinalPayload(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    if (isTimeoutAutoPayload(payload.autoPayload)) return true;
+    if (isTimeoutAutoPayload(payload.bundle?.auto?.data)) return true;
+    if (payload.bundle?.timeout?.ready === true) return true;
+    return !!(payload.timeoutPayload && Object.keys(payload.timeoutPayload).length);
+  }
+
+  function getBootstrapPreservedWorkflowKeys() {
+    const preserved = new Set();
+
+    const localAutoPayload = readStorageJson(localStorage, 'tm_pc_auto_quote_grab_payload_v1', null);
+    const gmAutoPayload = readGmJson('tm_pc_auto_quote_grab_payload_v1', null);
+    if (isTimeoutAutoPayload(localAutoPayload) || isTimeoutAutoPayload(gmAutoPayload)) {
+      preserved.add('tm_pc_auto_quote_grab_payload_v1');
+      preserved.add('tm_pc_header_timeout_runtime_v2');
+      preserved.add('tm_pc_header_timeout_sent_events_v2');
+    }
+
+    const localFinalPayload = readStorageJson(localStorage, 'tm_az_gwpc_final_payload_v1', null);
+    const gmFinalPayload = readGmJson('tm_az_gwpc_final_payload_v1', null);
+    if (isTimeoutFinalPayload(localFinalPayload) || isTimeoutFinalPayload(gmFinalPayload)) {
+      preserved.add('tm_az_gwpc_final_payload_v1');
+      preserved.add('tm_az_gwpc_final_payload_ready_v1');
+    }
+
+    return preserved;
+  }
+
+  function clearStorageWorkflowKeys(storageObj, preservedKeys = new Set()) {
     if (!storageObj) return 0;
     const keys = [];
     try {
       for (let i = 0; i < storageObj.length; i++) {
         const key = storageObj.key(i);
-        if (key && shouldClearWorkflowKey(key)) keys.push(key);
+        if (key && shouldClearWorkflowKey(key) && !preservedKeys.has(key)) keys.push(key);
       }
     } catch {}
 
@@ -482,18 +548,23 @@
   }
 
   function clearTransientWorkflowData() {
+    const preservedKeys = getBootstrapPreservedWorkflowKeys();
     let cleared = 0;
-    cleared += clearStorageWorkflowKeys(localStorage);
-    cleared += clearStorageWorkflowKeys(sessionStorage);
+    cleared += clearStorageWorkflowKeys(localStorage, preservedKeys);
+    cleared += clearStorageWorkflowKeys(sessionStorage, preservedKeys);
 
     for (const key of CLEAR_EXACT_KEYS) {
+      if (preservedKeys.has(key)) continue;
       try {
         GM_deleteValue(key);
         cleared += 1;
       } catch {}
     }
 
-    return cleared;
+    return {
+      cleared,
+      preserved: [...preservedKeys]
+    };
   }
 
   function visible(el) {
@@ -819,8 +890,11 @@
       state.bgPauseLogged = false;
       syncUi();
       setStatus(`RELOADING (${state.mode.toUpperCase()})`);
-      const cleared = clearTransientWorkflowData();
-      log(`Cleared ${cleared} transient workflow key${cleared === 1 ? '' : 's'} before fresh run`, 'ok');
+      const reset = clearTransientWorkflowData();
+      log(`Cleared ${reset.cleared} transient workflow key${reset.cleared === 1 ? '' : 's'} before fresh run`, 'ok');
+      if (reset.preserved.length) {
+        log(`Preserved timeout workflow data: ${reset.preserved.join(', ')}`, 'info');
+      }
       log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
       setBootstrapReloadToken();
       setTimeout(() => {
