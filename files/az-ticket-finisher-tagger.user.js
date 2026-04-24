@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.4
+// @version      1.0.5
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -51,8 +51,8 @@
   ];
 
   const TAG_ORDER = [
-    { key: 'successfulTag', label: 'Successful Quote tag' },
-    { key: 'failedTag', label: 'Failed Quote tag' }
+    { key: 'successfulTag', label: 'Success tag' },
+    { key: 'failedTag', label: 'Failed tag' }
   ];
 
   const SEL = {
@@ -1170,7 +1170,8 @@
     state.picker = {
       type,
       items: type === 'fields' ? FIELD_ORDER.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
-      index: 0
+      index: 0,
+      ignoreNextClick: type === 'tags'
     };
 
     ensureHoverBox();
@@ -1181,6 +1182,15 @@
     };
 
     state.pickerClick = (event) => {
+      if (state.picker?.ignoreNextClick) {
+        state.picker.ignoreNextClick = false;
+        setStatus(`Picker: click ${state.picker.items[state.picker.index].label}`);
+        log('Picker ignored the first click by design. Now click the requested tag.');
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        return;
+      }
       const target = getSelectableTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
       if (!target) return;
       event.preventDefault();
@@ -1200,8 +1210,13 @@
     document.addEventListener('keydown', state.pickerKeydown, true);
 
     const current = state.picker.items[state.picker.index];
-    setStatus(`Picker: click ${current.label}`);
-    log(`Picker started: click ${current.label}`);
+    if (type === 'tags') {
+      setStatus(`Picker: first click ignored, then click ${current.label}`);
+      log(`Tag picker started: first click ignored, then click ${current.label}`);
+    } else {
+      setStatus(`Picker: click ${current.label}`);
+      log(`Picker started: click ${current.label}`);
+    }
     renderAll();
   }
 
