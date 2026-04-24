@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.2
+// @version      3.9.3
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
 // ==/UserScript==
@@ -18,7 +19,15 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.2';
+  const VERSION = '3.9.3';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';
@@ -82,12 +91,14 @@
   const state = {
     running: true,
     busy: false,
+    destroyed: false,
     done: false,
     createAttempts: 0,
     lastQuoteClickAt: 0,
     logs: [],
     intervalId: null,
     heartbeatIntervalId: null,
+    logsIntervalTimer: null,
     panel: null,
     statusEl: null,
     logEl: null,
@@ -145,7 +156,53 @@
     state.logs.unshift(line);
     state.logs = state.logs.slice(0, CFG.maxLogLines);
     if (state.logEl) state.logEl.textContent = state.logs.join('\n');
+    persistLogsThrottled();
     console.log(`${SCRIPT_NAME}: ${msg}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    if (state.logEl) state.logEl.textContent = '';
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function setStatus(msg) {
@@ -1057,8 +1114,11 @@
   }
 
   function cleanup() {
+    state.destroyed = true;
     try { clearInterval(state.intervalId); } catch {}
     try { clearInterval(state.heartbeatIntervalId); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { writeActivityState(state.running ? 'idle' : 'stopped', 'Cleanup'); } catch {}
     try { state.panel?.remove?.(); } catch {}
     try { state.styleEl?.remove?.(); } catch {}
@@ -1084,6 +1144,10 @@
     state.heartbeatIntervalId = setInterval(() => {
       try { refreshActiveHeartbeat(); } catch {}
     }, 1000);
+
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   window.__HB_DWELLING_WATER_RULE_CLEANUP__ = cleanup;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.7.2
+// @version      1.7.3
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -12,7 +12,8 @@
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
 // ==/UserScript==
@@ -25,7 +26,20 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Cross-Origin UI Dock Organizer';
-  const VERSION = '1.7.2';
+  const VERSION = '1.7.3';
+
+  // Log-export integration — 3-origin dynamic key.
+  const LOG_PERSIST_KEY = (() => {
+    const host = String(location.host || '');
+    if (host.includes('agencyzoom.com')) return 'tm_az_ui_dock_organizer_logs_v1';
+    if (host.includes('lightning.force.com')) return 'tm_apex_ui_dock_organizer_logs_v1';
+    return 'tm_pc_ui_dock_organizer_logs_v1';
+  })();
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
 
   const CFG = {
@@ -75,6 +89,7 @@
     registry: new Map(), // el -> { order }
     orderSeed: 1,
     tickTimer: null,
+    logsIntervalTimer: null,
     mo: null,
     drag: null,
     lastRescanAt: 0,
@@ -90,9 +105,11 @@
   function cleanup() {
     try { state.mo?.disconnect(); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('resize', onResize, true); } catch {}
     try { window.removeEventListener('mousemove', onDragMove, true); } catch {}
     try { window.removeEventListener('mouseup', onDragEnd, true); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { document.getElementById(UI.panelId)?.remove(); } catch {}
     try { document.getElementById(UI.styleId)?.remove(); } catch {}
   }
@@ -116,6 +133,9 @@
 
     fullScanAndArrange();
     state.tickTimer = setInterval(tick, CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   function tick() {
@@ -896,7 +916,50 @@
     state.logs.unshift(line);
     state.logs = state.logs.slice(0, CFG.maxLogs);
     renderLogs();
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${msg}`);
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function renderLogs() {

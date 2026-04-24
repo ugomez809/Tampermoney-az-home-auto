@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         GWPC Auto Vehicles Prefill
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.6
+// @version      1.5.7
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver to the first non-<none> option, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js
 // ==/UserScript==
@@ -17,6 +18,17 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Auto Vehicles Prefill';
+  const VERSION = '1.5.7';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_aqb_vehicles_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  const LOG_MAX_LINES = 140;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
+  let _logs = [];
 
   /************* CONFIG *************/
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
@@ -50,7 +62,50 @@
   let lastRearmAt = 0;
 
   function log(message) {
+    const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+    _logs.unshift(line);
+    if (_logs.length > LOG_MAX_LINES) _logs.length = LOG_MAX_LINES;
+    persistLogsThrottled();
     try { console.log(`[${SCRIPT_NAME}] ${message}`); } catch {}
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines: _logs.slice()
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    _logs.length = 0;
+    _lastLogPersistAt = 0;
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   // ---------- Minimal START/STOP ----------
@@ -401,6 +456,7 @@
   function init() {
     clearDoneFlags();
     mountToggle();
+    log(`Loaded v${VERSION}`);
 
     setInterval(() => {
       if (isGloballyPaused()) return;
@@ -410,6 +466,10 @@
         running = false;
       });
     }, POLL_MS);
+
+    setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   if (document.readyState === 'loading') {

@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.3
+// @version      1.8.4
 // @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
 // ==/UserScript==
@@ -17,7 +18,16 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.3';
+  const VERSION = '1.8.4';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_apex_continue_new_quote_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  const LOG_MAX_LINES = 140;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const CFG = {
     tickMs: 700,
@@ -55,7 +65,9 @@
     forceCloseDeadlineAt: 0,
     forceCloseTriggered: false,
     forceCloseAttempts: 0,
-    forceCloseTimer: null
+    forceCloseTimer: null,
+    logs: [],
+    logsIntervalTimer: null
   };
 
   function sleep(ms) {
@@ -465,17 +477,64 @@
 
   function log(msg) {
     console.log(`[${SCRIPT_NAME}] ${msg}`);
+
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    state.logs.unshift(line);
+    if (state.logs.length > LOG_MAX_LINES) state.logs.length = LOG_MAX_LINES;
+    persistLogsThrottled();
+
     const box = document.getElementById('hb-apex-continue-log');
     if (!box) return;
 
-    const line = document.createElement('div');
-    line.textContent = `${new Date().toLocaleTimeString()} - ${msg}`;
-    line.style.marginBottom = '3px';
-    box.prepend(line);
+    const row = document.createElement('div');
+    row.textContent = line;
+    row.style.marginBottom = '3px';
+    box.prepend(row);
 
     while (box.children.length > CFG.maxLogLines) {
       box.removeChild(box.lastChild);
     }
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines: state.logs.slice()
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    const box = document.getElementById('hb-apex-continue-log');
+    if (box) { while (box.firstChild) box.removeChild(box.firstChild); }
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function logWait(msg, everyMs = 5000) {
@@ -924,6 +983,10 @@
       if (state.doneThisLoad) return;
       runFlow().catch(err => log(`Run error: ${err?.message || err}`));
     }, CFG.tickMs);
+
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
 
     runFlow().catch(err => log(`Init run error: ${err?.message || err}`));
   }

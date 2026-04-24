@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Global Clear Launcher
 // @namespace    homebot.global-clear-launcher
-// @version      1.0.2
+// @version      1.0.3
 // @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -24,7 +24,20 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin Global Clear Launcher';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
+
+  // Log-export integration — key picked by origin since this runs on all 3.
+  const LOG_PERSIST_KEY = (() => {
+    const host = String(location.host || '');
+    if (host.includes('agencyzoom.com')) return 'tm_az_global_clear_launcher_logs_v1';
+    if (host.includes('lightning.force.com')) return 'tm_apex_global_clear_launcher_logs_v1';
+    return 'tm_pc_global_clear_launcher_logs_v1';
+  })();
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const GM_KEYS = {
     RESET_PACKET: 'hb_global_clear_packet_v1',
@@ -69,7 +82,8 @@
   const state = {
     logs: [],
     ui: null,
-    busy: false
+    busy: false,
+    logsIntervalTimer: null
   };
 
   init();
@@ -77,6 +91,9 @@
   async function init() {
     buildUI();
     log(`Loaded ${SCRIPT_NAME} V${VERSION}`);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     await applyPendingResetIfNeeded();
   }
 
@@ -388,6 +405,47 @@
     if (state.logs.length > CFG.maxLogs) state.logs.length = CFG.maxLogs;
     console.log(`[${SCRIPT_NAME}] ${msg}`);
     renderLogs();
+    persistLogsThrottled();
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function renderLogs() {

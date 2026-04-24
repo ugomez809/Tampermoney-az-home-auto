@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Starter
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.10.2
+// @version      1.10.3
 // @description  Waits for Current Activities, clicks the Auto entry first, reloads once only after Current Activities is visible, waits 2 seconds after reload, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-start
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js
 // ==/UserScript==
@@ -17,7 +18,16 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Auto Quote Starter';
-  const VERSION = '1.10.2';
+  const VERSION = '1.10.3';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_start_auto_quote_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  const LOG_MAX_LINES = 140;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -62,7 +72,9 @@
     lastSelectAttemptAt: 0,
     uiReady: false,
     lastStatus: '',
-    dialogPatchTimer: null
+    dialogPatchTimer: null,
+    logs: [],
+    logsIntervalTimer: null
   };
 
   boot();
@@ -78,6 +90,9 @@
 
     log('Loaded');
     setInterval(tick, CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     tick();
   }
 
@@ -481,7 +496,52 @@
   }
 
   function log(msg) {
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    state.logs.unshift(line);
+    if (state.logs.length > LOG_MAX_LINES) state.logs.length = LOG_MAX_LINES;
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${msg}`);
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function normText(v) {

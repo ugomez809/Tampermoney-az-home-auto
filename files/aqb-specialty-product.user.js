@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.11
+// @version      1.8.12
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, falls back to page-state specialty start if the handoff flag disappears, and shows a live debug panel with deduped detailed logs. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js
 // ==/UserScript==
@@ -17,8 +18,20 @@
   'use strict';
 
   /************* CONFIG *************/
+  const SCRIPT_NAME = 'GWPC Auto Specialty Quote';
+  const VERSION = '1.8.12';
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_aqb_specialty_product_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
+  let _logsIntervalTimer = null;
+  let _destroyed = false;
 
   const WAIT_KEY = 'aqb_step_specialty_start';
   const DONE_KEY = 'aqb_step_specialty_done';
@@ -165,7 +178,60 @@
       logs = logs.slice(0, MAX_LOG_LINES);
     }
     renderLogs();
+    persistLogsThrottled();
     try { console.log(`[AQB Specialty] ${text}`); } catch {}
+  }
+
+  function persistLogsThrottled() {
+    if (_destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    // logs[] here is an array of {time, message, count} objects — flatten
+    // to a string line that matches every other script's exported shape.
+    const lines = (Array.isArray(logs) ? logs : []).map(entry => {
+      if (typeof entry === 'string') return entry;
+      const time = entry?.time || '';
+      const count = Number(entry?.count || 1);
+      const suffix = count > 1 ? ` (x${count})` : '';
+      return `[${time}] ${entry?.message || ''}${suffix}`;
+    });
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (_destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    logs = [];
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (_destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function logWait(key, message, statusText = message) {
@@ -731,6 +797,9 @@
         setStatus('Run failed');
       });
     }, POLL_MS);
+    _logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   if (document.readyState === 'loading') {

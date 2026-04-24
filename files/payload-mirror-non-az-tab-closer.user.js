@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.12
+// @version      1.0.13
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,8 +24,21 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.12';
+  const VERSION = '1.0.13';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
+
+  // Log-export integration — runs on 4 origins; pick one key per origin.
+  const LOG_PERSIST_KEY = (() => {
+    const host = String(location.host || '');
+    if (host.includes('agencyzoom.com')) return 'tm_az_payload_mirror_logs_v1';
+    if (host.includes('lightning.force.com')) return 'tm_apex_payload_mirror_logs_v1';
+    return 'tm_pc_payload_mirror_logs_v1';
+  })();
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -83,6 +96,7 @@
     closeAttempted: false,
     closeAttempts: 0,
     closeSignalKey: '',
+    logsIntervalTimer: null,
     tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
   };
 
@@ -119,9 +133,12 @@
     }
 
     state.tickTimer = setInterval(() => tick(), CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
     window.addEventListener('beforeunload', persistPanelPos, true);
     window.addEventListener('pagehide', persistPanelPos, true);
     window.addEventListener('resize', keepPanelInView, true);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
 
     tick();
     window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__ = cleanup;
@@ -131,9 +148,11 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('beforeunload', persistPanelPos, true); } catch {}
     try { window.removeEventListener('pagehide', persistPanelPos, true); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { state.panel?.remove(); } catch {}
     try { delete window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__; } catch {}
   }
@@ -218,7 +237,51 @@
     state.logs.unshift(line);
     state.logs = state.logs.slice(0, CFG.maxLogLines);
     renderLogs();
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function setStatus(text) {
