@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8.2
-// @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning.
+// @version      1.8.3
+// @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning, and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Duplicate Check Continue';
-  const VERSION = '1.8.2';
+  const VERSION = '1.8.3';
 
   const KEYS = {
     PANEL_POS: 'tm_apex_duplicates_continue_panel_pos_v18',
@@ -33,7 +33,11 @@
     handledCooldownMs: 15000,
     routeWatchMs: 700,
     observerRefreshMs: 4000,
-    maxLogs: 14
+    maxLogs: 14,
+    forceCloseAfterMs: 60000,
+    forceClosePollMs: 1000,
+    forceCloseRetryMs: 900,
+    maxCloseAttempts: 4
   };
 
   const state = {
@@ -45,7 +49,11 @@
     observers: [],
     lastUrl: location.href,
     observerHeartbeat: null,
-    routeTimer: null
+    routeTimer: null,
+    forceCloseDeadlineAt: 0,
+    forceCloseTriggered: false,
+    forceCloseAttempts: 0,
+    forceCloseTimer: null
   };
 
   /******************************************************************
@@ -236,6 +244,71 @@
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function tryCloseCurrentTab() {
+    const wasClosed = !!window.closed;
+    try { window.close(); } catch {}
+    if (window.closed || wasClosed) return;
+
+    try { window.open(location.href, '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.open('', '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.top?.close?.(); } catch {}
+    if (window.closed) return;
+
+    setTimeout(() => {
+      if (window.closed) return;
+      try { location.replace('about:blank'); } catch {}
+      setTimeout(() => {
+        try { window.close(); } catch {}
+      }, 100);
+    }, 350);
+  }
+
+  function triggerForceClose(reason = '') {
+    if (!state.forceCloseTriggered) {
+      state.forceCloseTriggered = true;
+      if (reason) log(reason);
+    }
+
+    state.forceCloseAttempts += 1;
+    log(`Force-close attempt ${state.forceCloseAttempts}/${CFG.maxCloseAttempts}`);
+    tryCloseCurrentTab();
+
+    if (state.forceCloseAttempts >= CFG.maxCloseAttempts) return;
+
+    setTimeout(() => {
+      if (window.closed) return;
+      triggerForceClose('');
+    }, CFG.forceCloseRetryMs);
+  }
+
+  function maybeTriggerForceClose() {
+    if (state.forceCloseTriggered) return;
+    if (!state.forceCloseDeadlineAt) return;
+    if (Date.now() < state.forceCloseDeadlineAt) return;
+    triggerForceClose('1-minute failsafe reached. Closing tab.');
+  }
+
+  function armForceCloseFailsafe() {
+    if (state.forceCloseDeadlineAt) return;
+    state.forceCloseDeadlineAt = Date.now() + CFG.forceCloseAfterMs;
+    state.forceCloseTriggered = false;
+    state.forceCloseAttempts = 0;
+    log('1-minute failsafe armed');
+
+    clearInterval(state.forceCloseTimer);
+    state.forceCloseTimer = setInterval(maybeTriggerForceClose, CFG.forceClosePollMs);
+
+    document.addEventListener('visibilitychange', maybeTriggerForceClose, true);
+    window.addEventListener('focus', maybeTriggerForceClose, true);
+    window.addEventListener('pageshow', maybeTriggerForceClose, true);
   }
 
   function textOf(el) {
@@ -744,6 +817,7 @@
     createUI();
     syncUI();
     log('Script started');
+    armForceCloseFailsafe();
     installObservers();
     watchRoute();
     startObserverHeartbeat();

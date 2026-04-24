@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.2
-// @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load.
+// @version      1.8.3
+// @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,12 +17,16 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.2';
+  const VERSION = '1.8.3';
 
   const CFG = {
     tickMs: 700,
     waitTimeoutMs: 30000,
     waitIntervalMs: 250,
+    forceCloseAfterMs: 60000,
+    forceClosePollMs: 1000,
+    forceCloseRetryMs: 900,
+    maxCloseAttempts: 4,
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
@@ -47,7 +51,11 @@
     drag: null,
     lastWaitLogAt: 0,
     lastElementClickSig: '',
-    lastElementClickAt: 0
+    lastElementClickAt: 0,
+    forceCloseDeadlineAt: 0,
+    forceCloseTriggered: false,
+    forceCloseAttempts: 0,
+    forceCloseTimer: null
   };
 
   function sleep(ms) {
@@ -56,6 +64,71 @@
 
   function now() {
     return Date.now();
+  }
+
+  function tryCloseCurrentTab() {
+    const wasClosed = !!window.closed;
+    try { window.close(); } catch {}
+    if (window.closed || wasClosed) return;
+
+    try { window.open(location.href, '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.open('', '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.top?.close?.(); } catch {}
+    if (window.closed) return;
+
+    setTimeout(() => {
+      if (window.closed) return;
+      try { location.replace('about:blank'); } catch {}
+      setTimeout(() => {
+        try { window.close(); } catch {}
+      }, 100);
+    }, 350);
+  }
+
+  function triggerForceClose(reason = '') {
+    if (!state.forceCloseTriggered) {
+      state.forceCloseTriggered = true;
+      if (reason) log(reason);
+    }
+
+    state.forceCloseAttempts += 1;
+    log(`Force-close attempt ${state.forceCloseAttempts}/${CFG.maxCloseAttempts}`);
+    tryCloseCurrentTab();
+
+    if (state.forceCloseAttempts >= CFG.maxCloseAttempts) return;
+
+    setTimeout(() => {
+      if (window.closed) return;
+      triggerForceClose('');
+    }, CFG.forceCloseRetryMs);
+  }
+
+  function maybeTriggerForceClose() {
+    if (state.forceCloseTriggered) return;
+    if (!state.forceCloseDeadlineAt) return;
+    if (now() < state.forceCloseDeadlineAt) return;
+    triggerForceClose('1-minute failsafe reached. Closing tab.');
+  }
+
+  function armForceCloseFailsafe() {
+    if (state.forceCloseDeadlineAt) return;
+    state.forceCloseDeadlineAt = now() + CFG.forceCloseAfterMs;
+    state.forceCloseTriggered = false;
+    state.forceCloseAttempts = 0;
+    log('1-minute failsafe armed');
+
+    try { clearInterval(state.forceCloseTimer); } catch {}
+    state.forceCloseTimer = setInterval(maybeTriggerForceClose, CFG.forceClosePollMs);
+
+    document.addEventListener('visibilitychange', maybeTriggerForceClose, true);
+    window.addEventListener('focus', maybeTriggerForceClose, true);
+    window.addEventListener('pageshow', maybeTriggerForceClose, true);
   }
 
   function norm(v) {
@@ -844,6 +917,7 @@
     log('Script start.');
     log('Page detected: APEX.');
     log(`Version: ${VERSION}`);
+    armForceCloseFailsafe();
     setStatus('Running');
 
     state.tickTimer = setInterval(() => {
