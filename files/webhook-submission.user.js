@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.17
+// @version      1.18
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.16';
+  const VERSION = '1.18';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -36,6 +36,7 @@
   const CFG = {
     webhookUrlKey: 'tm_pc_webhook_submit_url_v17',
     sentMetaKey: 'tm_pc_webhook_submit_sent_meta_v17',
+    postSuccessKey: 'tm_pc_webhook_post_success_v1',
     panelPosKey: 'tm_pc_webhook_submit_panel_pos_v17',
     stoppedKey: 'tm_pc_webhook_submit_stopped_v17',
 
@@ -567,6 +568,21 @@
     localStorage.removeItem(CFG.sentMetaKey);
   }
 
+  function setPostSuccess(job, signature) {
+    const payload = {
+      ok: true,
+      azId: normalizeText(job?.['AZ ID'] || ''),
+      postedAt: nowIso(),
+      signature: normalizeText(signature || ''),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+
+    try { GM_setValue(CFG.postSuccessKey, payload); } catch {}
+    try { localStorage.setItem(CFG.postSuccessKey, JSON.stringify(payload)); } catch {}
+    return payload;
+  }
+
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
@@ -885,6 +901,7 @@
         }
 
         setSentMeta({ signature, sentAt: nowIso(), azId: job['AZ ID'] });
+        setPostSuccess(job, signature);
         log('Webhook send success');
         await afterSuccess(job, bundle);
         state.busy = false;

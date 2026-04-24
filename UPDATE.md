@@ -28,6 +28,7 @@ For each script:
 | --- | --- |
 | AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js) |
 | AZ TO GWPC Shared Ticket Handoff | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-ticket-handoff.user.js) |
+| AZ TO GWPC 100 AgencyZoom Ticket Finisher + Tagger | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js) |
 
 ### Salesforce Lightning (APEX)
 
@@ -65,6 +66,7 @@ For each script:
 | Home Bot: Global Clear Launcher | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js) |
 | Home Bot: Clean All → Refresh → Home | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/clean-refresh-home.user.js) |
 | Home Bot: UI Dock Organizer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js) |
+| AZ TO GWPC 99 Payload Mirror + Non-AZ Tab Closer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js) |
 
 ## How auto-update works
 
