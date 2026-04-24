@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.4.2
-// @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Saves ON/OFF + Auto/Home across reloads. Uses visible AZ dock side-actions as the open signal, forces Main first, requires all AZ payload fields before continuing, then clicks Quotes exactly, clicks Auto/Home, pauses in background, resumes after 3s in front, and only moves on when Bot Quoted appears on that same ticket. FIX: also mirrors tm_az_current_job_v1 + tm_pc_current_job_v1 into localStorage.
+// @version      2.5.0
+// @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Fresh-start reload clears transient workflow data, restores active-on-reload, switches to Ignored tags, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
 // ==/UserScript==
@@ -18,11 +19,11 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.4.2';
+  const VERSION = '2.5.0';
 
   const CFG = {
     stageName: 'New Opportunities',
-    botQuotedTag: 'Bot Quoted',
+    savedQueryName: 'Ignored tags',
 
     openTryMs: 4200,
     openTotalMs: 12000,
@@ -31,11 +32,13 @@
     detailWaitMs: 12000,
     quoteTabWaitMs: 7000,
     pageWaitMs: 1500,
+    filterSettleMs: 1500,
     quotePreWaitMs: 5000,
     frontStableMs: 3000,
     waitForHideAfterQuoteMs: 10000,
-    tagPollMs: 1200,
-    tagWaitLogEveryMs: 8000,
+    ticketClosePollMs: 1200,
+    ticketCloseLogEveryMs: 8000,
+    nextRunAfterCloseMs: 3000,
     gapMs: 220,
     maxLogLines: 18,
 
@@ -56,7 +59,8 @@
 
     SHARED_JOB: 'tm_shared_az_job_v1',
     CURRENT_JOB: 'tm_pc_current_job_v1',
-    AZ_CURRENT_JOB: 'tm_az_current_job_v1'
+    AZ_CURRENT_JOB: 'tm_az_current_job_v1',
+    WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1'
   };
 
   const SEL = {
@@ -80,8 +84,56 @@
     topName: 'h3.currentCustomerName',
     topTags: '.az-dock__display-tags .az-def-badge, .az-dock__display-tags .az-def-badge.tag',
 
+    leadsDropdown: '#leadsDropdown',
+    leadsDropdownLabel: '#leadsDropdown .editing_filter_name',
+    savedQueryWrap: '#currentPipelineFilter .dropdown.savedQueryDropdown',
+    savedQueryItems: '#currentPipelineFilter .saved-query-item, #currentPipelineFilter .dropdown-item.saved-query-item',
+
     closeCandidates: 'button, a, [role="button"], .close, .btn-close, .az-dock__close'
   };
+
+  const CLEAR_EXACT_KEYS = new Set([
+    'tm_az_home_auto_payload_v1',
+    'tm_az_stage_runner_payload_v1',
+    KEYS.LAST_PAYLOAD,
+    KEYS.PAYLOAD_MAP,
+    KEYS.LAST_SAVED_ID,
+    KEYS.SCAN_STATE,
+    KEYS.SHARED_JOB,
+    KEYS.CURRENT_JOB,
+    KEYS.AZ_CURRENT_JOB,
+    'tm_apex_home_bot_payload_v1',
+    'tm_apex_home_bot_ready_v1',
+    'tm_apex_home_bot_active_row_v1',
+    'tm_pc_home_quote_grab_payload_v1',
+    'tm_pc_auto_quote_grab_payload_v1',
+    'tm_pc_webhook_bundle_v1',
+    'tm_pc_webhook_submit_sent_meta_v17',
+    'tm_pc_webhook_submit_url_v17',
+    'tm_pc_webhook_submit_stopped_v17',
+    'tm_pc_webhook_post_success_v1',
+    'tm_pc_payload_mirror_close_signal_v1',
+    'tm_pc_payload_mirror_last_handled_signal_v1',
+    'tm_pc_payload_mirror_close_attempted_v1',
+    'tm_az_gwpc_final_payload_v1',
+    'tm_az_gwpc_final_payload_ready_v1',
+    'tm_pc_header_timeout_runtime_v2',
+    'tm_pc_header_timeout_sent_events_v2',
+    'tm_pc_flow_stage_v1',
+    'tm_az_ticket_finisher_runs_v1',
+    KEYS.WORKFLOW_CLEANUP_REQUEST,
+    'tm_shared_cache_az_payload_v1',
+    'tm_shared_cache_apex_payload_v1',
+    'tm_shared_cache_apex_ready_v1',
+    'tm_shared_cache_apex_active_row_v1',
+    'tm_shared_cache_gwpc_home_quote_payload_v1',
+    'tm_shared_cache_gwpc_auto_quote_payload_v1'
+  ]);
+
+  const CLEAR_PREFIXES = [
+    'aqb_',
+    'tm_pc_payload_mirror_'
+  ];
 
   const FIELD_ORDER = [
     'AZ ID',
@@ -134,7 +186,8 @@
     log(`${SCRIPT_NAME} V${VERSION} loaded`, 'ok');
     log('Pick Auto or Home, then click Start', 'info');
     log(`Main must return ${FIELD_ORDER.length}/${FIELD_ORDER.length} AZ fields before Quotes`, 'info');
-    log('Ticket is only done when Bot Quoted appears', 'info');
+    log(`Start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
+    log('Ticket is only done when the finisher closes it', 'info');
     log('ESC stops the run', 'info');
 
     state.keyHandler = (e) => {
@@ -250,6 +303,47 @@
 
   function lower(v) {
     return norm(v).toLowerCase();
+  }
+
+  function shouldClearWorkflowKey(key) {
+    if (!key) return false;
+    if (CLEAR_EXACT_KEYS.has(key)) return true;
+    return CLEAR_PREFIXES.some(prefix => key.startsWith(prefix));
+  }
+
+  function clearStorageWorkflowKeys(storageObj) {
+    if (!storageObj) return 0;
+    const keys = [];
+    try {
+      for (let i = 0; i < storageObj.length; i++) {
+        const key = storageObj.key(i);
+        if (key && shouldClearWorkflowKey(key)) keys.push(key);
+      }
+    } catch {}
+
+    let cleared = 0;
+    for (const key of keys) {
+      try {
+        storageObj.removeItem(key);
+        cleared += 1;
+      } catch {}
+    }
+    return cleared;
+  }
+
+  function clearTransientWorkflowData() {
+    let cleared = 0;
+    cleared += clearStorageWorkflowKeys(localStorage);
+    cleared += clearStorageWorkflowKeys(sessionStorage);
+
+    for (const key of CLEAR_EXACT_KEYS) {
+      try {
+        GM_deleteValue(key);
+        cleared += 1;
+      } catch {}
+    }
+
+    return cleared;
   }
 
   function visible(el) {
@@ -570,6 +664,20 @@
     saveRunning(true);
     persistState();
 
+    if (!isRestore) {
+      state.processedIds.clear();
+      state.bgPauseLogged = false;
+      syncUi();
+      setStatus(`RELOADING (${state.mode.toUpperCase()})`);
+      const cleared = clearTransientWorkflowData();
+      log(`Cleared ${cleared} transient workflow key${cleared === 1 ? '' : 's'} before fresh run`, 'ok');
+      log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
+      setTimeout(() => {
+        if (!state.destroyed) location.reload();
+      }, 120);
+      return;
+    }
+
     if (state.busy) {
       syncUi();
       return;
@@ -613,109 +721,92 @@
           continue;
         }
 
+        const filterReady = await ensureIgnoredTagsFilter();
+        if (!filterReady) {
+          setStatus('Ignored tags failed');
+          log(`Failed to apply ${CFG.savedQueryName} filter`, 'error');
+          await sleep(1000);
+          continue;
+        }
+
         const cards = getStageCards();
         const pageLabel = getStagePageLabel();
         if (state.ui.page) state.ui.page.textContent = pageLabel || '—';
 
         if (!cards.length) {
-          log('No cards found in target stage', 'warn');
-          stopRun('No cards');
+          const moved = await goNextPage();
+          if (!moved) {
+            log(`Done. No cards found with ${CFG.savedQueryName}.`, 'ok');
+            stopRun('Done');
+            return;
+          }
+          log(`Next page | ${getStagePageLabel() || '...'}`, 'info');
+          await foregroundSleep(CFG.pageWaitMs);
+          continue;
+        }
+
+        const card = cards.find((candidate) => {
+          const ticketId = norm(candidate.getAttribute('data-id'));
+          return ticketId && !state.processedIds.has(ticketId);
+        });
+
+        if (!card) {
+          const moved = await goNextPage();
+          if (!moved) {
+            log(`Done. No unprocessed cards left in ${CFG.savedQueryName}.`, 'ok');
+            stopRun('Done');
+            return;
+          }
+          log(`Next page | ${getStagePageLabel() || '...'}`, 'info');
+          await foregroundSleep(CFG.pageWaitMs);
+          continue;
+        }
+
+        const ticketId = norm(card.getAttribute('data-id'));
+        const cardName = norm(card.querySelector(SEL.customerLink)?.textContent);
+
+        updateLastId(ticketId);
+        highlightCard(card, 'checking');
+        log(`Opening | ${ticketId} | ${cardName || 'Unknown'}`, 'info');
+
+        const opened = await openCard(card, ticketId);
+        if (!opened) {
+          highlightCard(card, 'error');
+          log(`OPEN FAILED | ${ticketId}`, 'error');
+          stopRun('OPEN FAILED');
           return;
         }
 
-        for (let i = 0; i < cards.length; i++) {
-          if (!state.running || state.destroyed) return;
+        highlightDock('grab');
 
-          await waitUntilFrontStable(CFG.frontStableMs);
-
-          const card = cards[i];
-          const ticketId = norm(card.getAttribute('data-id'));
-          const cardName = norm(card.querySelector(SEL.customerLink)?.textContent);
-
-          if (!ticketId) continue;
-          if (state.processedIds.has(ticketId)) continue;
-
-          updateLastId(ticketId);
-
-          if (cardHasTag(card, CFG.botQuotedTag)) {
-            state.processedIds.add(ticketId);
-            highlightCard(card, 'skip');
-            writeScanState('skip-closed-tag', ticketId, pageLabel);
-            log(`Skip closed-card tagged | ${ticketId} | ${cardName || 'Unknown'}`, 'warn');
-            await sleep(80);
-            continue;
-          }
-
-          highlightCard(card, 'checking');
-          log(`Opening | ${ticketId} | ${cardName || 'Unknown'}`, 'info');
-
-          const opened = await openCard(card, ticketId);
-          if (!opened) {
-            highlightCard(card, 'error');
-            log(`OPEN FAILED | ${ticketId}`, 'error');
-            stopRun('OPEN FAILED');
-            return;
-          }
-
-          const openInfo = getOpenTicketInfo();
-          if (openTicketHasTag(CFG.botQuotedTag)) {
-            state.processedIds.add(ticketId);
-            highlightDock('tagged');
-            highlightCard(card, 'skip');
-            writeScanState('skip-open-tag', openInfo.ticketId || ticketId, pageLabel);
-            log(`Skip open-ticket tagged | ${openInfo.ticketId || ticketId} | ${openInfo.name || cardName || 'Unknown'}`, 'warn');
-            await foregroundSleep(CFG.gapMs);
-            await closeTicket();
-            clearDockHighlight();
-            await foregroundSleep(CFG.gapMs);
-            continue;
-          }
-
-          highlightDock('grab');
-
-          const ready = await ensureMainAndPayloadReady({ ticketId, cardName, pageLabel });
-          if (!ready) {
-            highlightCard(card, 'error');
-            log(`MAIN/PAYLOAD FAILED | ${ticketId}`, 'error');
-            stopRun('MAIN/PAYLOAD FAILED');
-            return;
-          }
-
-          savePayload(ready.payload);
-          saveSharedJob(ready.payload);
-          highlightCard(card, 'saved');
-          writeScanState('payload-saved', ready.payload.ticketId, pageLabel);
-          log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/13`, 'ok');
-
-          const quoteStarted = await startQuoteFlow();
-          if (!quoteStarted) {
-            highlightCard(card, 'error');
-            log(`QUOTES FAILED | ${ticketId}`, 'error');
-            stopRun('QUOTES FAILED');
-            return;
-          }
-
-          const botDone = await waitForBotQuotedOnSameTicket(ticketId);
-          if (!botDone) return;
-
-          state.processedIds.add(ticketId);
-          log(`Bot Quoted detected | ${ticketId}`, 'ok');
-          await closeTicket();
-          clearDockHighlight();
-          await foregroundSleep(CFG.gapMs);
-        }
-
-        if (!state.running || state.destroyed) return;
-
-        const moved = await goNextPage();
-        if (!moved) {
-          log('Done. No more pages.', 'ok');
-          stopRun('Done');
+        const ready = await ensureMainAndPayloadReady({ ticketId, cardName, pageLabel });
+        if (!ready) {
+          highlightCard(card, 'error');
+          log(`MAIN/PAYLOAD FAILED | ${ticketId}`, 'error');
+          stopRun('MAIN/PAYLOAD FAILED');
           return;
         }
 
-        log(`Next page | ${getStagePageLabel() || '...'}`, 'info');
-        await foregroundSleep(CFG.pageWaitMs);
+        savePayload(ready.payload);
+        saveSharedJob(ready.payload);
+        highlightCard(card, 'saved');
+        writeScanState('payload-saved', ready.payload.ticketId, pageLabel);
+        log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/${FIELD_ORDER.length}`, 'ok');
+
+        const quoteStarted = await startQuoteFlow();
+        if (!quoteStarted) {
+          highlightCard(card, 'error');
+          log(`QUOTES FAILED | ${ticketId}`, 'error');
+          stopRun('QUOTES FAILED');
+          return;
+        }
+
+        const ticketClosed = await waitForTicketClosedByFinisher(ticketId);
+        if (!ticketClosed) return;
+
+        state.processedIds.add(ticketId);
+        clearDockHighlight();
+        await foregroundSleep(CFG.nextRunAfterCloseMs);
       }
     } finally {
       state.busy = false;
@@ -746,30 +837,113 @@
     return true;
   }
 
-  async function waitForBotQuotedOnSameTicket(ticketId) {
+  async function waitForTicketClosedByFinisher(ticketId) {
     let lastLogAt = 0;
 
     while (state.running && !state.destroyed) {
       await waitUntilFrontStable(CFG.frontStableMs);
 
       const info = getOpenTicketInfo();
+      if (!isTicketDrawerOpen() || !String(info.ticketId || '')) {
+        log(`Ticket closed after finisher | ${ticketId}`, 'ok');
+        return true;
+      }
+
       if (String(info.ticketId || '') !== String(ticketId) && String(info.ticketId || '') !== '') {
-        log(`Ticket changed while waiting for Bot Quoted | expected ${ticketId} got ${info.ticketId}`, 'error');
+        log(`Ticket changed while waiting for finisher close | expected ${ticketId} got ${info.ticketId}`, 'error');
         stopRun('TICKET CHANGED');
         return false;
       }
 
-      if (openTicketHasTag(CFG.botQuotedTag)) return true;
-
       const now = Date.now();
-      if (!lastLogAt || (now - lastLogAt) >= CFG.tagWaitLogEveryMs) {
-        log(`Waiting for Bot Quoted on ${ticketId}...`, 'warn');
+      if (!lastLogAt || (now - lastLogAt) >= CFG.ticketCloseWaitLogEveryMs) {
+        log(`Waiting for finisher to close ${ticketId}...`, 'warn');
         lastLogAt = now;
       }
 
-      await foregroundSleep(CFG.tagPollMs);
+      await foregroundSleep(CFG.ticketClosePollMs);
     }
 
+    return false;
+  }
+
+  function getCurrentSavedQueryLabel() {
+    return norm(document.querySelector(SEL.leadsDropdownLabel)?.textContent || document.querySelector(SEL.leadsDropdown)?.textContent || '');
+  }
+
+  function isIgnoredTagsSelected() {
+    return lower(getCurrentSavedQueryLabel()) === lower(CFG.savedQueryName);
+  }
+
+  function isSavedQueryDropdownOpen() {
+    const wrap = document.querySelector(SEL.savedQueryWrap);
+    const btn = document.querySelector(SEL.leadsDropdown);
+    return !!(
+      wrap?.classList.contains('show') ||
+      String(btn?.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
+    );
+  }
+
+  function findIgnoredTagsOption() {
+    return [...document.querySelectorAll(SEL.savedQueryItems)]
+      .filter(visible)
+      .find((el) => lower(el.textContent) === lower(CFG.savedQueryName)) || null;
+  }
+
+  async function openSavedQueryDropdown() {
+    const btn = document.querySelector(SEL.leadsDropdown);
+    if (!btn || !visible(btn)) {
+      log('Saved query dropdown button not found', 'error');
+      return false;
+    }
+
+    if (isSavedQueryDropdownOpen()) return true;
+
+    strongClick(btn);
+    await sleep(220);
+    if (isSavedQueryDropdownOpen()) return true;
+
+    try {
+      const $ = window.jQuery || window.$;
+      if ($ && typeof $(btn).dropdown === 'function') {
+        $(btn).dropdown('toggle');
+        await sleep(220);
+        if (isSavedQueryDropdownOpen()) return true;
+      }
+    } catch {}
+
+    return isSavedQueryDropdownOpen();
+  }
+
+  async function ensureIgnoredTagsFilter() {
+    if (isIgnoredTagsSelected()) return true;
+
+    const opened = await openSavedQueryDropdown();
+    if (!opened) {
+      log(`Could not open saved query dropdown for ${CFG.savedQueryName}`, 'error');
+      return false;
+    }
+
+    const item = findIgnoredTagsOption();
+    if (!item) {
+      log(`Saved query option not found: ${CFG.savedQueryName}`, 'error');
+      return false;
+    }
+
+    strongClick(item);
+    log(`Selected saved query: ${CFG.savedQueryName}`, 'info');
+
+    const started = Date.now();
+    while ((Date.now() - started) < 6000) {
+      if (!state.running || state.destroyed) return false;
+      if (isIgnoredTagsSelected()) {
+        await foregroundSleep(CFG.filterSettleMs);
+        return true;
+      }
+      await sleep(120);
+    }
+
+    log(`Saved query did not switch to ${CFG.savedQueryName}`, 'error');
     return false;
   }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.23
+// @version      1.0.24
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.23';
+  const VERSION = '1.0.24';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -84,7 +84,8 @@
     saveNote: 'button#add-note, button.btn-primary#add-note',
     tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
     tagForm: '#add-tag-form',
-    tagDropdown: '#add-tag-form > div > div > div.az-form-group.az-tags-select.mb-2 > div > button, button.btn.dropdown-toggle.btn-light[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle.btn-light[role="combobox"], button.dropdown-toggle[role="combobox"]'
+    tagDropdown: '#add-tag-form > div > div > div.az-form-group.az-tags-select.mb-2 > div > button, button.btn.dropdown-toggle.btn-light[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle.btn-light[role="combobox"], button.dropdown-toggle[role="combobox"]',
+    dockClose: '#serviceDetailDock .az-dock__close, #notePanelContainer .az-dock__close, .az-dock__close'
   };
 
   const CFG = {
@@ -1629,6 +1630,45 @@
     return true;
   }
 
+  function findDockCloseButton() {
+    const exact = findVisibleElements(SEL.dockClose)[0];
+    if (exact) return exact;
+
+    const roots = [
+      document.querySelector('#serviceDetailDock'),
+      document.querySelector('#notePanelContainer'),
+      getOpenDockRoot(),
+      document
+    ].filter(Boolean);
+
+    for (const root of roots) {
+      const found = Array.from(root.querySelectorAll('.az-dock__close')).find(visible);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  async function closeTicketDockAtEnd() {
+    const button = findDockCloseButton();
+    if (!button) {
+      log('Ticket close button not found');
+      return false;
+    }
+
+    strongClick(button);
+    log('Clicked: Ticket close');
+
+    const closed = await waitFor(() => !getOpenDockRoot(), 5000);
+    if (closed) {
+      log('Ticket drawer closed');
+      return true;
+    }
+
+    log('Ticket drawer did not close after click');
+    return false;
+  }
+
   function computeRunRecord(runs, azId) {
     return isPlainObject(runs[azId]) ? deepClone(runs[azId]) : {};
   }
@@ -1770,6 +1810,8 @@
         requestWorkflowCleanup(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
+        await sleep(3000);
+        await closeTicketDockAtEnd();
       } else {
         setStatus('Partial completion');
       }
