@@ -1,20 +1,81 @@
 // ==UserScript==
 // @name         GWPC Auto Drivers Prefill
 // @namespace    homebot.aqb-drivers
-// @version      1.8.8
+// @version      1.8.9
 // @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Excluded Driver, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  const SCRIPT_NAME = 'GWPC Auto Drivers Prefill';
+  const VERSION = '1.8.9';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_aqb_drivers_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  const LOG_MAX_LINES = 140;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
+  let _logs = [];
+
+  function log(msg) {
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    _logs.unshift(line);
+    if (_logs.length > LOG_MAX_LINES) _logs.length = LOG_MAX_LINES;
+    persistLogsThrottled();
+    try { console.log(`[${SCRIPT_NAME}] ${msg}`); } catch {}
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines: _logs.slice()
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    _logs.length = 0;
+    _lastLogPersistAt = 0;
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
+  }
 
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
@@ -405,6 +466,7 @@
 
   function setDoneFlag() {
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    log('Drivers done flag set — handing off to Vehicles');
   }
 
   function clearDoneFlag() {
@@ -422,8 +484,10 @@
     if (!findDriversTable()) return;
 
     running = true;
+    log('Gate + header + drivers table all OK — starting driver passes');
     try {
       for (let pass = 1; pass <= DRIVER_RUN_PASSES; pass++) {
+        log(`Driver pass ${pass}/${DRIVER_RUN_PASSES} start`);
         const start = Date.now();
         while (Date.now() - start < 1200) {
           if (!armed || done || isGloballyPaused()) return;
@@ -463,11 +527,17 @@
     clearLegacyDoneFlag();
     mountToggle();
     armStartDelay();
+    log(`Loaded v${VERSION}`);
 
     mo = new MutationObserver(tick);
     mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
     document.addEventListener('visibilitychange', tick);
+
+    setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
+
     tick();
   }
 
