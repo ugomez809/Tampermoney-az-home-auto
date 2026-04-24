@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.2
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, clears transient workflow data, reloads, restores active-on-reload, switches to Ignored tags, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
+// @version      2.5.3
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, clears transient workflow data plus sticky AZ handoff stop state, reloads, restores active-on-reload, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.2';
+  const VERSION = '2.5.3';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -86,8 +86,8 @@
     topName: 'h3.currentCustomerName',
     topTags: '.az-dock__display-tags .az-def-badge, .az-dock__display-tags .az-def-badge.tag',
 
-    leadsDropdown: '#leadsDropdown',
-    leadsDropdownLabel: '#leadsDropdown .editing_filter_name',
+    savedQueryButton: '#currentPipelineFilter .savedQueryDropdown > button.dropdown-toggle',
+    savedQueryLabel: '#currentPipelineFilter .savedQueryDropdown .editing_filter_name',
     savedQueryWrap: '#currentPipelineFilter .dropdown.savedQueryDropdown',
     savedQueryItems: '#currentPipelineFilter .saved-query-item, #currentPipelineFilter .dropdown-item.saved-query-item',
 
@@ -129,7 +129,10 @@
     'tm_shared_cache_apex_ready_v1',
     'tm_shared_cache_apex_active_row_v1',
     'tm_shared_cache_gwpc_home_quote_payload_v1',
-    'tm_shared_cache_gwpc_auto_quote_payload_v1'
+    'tm_shared_cache_gwpc_auto_quote_payload_v1',
+    'hb_shared_az_to_gwpc_ticket_handoff_v1',
+    'hb_shared_az_to_gwpc_ticket_handoff_last_applied_v1',
+    'hb_shared_az_to_gwpc_ticket_handoff_stop_v1'
   ]);
 
   const CLEAR_PREFIXES = [
@@ -992,7 +995,7 @@
   }
 
   function getCurrentSavedQueryLabel() {
-    return norm(document.querySelector(SEL.leadsDropdownLabel)?.textContent || document.querySelector(SEL.leadsDropdown)?.textContent || '');
+    return norm(document.querySelector(SEL.savedQueryLabel)?.textContent || document.querySelector(SEL.savedQueryButton)?.textContent || '');
   }
 
   function isIgnoredTagsSelected() {
@@ -1001,7 +1004,7 @@
 
   function isSavedQueryDropdownOpen() {
     const wrap = document.querySelector(SEL.savedQueryWrap);
-    const btn = document.querySelector(SEL.leadsDropdown);
+    const btn = document.querySelector(SEL.savedQueryButton);
     return !!(
       wrap?.classList.contains('show') ||
       String(btn?.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
@@ -1015,9 +1018,9 @@
   }
 
   async function openSavedQueryDropdown() {
-    const btn = document.querySelector(SEL.leadsDropdown);
+    const btn = document.querySelector(SEL.savedQueryButton);
     if (!btn || !visible(btn)) {
-      log('Saved query dropdown button not found', 'error');
+      log('Saved query filter button not found', 'error');
       return false;
     }
 
