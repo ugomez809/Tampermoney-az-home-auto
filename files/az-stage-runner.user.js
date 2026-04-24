@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.0
+// @version      2.5.1
 // @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Fresh-start reload clears transient workflow data, restores active-on-reload, switches to Ignored tags, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.0';
+  const VERSION = '2.5.1';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -39,6 +39,8 @@
     ticketClosePollMs: 1200,
     ticketCloseLogEveryMs: 8000,
     nextRunAfterCloseMs: 3000,
+    frontIdleReloadMs: 5 * 60 * 1000,
+    frontIdlePollMs: 1000,
     gapMs: 220,
     maxLogLines: 18,
 
@@ -171,7 +173,16 @@
     keyHandler: null,
     persistHandler: null,
     visibilityPersistHandler: null,
-    bgPauseLogged: false
+    bgPauseLogged: false,
+    frontIdleInterval: null,
+    frontIdleActivityHandler: null,
+    frontIdleFocusHandler: null,
+    frontIdleBlurHandler: null,
+    frontIdleFrontSinceAt: 0,
+    frontIdleLastActivityAt: Date.now(),
+    frontIdleLastSignature: '',
+    frontIdleArmedLogged: false,
+    frontIdleReloadPending: false
   };
 
   init();
@@ -206,6 +217,8 @@
     };
     document.addEventListener('visibilitychange', state.visibilityPersistHandler, true);
 
+    setupFrontIdleReloadWatchdog();
+
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
     if (state.running) {
@@ -237,6 +250,12 @@
     try { window.removeEventListener('beforeunload', state.persistHandler, true); } catch {}
     try { window.removeEventListener('pagehide', state.persistHandler, true); } catch {}
     try { document.removeEventListener('visibilitychange', state.visibilityPersistHandler, true); } catch {}
+    try { clearInterval(state.frontIdleInterval); } catch {}
+    try { document.removeEventListener('click', state.frontIdleActivityHandler, true); } catch {}
+    try { document.removeEventListener('keydown', state.frontIdleActivityHandler, true); } catch {}
+    try { document.removeEventListener('input', state.frontIdleActivityHandler, true); } catch {}
+    try { window.removeEventListener('focus', state.frontIdleFocusHandler, true); } catch {}
+    try { window.removeEventListener('blur', state.frontIdleBlurHandler, true); } catch {}
 
     const panel = document.getElementById('hb-az-stage-runner-panel');
     if (panel) panel.remove();
@@ -269,6 +288,106 @@
     try {
       localStorage.setItem(KEYS.RUNNING, on ? '1' : '0');
     } catch {}
+  }
+
+  function isPipelinePage() {
+    return /\/referral\/pipeline(?:$|[?#/])/i.test(`${location.pathname}${location.search}${location.hash}`);
+  }
+
+  function markFrontIdleActivity() {
+    state.frontIdleLastActivityAt = Date.now();
+    state.frontIdleArmedLogged = false;
+    state.frontIdleReloadPending = false;
+  }
+
+  function getFrontIdleSignature() {
+    const info = getOpenTicketInfo();
+    return [
+      location.pathname,
+      location.search,
+      location.hash,
+      isTicketDrawerOpen() ? 'open' : 'closed',
+      norm(info.ticketId || '')
+    ].join('|');
+  }
+
+  function setupFrontIdleReloadWatchdog() {
+    const onTrustedActivity = (event) => {
+      if (!event?.isTrusted) return;
+      if (!isPipelinePage()) return;
+      markFrontIdleActivity();
+    };
+    state.frontIdleActivityHandler = onTrustedActivity;
+    document.addEventListener('click', onTrustedActivity, true);
+    document.addEventListener('keydown', onTrustedActivity, true);
+    document.addEventListener('input', onTrustedActivity, true);
+
+    state.frontIdleFocusHandler = () => {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+    };
+    state.frontIdleBlurHandler = () => {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+    };
+    window.addEventListener('focus', state.frontIdleFocusHandler, true);
+    window.addEventListener('blur', state.frontIdleBlurHandler, true);
+
+    state.frontIdleLastSignature = getFrontIdleSignature();
+    state.frontIdleLastActivityAt = Date.now();
+    state.frontIdleInterval = setInterval(runFrontIdleReloadWatchdog, CFG.frontIdlePollMs);
+  }
+
+  function runFrontIdleReloadWatchdog() {
+    if (state.destroyed) return;
+
+    if (!isPipelinePage()) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      state.frontIdleLastSignature = getFrontIdleSignature();
+      return;
+    }
+
+    const signature = getFrontIdleSignature();
+    if (signature !== state.frontIdleLastSignature) {
+      state.frontIdleLastSignature = signature;
+      markFrontIdleActivity();
+    }
+
+    if (!isFrontTab()) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      return;
+    }
+
+    if (!state.frontIdleFrontSinceAt) {
+      state.frontIdleFrontSinceAt = Date.now();
+      state.frontIdleArmedLogged = false;
+    }
+
+    const now = Date.now();
+    const frontForMs = now - state.frontIdleFrontSinceAt;
+    const idleForMs = now - state.frontIdleLastActivityAt;
+
+    if (!state.frontIdleArmedLogged && frontForMs >= 1000) {
+      state.frontIdleArmedLogged = true;
+      log('Front idle reload armed: 5m unchanged on visible AZ page', 'info');
+    }
+
+    if (frontForMs < CFG.frontIdleReloadMs || idleForMs < CFG.frontIdleReloadMs) return;
+
+    if (state.frontIdleReloadPending) return;
+
+    state.frontIdleReloadPending = true;
+    log('Front idle timeout reached: reloading AgencyZoom pipeline page', 'warn');
+    persistState();
+    setTimeout(() => {
+      if (!state.destroyed) location.reload();
+    }, 120);
   }
 
   function persistState() {
