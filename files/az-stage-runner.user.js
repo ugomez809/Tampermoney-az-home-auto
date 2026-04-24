@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.16
+// @version      2.5.17
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.16';
+  const VERSION = '2.5.17';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -29,6 +29,8 @@
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'az-stage-runner';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
 
@@ -210,7 +212,10 @@
     storageWakeHandler: null,
     pendingStartTimer: 0,
     pendingReloadTimer: 0,
-    logsIntervalTimer: null
+    logsIntervalTimer: null,
+    lastStatus: '',
+    activityState: 'idle',
+    activityMessage: 'Idle'
   };
 
   init();
@@ -235,6 +240,7 @@
     log(`Auto start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
     log('Ticket is only done when the finisher closes it', 'info');
     log('ESC stops the run', 'info');
+    writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Idle' : 'Stopped');
 
     state.keyHandler = (e) => {
       if (e.key === 'Escape' && state.running) stopRun('ESC stop', { manual: true });
@@ -302,6 +308,7 @@
   function cleanup() {
     state.destroyed = true;
     state.busy = false;
+    try { writeActivityState('stopped', 'Cleanup'); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
 
@@ -893,7 +900,56 @@
   }
 
   function setStatus(text) {
+    state.lastStatus = text;
     if (state.ui.status) state.ui.status.textContent = text;
+    writeActivityState(deriveActivityStateFromStatus(text), text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function getActivityAzId() {
+    return norm(state.ui?.lastId?.textContent || '');
+  }
+
+  function deriveActivityStateFromStatus(text) {
+    const status = norm(text).toLowerCase();
+    if (!state.running && !state.busy) return 'stopped';
+    if (status.includes('paused')) return 'paused';
+    if (status.includes('running') || status.includes('starting') || status.includes('restoring') || status.includes('reloading')) return 'working';
+    if (status.includes('waiting') || status.includes('pick auto/home') || status.includes('refresh required')) return 'waiting';
+    if (status.includes('failed') || status.includes('fatal')) return 'error';
+    if (status.includes('complete') || status.includes('done')) return 'done';
+    if (status.includes('stopped')) return 'stopped';
+    return state.busy ? 'working' : 'idle';
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = norm(nextState).toLowerCase() || 'idle';
+    state.activityMessage = norm(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: getActivityAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function updateLastId(id) {
@@ -996,6 +1052,7 @@
 
     const panel = document.createElement('div');
     panel.id = 'hb-az-stage-runner-panel';
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.innerHTML = `
       <div id="hb-az-stage-runner-head">
         <div id="hb-az-stage-runner-title">${SCRIPT_NAME}</div>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.4
+// @version      1.18.5
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.4';
+  const VERSION = '1.18.5';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -31,6 +31,8 @@
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'webhook-submission';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
@@ -74,12 +76,16 @@
     toggleBtn: null,
     sendBtn: null,
     testBtn: null,
+    unpauseBtn: null,
     copyLogsBtn: null,
     clearLogsBtn: null,
     logLines: [],
     drag: null,
     savedWebhookUrl: '',
-    lastWaitKey: ''
+    lastWaitKey: '',
+    lastStatus: '',
+    activityState: 'idle',
+    activityMessage: 'Waiting for current job handoff'
   };
 
   init();
@@ -94,6 +100,7 @@
     log('Single sender armed');
     log(`Active webhook: ${getWebhookUrl() || '(empty)'}`);
     setStatus('Waiting for current job handoff');
+    writeActivityState('waiting', 'Waiting for current job handoff');
 
     state.tickTimer = setInterval(tick, CFG.tickMs);
     state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
@@ -111,6 +118,7 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    try { writeActivityState('stopped', 'Cleanup'); } catch {}
 
     try { persistWebhookFromUi(false); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
@@ -287,7 +295,41 @@
   }
 
   function setStatus(text) {
+    state.lastStatus = text;
     if (state.statusEl) state.statusEl.textContent = text;
+    writeActivityState(state.activityState, text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = normalizeText(nextState).toLowerCase() || 'idle';
+    state.activityMessage = normalizeText(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const job = readCurrentJob();
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: normalizeText(job['AZ ID'] || ''),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function readWebhookUrlFromGM() {
@@ -707,6 +749,47 @@
     return docs;
   }
 
+  function extractSubmissionNumberFromPage() {
+    for (const doc of getAllDocs()) {
+      let nodes = [];
+      try { nodes = Array.from(doc.querySelectorAll('.gw-Wizard--Title, .gw-TitleBar--title, .gw-TitleBar--Title, [role="heading"], h1, h2')); } catch {}
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const text = normalizeText(el.textContent || '');
+        const match = text.match(/Submission\s+(\d{6,})/i);
+        if (match) return match[1];
+      }
+    }
+    return '';
+  }
+
+  function getExpectedSubmissionNumber(job, bundle) {
+    return normalizeText(
+      job?.['SubmissionNumber'] ||
+      bundle?.['SubmissionNumber'] ||
+      bundle?.home?.data?.row?.['Submission Number'] ||
+      bundle?.home?.submissionNumber ||
+      bundle?.auto?.data?.row?.['Submission Number (Auto)'] ||
+      bundle?.auto?.data?.summary?.submissionNumber ||
+      bundle?.auto?.submissionNumber ||
+      ''
+    );
+  }
+
+  function getSubmissionGuard(job, bundle) {
+    const expected = getExpectedSubmissionNumber(job, bundle);
+    const active = extractSubmissionNumberFromPage();
+    if (!expected || !active || expected === active) {
+      return { ok: true, expected, active };
+    }
+    return {
+      ok: false,
+      expected,
+      active,
+      reason: `Submission mismatch: page ${active}, current job ${expected}`
+    };
+  }
+
   function findQuoteHeader() {
     for (const doc of getAllDocs()) {
       let nodes = [];
@@ -798,6 +881,7 @@
     clearForceSendRequest();
     renderButtons();
     log('Stored payloads retained after send');
+    writeActivityState('done', 'Sent | Payload retained | Stopped');
     setStatus('Sent | Payload retained | Stopped');
   }
 
@@ -915,11 +999,19 @@
     const resolved = getEffectiveBundle(job);
     const bundle = resolved.bundle;
     const source = resolved.source || 'none';
+    const shouldClearForceSendAfterFailure = force || hasForceSendRequest();
 
     const valid = validateCurrentJobAndBundle(job, bundle);
     if (!valid.ok) {
       setStatus(valid.reason);
       if (force) log(`Send blocked: ${valid.reason}`);
+      return;
+    }
+
+    const submissionGuard = getSubmissionGuard(job, bundle);
+    if (!submissionGuard.ok) {
+      setStatus(submissionGuard.reason);
+      if (force) log(`Send blocked: ${submissionGuard.reason}`);
       return;
     }
 
@@ -936,9 +1028,11 @@
 
     state.busy = true;
     renderButtons();
+    writeActivityState('working', force ? 'Sending force webhook' : 'Sending webhook');
     setStatus('Sending...');
     log(`POST ${endpoint}`);
     log(`Current Job AZ ID: ${job['AZ ID']}`);
+    log(`Current Job Submission: ${job['SubmissionNumber'] || '(blank)'}`);
     log(`Bundle source: ${source}`);
     log(`Bundle sections -> home:${hasMeaningfulHome(bundle) ? 'yes' : 'no'} auto:${hasMeaningfulAuto(bundle) ? 'yes' : 'no'} timeout:${hasPendingTimeout(bundle) ? 'yes' : 'no'}`);
     log(`Bundle errors -> home:${hasHomeError(bundle) ? 'yes' : 'no'} auto:${hasAutoError(bundle) ? 'yes' : 'no'}`);
@@ -978,25 +1072,34 @@
     // Release the pause flag + force-send request so the pipeline can continue
     // with the next ticket. Without this the shared pause stays set and every
     // downstream script sees "paused" forever after a transient network error.
-    if (hasForceSendRequest()) {
+    if (shouldClearForceSendAfterFailure) {
       clearForceSendRequest();
       log('Cleared force-send request after exhausted retries');
     }
+    writeActivityState('error', lastErr?.message || 'Send failed');
     renderButtons();
     log(`Send failed: ${lastErr?.message || lastErr || 'Unknown error'}`);
   }
 
   function tick() {
-    if (state.destroyed || state.busy) return;
+    if (state.destroyed) return;
+    if (state.busy) {
+      writeActivityState('working', state.lastStatus || 'Sending webhook');
+      return;
+    }
     const forceSend = hasForceSendRequest();
     if (isGloballyPaused() && !forceSend) {
+      writeActivityState('paused', 'Paused by shared selector');
       setStatus('Paused by shared selector');
       return;
     }
     if (!state.running && !forceSend) {
+      writeActivityState('stopped', 'Stopped');
       setStatus('Stopped');
       return;
     }
+
+    writeActivityState('waiting', state.lastStatus || 'Waiting for sender trigger');
 
     const job = readCurrentJob();
     const resolved = getEffectiveBundle(job);
@@ -1024,6 +1127,17 @@
     }
 
     clearWaitLog();
+
+    const submissionGuard = getSubmissionGuard(job, bundle);
+    if (!submissionGuard.ok) {
+      state.quoteSeenAt = 0;
+      setStatus(submissionGuard.reason);
+      logWait(
+        `wait-submission:${submissionGuard.expected}:${submissionGuard.active}`,
+        `Holding send: page submission ${submissionGuard.active} != current job ${submissionGuard.expected}`
+      );
+      return;
+    }
 
     if (!forceSend) {
       const stageReady = matchesStage('home', 'sender', job['AZ ID']) || matchesStage('auto', 'sender', job['AZ ID']);
@@ -1158,6 +1272,7 @@
     }
     if (state.sendBtn) state.sendBtn.disabled = state.busy;
     if (state.testBtn) state.testBtn.disabled = state.busy;
+    if (state.unpauseBtn) state.unpauseBtn.disabled = state.busy || (!isGloballyPaused() && !hasForceSendRequest());
   }
 
   function buildUI() {
@@ -1185,6 +1300,7 @@
 
     const panel = document.createElement('div');
     panel.id = 'az-to-gwpc-webhook-panel';
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.innerHTML = `
       <div class="hb-head">${SCRIPT_NAME} V${VERSION}</div>
       <div class="hb-body">
@@ -1192,6 +1308,7 @@
           <button id="hb-toggle" class="hb-btn-red">STOP</button>
           <button id="hb-send" class="hb-btn-blue">SEND NOW</button>
           <button id="hb-test" class="hb-btn-orange">TEST SEND</button>
+          <button id="hb-unpause" class="hb-btn-gray">UNPAUSE</button>
         </div>
         <div class="hb-field" style="margin-bottom:8px">
           <div class="hb-label">Paste your webhook here</div>
@@ -1219,6 +1336,7 @@
     state.toggleBtn = panel.querySelector('#hb-toggle');
     state.sendBtn = panel.querySelector('#hb-send');
     state.testBtn = panel.querySelector('#hb-test');
+    state.unpauseBtn = panel.querySelector('#hb-unpause');
     state.copyLogsBtn = panel.querySelector('#hb-copy-logs');
     state.clearLogsBtn = panel.querySelector('#hb-clear-logs');
 
@@ -1230,6 +1348,7 @@
       else sessionStorage.setItem(CFG.stoppedKey, '1');
       if (state.running) clearSentMeta();
       renderButtons();
+      writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Running' : 'Stopped');
       setStatus(state.running ? 'Running' : 'Stopped');
       log(state.running ? 'Sender resumed' : 'Stopped for this page session');
       clearWaitLog();
@@ -1244,6 +1363,17 @@
       tick();
     });
     state.testBtn.addEventListener('click', sendTestWebhook);
+    state.unpauseBtn.addEventListener('click', () => {
+      const hadPause = isGloballyPaused() || hasForceSendRequest();
+      clearForceSendRequest();
+      clearWaitLog();
+      state.quoteSeenAt = 0;
+      renderButtons();
+      writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Running' : 'Stopped');
+      setStatus(state.running ? 'Running' : 'Stopped');
+      if (hadPause) log('Shared pause cleared manually');
+      tick();
+    });
 
     state.webhookUrlEl.addEventListener('input', () => { persistWebhookFromUi(false); });
     state.webhookUrlEl.addEventListener('change', () => { persistWebhookFromUi(true); });

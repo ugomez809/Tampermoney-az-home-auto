@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.7.4
+// @version      1.7.5
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Cross-Origin UI Dock Organizer';
-  const VERSION = '1.7.4';
+  const VERSION = '1.7.5';
 
   // Log-export integration — 3-origin dynamic key.
   const LOG_PERSIST_KEY = (() => {
@@ -73,9 +73,29 @@
     hideId: 'hb-ui-dock-organizer-hide-v14',
     rescanId: 'hb-ui-dock-organizer-rescan-v13',
     logsBtnId: 'hb-ui-dock-organizer-logs-btn-v13',
+    runtimeId: 'hb-ui-dock-organizer-runtime-v15',
     logsWrapId: 'hb-ui-dock-organizer-logs-wrap-v13',
     logsId: 'hb-ui-dock-organizer-logs-v13',
     styleId: 'hb-ui-dock-organizer-style-v13'
+  };
+
+  const ORIGIN_SCRIPT_ORDER = {
+    agencyzoom: [
+      'shared-ticket-handoff',
+      'az-stage-runner',
+      'az-ticket-finisher-tagger'
+    ],
+    policycenter: [
+      'shared-ticket-handoff',
+      'home-quote-grabber',
+      'dwelling-water-rule',
+      'auto-quote-grabber',
+      'aqb-drivers',
+      'aqb-vehicles',
+      'aqb-specialty-product',
+      'webhook-submission'
+    ],
+    apex: []
   };
 
   const SCRIPT_PANEL_MAP = {
@@ -94,11 +114,76 @@
     lastRescanAt: 0,
     lastDockedCount: -1,
     uiHidden: false,
-    activePanels: 0
+    activePanels: 0,
+    runtimeCount: 0
   };
 
   function clamp(n, min, max) {
     return Math.min(Math.max(n, min), max);
+  }
+
+  function normalizeText(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function getOriginBucket() {
+    const host = String(location.hostname || '').toLowerCase();
+    if (host.includes('agencyzoom.com')) return 'agencyzoom';
+    if (host.includes('lightning.force.com')) return 'apex';
+    return 'policycenter';
+  }
+
+  function isTerminalActivityState(nextState) {
+    return ['done', 'error', 'stopped'].includes(nextState);
+  }
+
+  function normalizeActivityState(nextState) {
+    const stateName = normalizeText(nextState).toLowerCase();
+    if (stateName === 'active') return 'working';
+    return stateName || 'idle';
+  }
+
+  function isFreshActivityEntry(entry) {
+    const updatedAtMs = Date.parse(entry?.updatedAt || '');
+    if (!Number.isFinite(updatedAtMs)) return false;
+    return (Date.now() - updatedAtMs) <= CFG.activeStaleMs;
+  }
+
+  function getStateRank(stateName) {
+    switch (stateName) {
+      case 'working': return 0;
+      case 'error': return 1;
+      case 'waiting': return 2;
+      case 'paused': return 3;
+      case 'idle': return 4;
+      case 'done': return 5;
+      case 'stopped': return 6;
+      case 'stale': return 7;
+      default: return 8;
+    }
+  }
+
+  function getStateTone(stateName) {
+    switch (stateName) {
+      case 'working': return 'background:#14532d;color:#dcfce7;border-color:rgba(74,222,128,.35);';
+      case 'error': return 'background:#7f1d1d;color:#fee2e2;border-color:rgba(248,113,113,.35);';
+      case 'waiting': return 'background:#1e3a8a;color:#dbeafe;border-color:rgba(96,165,250,.35);';
+      case 'paused': return 'background:#78350f;color:#fef3c7;border-color:rgba(251,191,36,.35);';
+      case 'done': return 'background:#064e3b;color:#ccfbf1;border-color:rgba(45,212,191,.35);';
+      case 'stopped': return 'background:#374151;color:#e5e7eb;border-color:rgba(156,163,175,.35);';
+      case 'stale': return 'background:#111827;color:#cbd5e1;border-color:rgba(148,163,184,.28);';
+      default: return 'background:#1f2937;color:#e5e7eb;border-color:rgba(148,163,184,.28);';
+    }
+  }
+
+  function formatAge(ageMs) {
+    if (!Number.isFinite(ageMs) || ageMs < 0) return 'n/a';
+    const seconds = Math.max(0, Math.floor(ageMs / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h`;
   }
 
   function cleanup() {
@@ -640,6 +725,13 @@
 
   function detectScriptId(el) {
     if (!(el instanceof HTMLElement)) return '';
+    const explicit = normalizeText(
+      el.getAttribute('data-hb-script-id') ||
+      el.dataset?.hbScriptId ||
+      el.querySelector?.('[data-hb-script-id]')?.getAttribute('data-hb-script-id') ||
+      ''
+    );
+    if (explicit) return explicit;
     if (el.id && SCRIPT_PANEL_MAP[el.id]) return SCRIPT_PANEL_MAP[el.id];
     return '';
   }
@@ -656,10 +748,47 @@
   function isScriptActive(scriptId, activityMap) {
     if (!scriptId) return false;
     const entry = activityMap?.[scriptId];
-    if (!entry || String(entry.state || '').toLowerCase() !== 'active') return false;
-    const updatedAt = Date.parse(entry.updatedAt || '');
-    if (!Number.isFinite(updatedAt)) return false;
-    return (Date.now() - updatedAt) <= CFG.activeStaleMs;
+    if (!entry) return false;
+    if (normalizeActivityState(entry.state) !== 'working') return false;
+    return isFreshActivityEntry(entry);
+  }
+
+  function buildRuntimeEntries(activityMap) {
+    const bucket = getOriginBucket();
+    const orderedIds = ORIGIN_SCRIPT_ORDER[bucket] || [];
+    const orderedIndex = new Map(orderedIds.map((id, index) => [id, index]));
+    const entries = Object.values(activityMap || {})
+      .filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry))
+      .map((entry) => {
+        const rawState = normalizeActivityState(entry.state);
+        const updatedAtMs = Date.parse(entry.updatedAt || '');
+        const stale = !isTerminalActivityState(rawState) && (!Number.isFinite(updatedAtMs) || (Date.now() - updatedAtMs) > CFG.activeStaleMs);
+        return {
+          scriptId: normalizeText(entry.scriptId || ''),
+          scriptName: normalizeText(entry.scriptName || entry.source || entry.scriptId || 'Unknown script'),
+          state: stale ? 'stale' : rawState,
+          rawState,
+          message: normalizeText(entry.message || ''),
+          azId: normalizeText(entry.azId || ''),
+          ageMs: Number.isFinite(updatedAtMs) ? (Date.now() - updatedAtMs) : Infinity
+        };
+      })
+      .filter((entry) => entry.scriptId);
+
+    entries.sort((a, b) => {
+      const aRank = getStateRank(a.state);
+      const bRank = getStateRank(b.state);
+      if (aRank !== bRank) return aRank - bRank;
+
+      const aOrder = orderedIndex.has(a.scriptId) ? orderedIndex.get(a.scriptId) : 999;
+      const bOrder = orderedIndex.has(b.scriptId) ? orderedIndex.get(b.scriptId) : 999;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+
+      if (a.ageMs !== b.ageMs) return a.ageMs - b.ageMs;
+      return a.scriptName.localeCompare(b.scriptName);
+    });
+
+    return entries;
   }
 
   function applyActiveHighlights(items) {
@@ -673,6 +802,35 @@
     }
 
     state.activePanels = activePanels;
+  }
+
+  function renderRuntimeList(entries) {
+    const runtime = document.getElementById(UI.runtimeId);
+    if (!runtime) return;
+
+    if (!entries.length) {
+      runtime.innerHTML = '<div class="runtime-empty">No runtime publishers yet</div>';
+      return;
+    }
+
+    runtime.innerHTML = entries.map((entry) => {
+      const detailBits = [];
+      if (entry.azId) detailBits.push(`AZ ${escapeHtml(entry.azId)}`);
+      detailBits.push(`age ${escapeHtml(formatAge(entry.ageMs))}`);
+      const detailLine = detailBits.join(' | ');
+      const message = entry.message || 'No message';
+
+      return `
+        <div class="runtime-row" data-script-id="${escapeHtml(entry.scriptId)}">
+          <div class="runtime-badge" style="${getStateTone(entry.state)}">${escapeHtml(entry.state.toUpperCase())}</div>
+          <div class="runtime-meta">
+            <div class="runtime-name">${escapeHtml(entry.scriptName)}</div>
+            <div class="runtime-msg">${escapeHtml(message)}</div>
+            <div class="runtime-age">${escapeHtml(detailLine)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
   }
 
   function getOrganizerRect() {
@@ -779,6 +937,51 @@
         gap:8px;
         margin-bottom:8px;
       }
+      #${UI.runtimeId}{
+        display:grid;
+        gap:6px;
+        margin-top:8px;
+        max-height:200px;
+        overflow:auto;
+      }
+      #${UI.panelId} .runtime-row{
+        display:grid;
+        grid-template-columns:auto 1fr;
+        gap:8px;
+        align-items:start;
+        padding:7px 8px;
+        border-radius:8px;
+        background:rgba(255,255,255,.04);
+        border:1px solid rgba(255,255,255,.08);
+      }
+      #${UI.panelId} .runtime-badge{
+        border:1px solid rgba(255,255,255,.12);
+        border-radius:999px;
+        padding:2px 6px;
+        font-size:10px;
+        font-weight:700;
+        letter-spacing:.02em;
+        white-space:nowrap;
+      }
+      #${UI.panelId} .runtime-meta{
+        min-width:0;
+      }
+      #${UI.panelId} .runtime-name{
+        font-weight:700;
+        margin-bottom:2px;
+      }
+      #${UI.panelId} .runtime-msg,
+      #${UI.panelId} .runtime-age,
+      #${UI.panelId} .runtime-empty{
+        font-size:11px;
+        opacity:.86;
+      }
+      #${UI.panelId} .runtime-msg,
+      #${UI.panelId} .runtime-age{
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+      }
       #${UI.panelId} button{
         border:1px solid rgba(255,255,255,.12);
         border-radius:8px;
@@ -838,6 +1041,7 @@
           <button id="${UI.rescanId}" type="button">RESCAN</button>
           <button id="${UI.logsBtnId}" type="button">LOGS</button>
         </div>
+        <div id="${UI.runtimeId}"></div>
         <div id="${UI.logsWrapId}">
           <div id="${UI.logsId}"></div>
         </div>
@@ -885,6 +1089,8 @@
     const count = document.getElementById(UI.countId);
     const toggle = document.getElementById(UI.toggleId);
     const hide = document.getElementById(UI.hideId);
+    const runtimeEntries = buildRuntimeEntries(readScriptActivityMap());
+    state.runtimeCount = runtimeEntries.length;
 
     if (status) {
       status.textContent = state.running ? 'RUNNING' : 'STOPPED';
@@ -892,7 +1098,7 @@
     }
 
     if (count) {
-      count.textContent = `${state.registry.size} UI | ${state.activePanels} active`;
+      count.textContent = `${state.registry.size} UI | ${state.activePanels} working | ${state.runtimeCount} scripts`;
     }
 
     if (toggle) {
@@ -907,6 +1113,7 @@
       hide.classList.toggle('off', !state.uiHidden);
     }
 
+    renderRuntimeList(runtimeEntries);
     renderLogs();
   }
 
@@ -964,6 +1171,15 @@
   function renderLogs() {
     const logs = document.getElementById(UI.logsId);
     if (logs) logs.textContent = state.logs.join('\n');
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function loadLogsOpen() {

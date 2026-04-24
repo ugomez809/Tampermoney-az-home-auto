@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.4
+// @version      1.9.5
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.4';
+  const VERSION = '1.9.5';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -33,6 +33,8 @@
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'shared-ticket-handoff';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
@@ -79,7 +81,10 @@
     logs: [],
     ui: null,
     lastIdleKey: '',
-    lastAzSig: ''
+    lastAzSig: '',
+    lastStatus: '',
+    activityState: 'idle',
+    activityMessage: 'Running'
   };
 
   init();
@@ -90,6 +95,7 @@
     log(isAzOrigin() ? 'Mode: AZ capture' : isGwpcOrigin() ? 'Mode: GWPC apply' : 'Mode: idle');
     ensureGwpcEntryResetOnce();
     setStatus(state.running ? 'Running' : 'Stopped');
+    writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Running' : 'Stopped');
     setInterval(tick, CFG.tickMs);
     setInterval(logsTick, LOG_TICK_MS);
     window.addEventListener('storage', handleLogClearStorageEvent, true);
@@ -98,13 +104,22 @@
   }
 
   function tick() {
-    if (!state.running || state.busy) return;
+    if (!state.running) {
+      writeActivityState('stopped', 'Stopped');
+      return;
+    }
+    if (state.busy) {
+      refreshActivityHeartbeat();
+      return;
+    }
     if (isGloballyPaused() && !hasForceSendRequest()) {
+      writeActivityState('paused', 'Paused by shared selector');
       setStatus('Paused by shared selector');
       return;
     }
 
     state.busy = true;
+    writeActivityState('working', isAzOrigin() ? 'Capturing ticket handoff' : isGwpcOrigin() ? 'Applying ticket handoff' : 'Unsupported origin');
 
     Promise.resolve()
       .then(() => {
@@ -113,11 +128,13 @@
         setIdle('unsupported', 'Unsupported origin');
       })
       .catch((err) => {
+        writeActivityState('error', err?.message || 'Failed');
         log(`Failed: ${err?.message || err}`);
         setStatus('Failed');
       })
       .finally(() => {
         state.busy = false;
+        refreshActivityHeartbeat();
       });
   }
 
@@ -210,8 +227,8 @@
     const handoff = gmGetJson(GM_KEYS.HANDOFF, null);
     if (!handoff || typeof handoff !== 'object') {
       if (forceSend) {
-        const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
-        if (currentJob?.['AZ ID']) {
+        const currentJob = readCurrentJob();
+        if (currentJob['AZ ID']) {
           setIdle('gw-force-existing-job', `Force send using existing current job ${currentJob['AZ ID']}`);
           return;
         }
@@ -223,8 +240,8 @@
     const ageMs = Date.now() - toMs(handoff.savedAt);
     if (!Number.isFinite(ageMs) || ageMs > CFG.handoffMaxAgeMs) {
       if (forceSend) {
-        const currentJob = safeJsonParse(localStorage.getItem('tm_pc_current_job_v1'), null);
-        if (currentJob?.['AZ ID']) {
+        const currentJob = readCurrentJob();
+        if (currentJob['AZ ID']) {
           setIdle('gw-force-stale-handoff', `Force send using existing current job ${currentJob['AZ ID']}`);
           return;
         }
@@ -272,9 +289,9 @@
     ].join(' | ');
 
     const lastApplied = localStorage.getItem(LS_KEYS.LAST_APPLIED) || '';
-    const currentJob = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), {}) || {};
+    const currentJob = readCurrentJob();
 
-    const currentAzId = clean(currentJob['AZ ID'] || currentJob.azId || '');
+    const currentAzId = clean(currentJob['AZ ID']);
     const currentName = clean(currentJob['Name'] || currentJob.name || '');
     const currentAddress = clean(currentJob['Mailing Address'] || currentJob.mailingAddress || '');
 
@@ -299,8 +316,8 @@
         'Zip': clean(currentJob['Zip'] || handoff.zip || '')
       };
 
-      localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(enrichedJob, null, 2));
-      maybeAdvanceGwpcFlow(enrichedJob);
+      const storedJob = writeCurrentJob(enrichedJob);
+      maybeAdvanceGwpcFlow(storedJob);
       setIdle('gw-already-applied', `GWPC linked ${handoff.ticketId}`);
       return;
     }
@@ -330,15 +347,15 @@
       'Zip': clean(currentJob['Zip'] || handoff.zip || '')
     };
 
-    localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(nextJob, null, 2));
+    const storedJob = writeCurrentJob(nextJob);
     localStorage.setItem(LS_KEYS.LAST_APPLIED, applySig);
 
-    log(`GWPC current job written | AZ ID ${nextJob['AZ ID']}`);
-    log(`GWPC Name: ${nextJob['Name']}`);
-    log(`GWPC Address: ${nextJob['Mailing Address']}`);
-    log(`GWPC Submission: ${nextJob['SubmissionNumber'] || '(blank)'}`);
-    maybeAdvanceGwpcFlow(nextJob);
-    setStatus(`GWPC linked ${nextJob['AZ ID']}`);
+    log(`GWPC current job written | AZ ID ${storedJob['AZ ID']}`);
+    log(`GWPC Name: ${storedJob['Name']}`);
+    log(`GWPC Address: ${storedJob['Mailing Address']}`);
+    log(`GWPC Submission: ${storedJob['SubmissionNumber'] || '(blank)'}`);
+    maybeAdvanceGwpcFlow(storedJob);
+    setStatus(`GWPC linked ${storedJob['AZ ID']}`);
   }
 
   function readFlowStage() {
@@ -698,6 +715,17 @@
     for (const key of keysToRemove) {
       try { localStorage.removeItem(key); } catch {}
     }
+    try { GM_setValue(GWPC_KEYS.currentJob, null); } catch {}
+  }
+
+  function readCurrentJob() {
+    let job = normalizeCurrentJob(safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null));
+    if (job['AZ ID']) return job;
+
+    job = normalizeCurrentJob(gmGetJson(GWPC_KEYS.currentJob, null));
+    if (job['AZ ID']) return job;
+
+    return normalizeCurrentJob(safeJsonParse(localStorage.getItem(GWPC_KEYS.legacySharedJob), null));
   }
 
   function normalizeCurrentJob(job) {
@@ -760,6 +788,7 @@
     const next = normalizeCurrentJob(job);
     next.updatedAt = next.updatedAt || new Date().toISOString();
     localStorage.setItem(GWPC_KEYS.currentJob, JSON.stringify(next, null, 2));
+    try { GM_setValue(GWPC_KEYS.currentJob, next); } catch {}
     return next;
   }
 
@@ -902,11 +931,11 @@
     const seedJob = buildSeedJobFromHandoff(handoff);
     if (!seedJob['AZ ID']) return null;
 
-    const current = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null);
-    const currentAzId = clean(current?.['AZ ID'] || current?.azId || '');
-    const currentName = clean(current?.['Name'] || current?.name || '');
-    const currentAddress = clean(current?.['Mailing Address'] || current?.mailingAddress || '');
-    const currentSubmission = clean(current?.['SubmissionNumber'] || current?.submissionNumber || '');
+    const current = readCurrentJob();
+    const currentAzId = clean(current['AZ ID']);
+    const currentName = clean(current['Name']);
+    const currentAddress = clean(current['Mailing Address']);
+    const currentSubmission = clean(current['SubmissionNumber']);
     const sameAz = currentAzId && currentAzId === seedJob['AZ ID'];
     const nextJob = {
       'AZ ID': seedJob['AZ ID'],
@@ -930,18 +959,66 @@
     ensureSeedBundle(seedJob);
     ensureSeedPayload(GWPC_KEYS.homePayload, 'home', seedJob);
     ensureSeedPayload(GWPC_KEYS.autoPayload, 'auto', seedJob);
-    return normalizeCurrentJob(safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null));
+    return readCurrentJob();
   }
 
   function setIdle(key, text) {
     if (state.lastIdleKey === key) return;
     state.lastIdleKey = key;
+    writeActivityState('waiting', text);
     setStatus(text);
     log(text);
   }
 
   function setStatus(text) {
+    state.lastStatus = text;
     if (state.ui?.status) state.ui.status.textContent = text;
+    writeActivityState(state.activityState, text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function getActivityAzId() {
+    if (isGwpcOrigin()) return clean(readCurrentJob()['AZ ID'] || '');
+    if (isAzOrigin()) {
+      const handoff = gmGetJson(GM_KEYS.HANDOFF, null);
+      return clean(handoff?.ticketId || handoff?.azId || '');
+    }
+    return '';
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = clean(nextState).toLowerCase() || 'idle';
+    state.activityMessage = clean(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: getActivityAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
+  }
+
+  function refreshActivityHeartbeat() {
+    if (!['idle', 'waiting', 'working', 'paused', 'active'].includes(state.activityState)) return;
+    writeActivityState(state.activityState, state.activityMessage);
   }
 
   function log(msg) {
@@ -1004,6 +1081,7 @@
 
     const panel = document.createElement('div');
     panel.id = 'hb-shared-az-gwpc-panel';
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.style.cssText = [
       'position:fixed',
       `right:${CFG.panelRight}px`,
@@ -1060,6 +1138,7 @@
       }
       toggleBtn.textContent = state.running ? 'STOP' : 'START';
       toggleBtn.style.background = state.running ? '#b91c1c' : '#166534';
+      writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Running' : 'Stopped');
       setStatus(state.running ? 'Running' : 'Stopped');
       state.lastIdleKey = '';
     });

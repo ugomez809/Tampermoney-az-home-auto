@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.13
+// @version      1.8.14
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, falls back to page-state specialty start if the handoff flag disappears, and shows a live debug panel with deduped detailed logs. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -18,9 +18,12 @@
 
   /************* CONFIG *************/
   const SCRIPT_NAME = 'GWPC Auto Specialty Quote';
-  const VERSION = '1.8.13';
+  const VERSION = '1.8.14';
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'aqb-specialty-product';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_aqb_specialty_product_logs_v1';
@@ -33,7 +36,9 @@
   let _destroyed = false;
 
   const WAIT_KEY = 'aqb_step_specialty_start';
+  const WAIT_CONTEXT_KEY = 'aqb_step_specialty_start_azid';
   const DONE_KEY = 'aqb_step_specialty_done';
+  const DONE_CONTEXT_KEY = 'aqb_step_specialty_done_azid';
 
   const AFTER_FLAG_WAIT_MS   = 3000; // wait 3s after flag becomes 1
   const AFTER_REMOVE_WAIT_MS = 3000; // wait 3s after clicking Remove
@@ -70,6 +75,8 @@
   let logs = [];
   let ui = {};
   let inferStartSeenAt = 0;
+  let activityState = 'idle';
+  let activityMessage = 'Watching specialty flow';
 
   // track "flag became 1" moment
   let sawFlagAt = 0;
@@ -82,6 +89,7 @@
     const panel = document.createElement('div');
     panel.id = 'tm-aqb-specialty-panel';
     panel.setAttribute(UI_ATTR, '1');
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.style.cssText =
       'position:fixed;right:12px;bottom:12px;z-index:2147483647;width:360px;' +
       'background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:12px;' +
@@ -122,7 +130,10 @@
       ui.toggle.style.background = armed ? '#2563eb' : '#475569';
       log(armed ? 'Script armed from panel' : 'Script stopped from panel');
       if (!armed) {
+        writeActivityState('stopped', 'Stopped');
         setStatus('Stopped');
+      } else {
+        writeActivityState('waiting', 'Watching specialty flow');
       }
     });
 
@@ -161,6 +172,38 @@
 
   function setStatus(text) {
     if (ui.status) ui.status.textContent = text;
+    writeActivityState(activityState, text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function writeActivityState(nextState, message = '') {
+    activityState = normalizeAzId(nextState).toLowerCase() || 'idle';
+    activityMessage = normalizeAzId(message || activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: activityState,
+      message: activityMessage,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function log(message) {
@@ -234,6 +277,9 @@
   }
 
   function logWait(key, message, statusText = message) {
+    if (!['paused', 'stopped', 'done', 'error', 'working'].includes(activityState)) {
+      writeActivityState('waiting', statusText);
+    }
     setStatus(statusText);
     if (lastWaitKey === key) return;
     lastWaitKey = key;
@@ -400,7 +446,30 @@
   }
 
   function waitKeyReady() {
-    try { return localStorage.getItem(WAIT_KEY) === '1'; } catch { return false; }
+    const azId = readCurrentAzId();
+    if (!azId) return false;
+    try {
+      return localStorage.getItem(WAIT_KEY) === '1' && normalizeAzId(localStorage.getItem(WAIT_CONTEXT_KEY) || '') === azId;
+    } catch {
+      return false;
+    }
+  }
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function normalizeAzId(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function readCurrentAzId() {
+    try {
+      const raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+      return normalizeAzId(raw?.['AZ ID'] || raw?.azId || raw?.ticketId || '');
+    } catch {
+      return '';
+    }
   }
 
   function canInferSpecialtyStartFromPage() {
@@ -408,11 +477,16 @@
   }
 
   function setDoneFlag() {
+    const azId = readCurrentAzId();
+    if (!azId) return false;
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    try { localStorage.setItem(DONE_CONTEXT_KEY, azId); } catch {}
+    return true;
   }
 
   function clearDoneFlag() {
     try { localStorage.removeItem(DONE_KEY); } catch {}
+    try { localStorage.removeItem(DONE_CONTEXT_KEY); } catch {}
   }
 
   function headerStillAutoDataPrefill() {
@@ -634,14 +708,16 @@
     if ((Date.now() - lastActivityAt) < INACTIVITY_FORCE_QUOTE_MS) return false;
 
     running = true;
+    writeActivityState('working', 'Forcing specialty Quote after inactivity');
     const missing = getMissingGateLabels();
     const suffix = missing.length ? ` (bypassing gate: missing ${missing.join(', ')})` : '';
     markActivity(`1 minute inactivity on Auto Data Prefill. Forcing Quote.${suffix}`);
     try {
       const ok = await clickQuoteWithRetryWindow();
       if (ok) {
-        setDoneFlag();
+        if (!setDoneFlag()) return true;
         finished = true;
+        writeActivityState('done', 'Finished');
       }
     } finally {
       running = false;
@@ -664,7 +740,15 @@
       return;
     }
     if (isGloballyPaused()) {
+      writeActivityState('paused', 'Paused by shared global pause');
       logWait('paused', 'Paused by shared global pause.', 'Paused');
+      return;
+    }
+
+    if (!readCurrentAzId()) {
+      inferStartSeenAt = 0;
+      sawFlagAt = 0;
+      logWait('wait-az-id', 'Waiting for tm_pc_current_job_v1 / AZ ID', 'Waiting for AZ ID');
       return;
     }
 
@@ -734,6 +818,7 @@
     }
 
     running = true;
+    writeActivityState('working', 'Running specialty flow');
     setStatus('Running specialty flow');
     log(`Run started | headerStuck=${headerStillAutoDataPrefill() ? 'yes' : 'no'} | root=${describeElement(root)}`);
 
@@ -741,8 +826,12 @@
       log('Specialty Product empty, going straight to Quote');
       const ok = await clickQuoteWithRetryWindow();
       if (ok) {
-        setDoneFlag();
+        if (!setDoneFlag()) {
+          running = false;
+          return;
+        }
         finished = true;
+        writeActivityState('done', 'Finished');
       }
       running = false;
       return;
@@ -771,9 +860,13 @@
     log('Specialty rows handled, clicking Quote');
     const ok = await clickQuoteWithRetryWindow();
     if (ok) {
-      setDoneFlag();
+      if (!setDoneFlag()) {
+        running = false;
+        return;
+      }
       finished = true;
       log('Specialty flow finished successfully');
+      writeActivityState('done', 'Finished');
       setStatus('Finished');
     }
 
@@ -789,10 +882,12 @@
     mountPanel();
     log('Script started');
     setStatus('Watching specialty flow');
+    writeActivityState('waiting', 'Watching specialty flow');
     setInterval(() => {
       runOnce().catch((err) => {
         running = false;
         log(`Run failed: ${err?.message || err}`);
+        writeActivityState('error', err?.message || 'Run failed');
         setStatus('Run failed');
       });
     }, POLL_MS);

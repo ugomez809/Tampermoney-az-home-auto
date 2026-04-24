@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Vehicles Prefill
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.8
+// @version      1.5.9
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver to the first non-<none> option, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,13 +17,15 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Auto Vehicles Prefill';
-  const VERSION = '1.5.8';
+  const VERSION = '1.5.9';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_aqb_vehicles_logs_v1';
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'aqb-vehicles';
   const LOG_MAX_LINES = 140;
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
@@ -33,9 +35,13 @@
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const WAIT_KEY = 'aqb_step_drivers_done';
+  const WAIT_CONTEXT_KEY = 'aqb_step_drivers_done_azid';
   const DONE_KEY = 'aqb_step_vehicles_done';
+  const DONE_CONTEXT_KEY = 'aqb_step_vehicles_done_azid';
   const SPECIALTY_START_KEY = 'aqb_step_specialty_start';
+  const SPECIALTY_START_CONTEXT_KEY = 'aqb_step_specialty_start_azid';
 
   const REMOVE_LABEL_ARIA = 'Remove Vehicle';
   const WAIT_AFTER_CHECKBOX_MS = 1000;
@@ -59,6 +65,8 @@
   let finished = false;
   let running = false;
   let lastRearmAt = 0;
+  let activityState = 'idle';
+  let activityMessage = 'Armed';
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString()}] ${message}`;
@@ -105,11 +113,26 @@
   function logsTick() {
     persistLogsThrottled();
     checkLogClearRequest();
+    refreshActivityHeartbeat();
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
   }
 
   // ---------- Minimal START/STOP ----------
   function mountToggle() {
     const btn = document.createElement('button');
+    btn.setAttribute('data-hb-script-id', SCRIPT_ID);
     btn.textContent = BTN_TEXT_ON;
     btn.style.cssText =
       'position:fixed;right:12px;bottom:12px;z-index:999999;' +
@@ -120,6 +143,7 @@
     btn.addEventListener('click', () => {
       armed = !armed;
       btn.textContent = armed ? BTN_TEXT_ON : BTN_TEXT_OFF;
+      writeActivityState(armed ? 'waiting' : 'stopped', armed ? 'Armed' : 'Stopped');
     });
 
     document.body.appendChild(btn);
@@ -130,6 +154,46 @@
 
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function normalizeAzId(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function readCurrentAzId() {
+    try {
+      const raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+      return normalizeAzId(raw?.['AZ ID'] || raw?.azId || raw?.ticketId || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function writeActivityState(nextState, message = '') {
+    activityState = normalizeAzId(nextState).toLowerCase() || 'idle';
+    activityMessage = normalizeAzId(message || activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: activityState,
+      message: activityMessage,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
+  }
+
+  function refreshActivityHeartbeat() {
+    if (!['idle', 'waiting', 'working', 'paused', 'active'].includes(activityState)) return;
+    writeActivityState(activityState, activityMessage);
   }
 
   const isVisible = (el) => {
@@ -182,21 +246,30 @@
   }
 
   function waitKeyReady() {
+    const azId = readCurrentAzId();
+    if (!azId) return false;
     try {
-      return localStorage.getItem(WAIT_KEY) === '1';
+      return localStorage.getItem(WAIT_KEY) === '1' && normalizeAzId(localStorage.getItem(WAIT_CONTEXT_KEY) || '') === azId;
     } catch {
       return false;
     }
   }
 
   function setDoneFlags() {
+    const azId = readCurrentAzId();
+    if (!azId) return false;
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    try { localStorage.setItem(DONE_CONTEXT_KEY, azId); } catch {}
     try { localStorage.setItem(SPECIALTY_START_KEY, '1'); } catch {}
+    try { localStorage.setItem(SPECIALTY_START_CONTEXT_KEY, azId); } catch {}
+    return true;
   }
 
   function clearDoneFlags() {
     try { localStorage.removeItem(DONE_KEY); } catch {}
+    try { localStorage.removeItem(DONE_CONTEXT_KEY); } catch {}
     try { localStorage.removeItem(SPECIALTY_START_KEY); } catch {}
+    try { localStorage.removeItem(SPECIALTY_START_CONTEXT_KEY); } catch {}
   }
 
   function normalizeHeaderText(s) {
@@ -419,15 +492,35 @@
 
   // ---------- Main ----------
   async function runOnce() {
-    if (!armed || finished || running || isGloballyPaused()) return;
+    if (!armed) {
+      writeActivityState('stopped', 'Stopped');
+      return;
+    }
+    if (finished) {
+      writeActivityState('done', 'Vehicles complete');
+      return;
+    }
+    if (running) return;
+    if (isGloballyPaused()) {
+      writeActivityState('paused', 'Paused by shared selector');
+      return;
+    }
+    if (!readCurrentAzId()) {
+      writeActivityState('waiting', 'Waiting for AZ ID');
+      return;
+    }
     if (!gateOK()) return;
     if (!headerOK()) return;
-    if (!waitKeyReady()) return;
+    if (!waitKeyReady()) {
+      writeActivityState('waiting', 'Waiting for drivers handoff');
+      return;
+    }
 
     const table = findVehiclesTable();
     if (!table) return;
 
     running = true;
+    writeActivityState('working', 'Running vehicles prefill');
 
     try {
       await removeVehiclesWithAnyEmptyCoreCell();
@@ -445,8 +538,13 @@
       await sleep(WAIT_BEFORE_SPECIALTY_TRIGGER_MS);
       if (!armed || isGloballyPaused()) return;
 
-      setDoneFlags();
+      if (!setDoneFlags()) {
+        log('Waiting for tm_pc_current_job_v1 / AZ ID');
+        writeActivityState('waiting', 'Waiting for AZ ID');
+        return;
+      }
       finished = true;
+      writeActivityState('done', 'Vehicles complete');
     } finally {
       running = false;
     }
@@ -456,6 +554,7 @@
     clearDoneFlags();
     mountToggle();
     log(`Loaded v${VERSION}`);
+    writeActivityState('waiting', 'Armed');
 
     setInterval(() => {
       if (isGloballyPaused()) return;

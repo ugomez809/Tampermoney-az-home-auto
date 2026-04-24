@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.5
+// @version      2.9.6
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,13 +20,15 @@
   try { window.__AUTO_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
-  const VERSION = '2.9.5';
+  const VERSION = '2.9.6';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_auto_quote_grabber_logs_v1';
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'auto-quote-grabber';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
@@ -341,7 +343,9 @@
     lastWaitReason: '',
     lastStatus: '',
     logLines: [],
-    ui: null
+    ui: null,
+    activityState: 'idle',
+    activityMessage: 'Waiting for trigger'
   };
 
   init();
@@ -352,6 +356,7 @@
     log('Shared payload gatherer loaded');
     log('Tabs enabled: Policy Info -> Auto Data Prefill -> Drivers -> Vehicles -> PA Coverages -> Quote');
     setStatus('Waiting for trigger');
+    writeActivityState('waiting', 'Waiting for trigger');
     state.tickTimer = setInterval(() => {
       if (state.destroyed) return;
       tick();
@@ -366,6 +371,7 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    try { writeActivityState('stopped', 'Cleanup'); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
@@ -379,8 +385,20 @@
   }
 
   function tick() {
-    if (!state.running || state.busy || state.doneThisLoad) return;
+    if (!state.running) {
+      writeActivityState('stopped', 'Stopped');
+      return;
+    }
+    if (state.busy) {
+      writeActivityState('working', state.lastStatus || 'Running Auto gather');
+      return;
+    }
+    if (state.doneThisLoad) {
+      writeActivityState('done', state.lastStatus || 'Grab complete');
+      return;
+    }
     if (isGloballyPaused()) {
+      writeActivityState('paused', 'Paused by shared selector');
       setStatus('Paused by shared selector');
       return;
     }
@@ -402,6 +420,7 @@
     if (!state.triggerSince) {
       state.triggerSince = Date.now();
       log(trigger.logReason);
+      writeActivityState('waiting', 'Trigger found, waiting 5 seconds');
       setStatus('Trigger found, waiting 5 seconds');
       return;
     }
@@ -426,9 +445,11 @@
     }
 
     state.busy = true;
+    writeActivityState('working', `Running Auto gather for AZ ${currentJob['AZ ID']}`);
     runGrab()
       .catch((err) => {
         log(`Failed: ${err?.message || err}`);
+        writeActivityState('error', err?.message || 'Failed');
         setStatus('Failed');
         state.running = false;
         log('Stopped after fatal AUTO grab failure. Press START to retry.');
@@ -1558,6 +1579,7 @@
   function setWaiting(msg) {
     if (state.lastWaitReason === msg) return;
     state.lastWaitReason = msg;
+    writeActivityState('waiting', msg);
     log(msg);
     setStatus(msg);
   }
@@ -1565,6 +1587,7 @@
   function buildUI() {
     const panel = document.createElement('div');
     panel.id = 'hb-auto-quote-grabber-panel-v22';
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.style.cssText = [
       'position:fixed',
       'z-index:2147483647',
@@ -1641,6 +1664,39 @@
     if (state.lastStatus === text) return;
     state.lastStatus = text;
     if (state.ui?.status) state.ui.status.textContent = text;
+    writeActivityState(state.activityState, text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = normalizeText(nextState).toLowerCase() || 'idle';
+    state.activityMessage = normalizeText(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const currentJob = readCurrentJob();
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: normalizeText(currentJob['AZ ID'] || ''),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function log(message) {

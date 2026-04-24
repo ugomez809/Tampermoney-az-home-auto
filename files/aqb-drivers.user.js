@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Drivers Prefill
 // @namespace    homebot.aqb-drivers
-// @version      1.8.10
+// @version      1.8.11
 // @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Excluded Driver, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,13 +17,15 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Auto Drivers Prefill';
-  const VERSION = '1.8.10';
+  const VERSION = '1.8.11';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_aqb_drivers_logs_v1';
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'aqb-drivers';
   const LOG_MAX_LINES = 140;
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
@@ -74,13 +76,30 @@
   function logsTick() {
     persistLogsThrottled();
     checkLogClearRequest();
+    refreshActivityHeartbeat();
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
   }
 
   const REQUIRED_LABELS = ['Submission (Draft)', 'Personal Auto'];
   const HEADER_STARTS_WITH = 'Auto Data Prefill';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const DONE_KEY = 'aqb_step_drivers_done';
+  const DONE_CONTEXT_KEY = 'aqb_step_drivers_done_azid';
   const LEGACY_DONE_KEY = 'aqb_step_autodataprefill_done';
+  const LEGACY_DONE_CONTEXT_KEY = 'aqb_step_autodataprefill_done_azid';
 
   const DRV_ACCEPT_REASON_TEXT = 'Excluded Driver';
   const DRV_REL_TO_PNI_TEXT    = 'Resident Relative';
@@ -106,6 +125,8 @@
   let mo    = null;
   let startDelayUntil = 0;
   let startDelayTimer = null;
+  let activityState = 'idle';
+  let activityMessage = 'Armed';
 
   function armStartDelay() {
     startDelayUntil = Date.now() + INITIAL_START_DELAY_MS;
@@ -121,6 +142,7 @@
 
   function mountToggle() {
     const btn = document.createElement('button');
+    btn.setAttribute('data-hb-script-id', SCRIPT_ID);
     btn.textContent = BTN_TEXT_ON;
     btn.style.cssText =
       'position:fixed;right:12px;bottom:12px;z-index:999999;' +
@@ -132,6 +154,7 @@
       armed = !armed;
       btn.textContent = armed ? BTN_TEXT_ON : BTN_TEXT_OFF;
       if (armed) armStartDelay();
+      writeActivityState(armed ? 'waiting' : 'stopped', armed ? 'Armed' : 'Stopped');
     });
 
     document.body.appendChild(btn);
@@ -160,6 +183,46 @@
 
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
+  }
+
+  function safeJsonParse(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function normalizeAzId(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function readCurrentAzId() {
+    try {
+      const raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
+      return normalizeAzId(raw?.['AZ ID'] || raw?.azId || raw?.ticketId || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function writeActivityState(nextState, message = '') {
+    activityState = normalizeAzId(nextState).toLowerCase() || 'idle';
+    activityMessage = normalizeAzId(message || activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: activityState,
+      message: activityMessage,
+      azId: readCurrentAzId(),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
+  }
+
+  function refreshActivityHeartbeat() {
+    if (!['idle', 'waiting', 'working', 'paused', 'active'].includes(activityState)) return;
+    writeActivityState(activityState, activityMessage);
   }
 
   function gateOK() {
@@ -464,25 +527,40 @@
   }
 
   function setDoneFlag() {
+    const azId = readCurrentAzId();
+    if (!azId) return false;
     try { localStorage.setItem(DONE_KEY, '1'); } catch {}
+    try { localStorage.setItem(DONE_CONTEXT_KEY, azId); } catch {}
     log('Drivers done flag set — handing off to Vehicles');
+    writeActivityState('done', 'Drivers complete');
+    return true;
   }
 
   function clearDoneFlag() {
     try { localStorage.removeItem(DONE_KEY); } catch {}
+    try { localStorage.removeItem(DONE_CONTEXT_KEY); } catch {}
   }
 
   function clearLegacyDoneFlag() {
     try { localStorage.removeItem(LEGACY_DONE_KEY); } catch {}
+    try { localStorage.removeItem(LEGACY_DONE_CONTEXT_KEY); } catch {}
   }
 
   async function runSequence() {
     if (done || running || !armed || isGloballyPaused()) return;
-    if (Date.now() < startDelayUntil) return;
+    if (Date.now() < startDelayUntil) {
+      writeActivityState('waiting', 'Waiting start delay');
+      return;
+    }
+    if (!readCurrentAzId()) {
+      writeActivityState('waiting', 'Waiting for AZ ID');
+      return;
+    }
     if (!gateOK() || !headerOK()) return;
     if (!findDriversTable()) return;
 
     running = true;
+    writeActivityState('working', 'Running drivers prefill');
     log('Gate + header + drivers table all OK — starting driver passes');
     try {
       for (let pass = 1; pass <= DRIVER_RUN_PASSES; pass++) {
@@ -504,9 +582,10 @@
       if (!armed || done || isGloballyPaused()) return;
       if (!gateOK() || !headerOK() || !findDriversTable()) return;
 
-      setDoneFlag();
+      if (!setDoneFlag()) return;
 
       done = true;
+      writeActivityState('done', 'Drivers complete');
       if (mo) {
         try { mo.disconnect(); } catch {}
         mo = null;
@@ -517,7 +596,18 @@
   }
 
   function tick() {
-    if (!armed || done || isGloballyPaused()) return;
+    if (!armed) {
+      writeActivityState('stopped', 'Stopped');
+      return;
+    }
+    if (done) {
+      writeActivityState('done', 'Drivers complete');
+      return;
+    }
+    if (isGloballyPaused()) {
+      writeActivityState('paused', 'Paused by shared selector');
+      return;
+    }
     runSequence().catch(() => {});
   }
 
@@ -527,6 +617,7 @@
     mountToggle();
     armStartDelay();
     log(`Loaded v${VERSION}`);
+    writeActivityState('waiting', 'Armed');
 
     mo = new MutationObserver(tick);
     mo.observe(document.documentElement || document.body, { childList: true, subtree: true });

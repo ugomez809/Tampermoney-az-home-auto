@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.4
+// @version      4.1.5
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.4';
+  const VERSION = '4.1.5';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -30,6 +30,8 @@
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'home-quote-grabber';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -146,7 +148,10 @@
     currentAzId: '',
     autoDiscountChosenThisLoad: false,
     lastQuoteClickAt: 0,
-    lastTabNudgeAt: 0
+    lastTabNudgeAt: 0,
+    lastStatus: '',
+    activityState: 'idle',
+    activityMessage: 'Background gatherer armed'
   };
 
   const SNAPSHOT_EVERY_TICKS = 10;
@@ -733,10 +738,12 @@
     log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}, GM_deleteValue=${typeof GM_deleteValue}`);
     log('Auto-run armed');
     setStatus('Background gatherer armed');
+    writeActivityState('waiting', 'Background gatherer armed');
     state.tickTimer = setInterval(() => {
       if (state.destroyed) return;
       try { tick(); } catch (err) {
         log(`tick() crashed: ${err?.message || err}`);
+        writeActivityState('error', err?.message || 'Tick error');
         setStatus('Tick error (see log)');
       }
     }, CFG.tickMs);
@@ -754,6 +761,7 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    try { writeActivityState('stopped', 'Cleanup'); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
@@ -811,8 +819,16 @@
 
   function tick() {
     state.tickCount++;
-    if (!state.running) { announceSkipReason('state.running=false'); return; }
-    if (state.busy) { announceSkipReason('state.busy=true'); return; }
+    if (!state.running) {
+      writeActivityState('stopped', 'Stopped');
+      announceSkipReason('state.running=false');
+      return;
+    }
+    if (state.busy) {
+      writeActivityState('working', state.lastStatus || 'Working Home gather');
+      announceSkipReason('state.busy=true');
+      return;
+    }
     state.announcedSkipReason = '';
 
     const currentJob = readCurrentJob();
@@ -838,6 +854,7 @@
     const homeState = normalizeHomeState(readCurrentJob());
     if (homeState.ready === true) {
       state.doneThisLoad = true;
+      writeActivityState('done', 'Home gather complete');
       setStatus('Home gather complete');
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
         state.lastSnapshotTick = state.tickCount;
@@ -847,11 +864,13 @@
     }
 
     if (state.doneThisLoad) {
+      writeActivityState('done', 'Home gather complete');
       announceSkipReason('doneThisLoad=true (current AZ already complete)');
       return;
     }
 
     if (state.flowStartedThisLoad) {
+      writeActivityState('working', state.lastStatus || 'Home flow in progress');
       announceSkipReason('flowStartedThisLoad=true (background flow in progress)');
       return;
     }
@@ -867,10 +886,12 @@
 
     state.flowStartedThisLoad = true;
     state.busy = true;
+    writeActivityState('working', `Running Home gather for AZ ${currentJob['AZ ID']}`);
     log(`Starting background Home flow for AZ ID ${currentJob['AZ ID']} (phase=${homeState.pass1Ready ? 'pass2/final' : 'pass1'})`);
     runGrab({ currentJob })
       .catch((err) => {
         log(`Background flow failed: ${err?.message || err}`);
+        writeActivityState('error', err?.message || 'Background flow failed');
         setStatus('Failed');
         state.flowStartedThisLoad = false;
         log('Background flow unlocked for same-tab retry');
@@ -2029,7 +2050,10 @@
   }
 
   function normalizeText(value) {
-    return String(value || '').replace(/\s+/g, ' ').trim();
+    return String(value == null ? '' : value)
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   function normalizeSimpleValue(value) {
@@ -2180,6 +2204,7 @@
   function setWaiting(msg) {
     if (state.lastWaitReason === msg) return;
     state.lastWaitReason = msg;
+    writeActivityState('waiting', msg);
     log(msg);
     setStatus(msg);
   }
@@ -2187,6 +2212,7 @@
   function buildUI() {
     const panel = document.createElement('div');
     panel.id = 'hb-home-quote-grabber-panel';
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.style.cssText = [
       'position:fixed',
       'z-index:2147483647',
@@ -2278,7 +2304,41 @@
   }
 
   function setStatus(text) {
+    state.lastStatus = text;
     if (state.ui?.status) state.ui.status.textContent = text;
+    writeActivityState(state.activityState, text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = normalizeText(nextState).toLowerCase() || 'idle';
+    state.activityMessage = normalizeText(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const currentJob = readCurrentJob();
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: normalizeText(currentJob['AZ ID'] || state.currentAzId || ''),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function log(message) {

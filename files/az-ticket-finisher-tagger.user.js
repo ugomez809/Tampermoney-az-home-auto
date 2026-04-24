@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.32
+// @version      1.0.33
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.32';
+  const VERSION = '1.0.33';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -31,6 +31,8 @@
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
   const LOG_TICK_MS = 2000;
+  const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
+  const SCRIPT_ID = 'az-ticket-finisher-tagger';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
 
@@ -145,7 +147,9 @@
     waitingTicketMismatchTriggeredKey: '',
     frontSession: 1,
     wasFrontActive: isFrontActive(),
-    completedFrontRunKeys: new Set()
+    completedFrontRunKeys: new Set(),
+    activityState: 'idle',
+    activityMessage: 'Waiting for mirrored payload'
   };
 
   init();
@@ -159,6 +163,7 @@
 
     log(`Loaded v${VERSION}`);
     setStatus(state.running ? 'Waiting for mirrored payload' : 'Stopped');
+    writeActivityState(state.running ? 'waiting' : 'stopped', state.running ? 'Waiting for mirrored payload' : 'Stopped');
 
     state.tickTimer = setInterval(() => tick(), CFG.tickMs);
     state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
@@ -178,6 +183,7 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    try { writeActivityState('stopped', 'Cleanup'); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('beforeunload', persistPanelPos, true); } catch {}
@@ -395,6 +401,50 @@
   function setStatus(text) {
     state.lastStatus = text;
     if (state.ui.status) state.ui.status.textContent = text;
+    writeActivityState(deriveActivityStateFromStatus(text), text);
+  }
+
+  function readScriptActivityMap() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SCRIPT_ACTIVITY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeScriptActivityMap(nextMap) {
+    try { localStorage.setItem(SCRIPT_ACTIVITY_KEY, JSON.stringify(nextMap, null, 2)); } catch {}
+  }
+
+  function deriveActivityStateFromStatus(text) {
+    const status = norm(text).toLowerCase();
+    if (!state.running && !state.busy) return 'stopped';
+    if (status.includes('paused')) return 'paused';
+    if (status.includes('running') || status.includes('closing') || status.includes('force running') || status.includes('picker:')) return 'working';
+    if (status.includes('failed')) return 'error';
+    if (status.includes('completed')) return 'done';
+    if (status.includes('stopped')) return 'stopped';
+    if (status.includes('waiting') || status.includes('required') || status.includes('missing')) return 'waiting';
+    return state.busy ? 'working' : 'idle';
+  }
+
+  function writeActivityState(nextState, message = '') {
+    state.activityState = norm(nextState).toLowerCase() || 'idle';
+    state.activityMessage = norm(message || state.lastStatus || state.activityMessage || '') || '';
+
+    const current = readScriptActivityMap();
+    current[SCRIPT_ID] = {
+      scriptId: SCRIPT_ID,
+      scriptName: SCRIPT_NAME,
+      state: state.activityState,
+      message: state.activityMessage,
+      azId: norm(state.activeAzId || ''),
+      updatedAt: new Date().toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeScriptActivityMap(current);
   }
 
   function isFrontActive() {
@@ -2542,6 +2592,7 @@
     const panel = document.createElement('div');
     panel.id = 'tm-az-ticket-finisher-panel';
     panel.setAttribute(UI_ATTR, '1');
+    panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     Object.assign(panel.style, {
       position: 'fixed',
       right: '12px',
