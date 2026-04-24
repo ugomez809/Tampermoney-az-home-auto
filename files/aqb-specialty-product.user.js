@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.5
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.6
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill even if the normal page labels drift. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -106,6 +106,10 @@
 
   function gateOK() {
     return REQUIRED_LABELS.every(hasLabelExact);
+  }
+
+  function getMissingGateLabels() {
+    return REQUIRED_LABELS.filter(label => !hasLabelExact(label));
   }
 
   function isProbablyClickable(el) {
@@ -340,12 +344,13 @@
 
   async function maybeForceQuoteFromInactivity() {
     if (!armed || finished || running || isGloballyPaused()) return false;
-    if (!gateOK()) return false;
     if (!headerStillAutoDataPrefill()) return false;
     if ((Date.now() - lastActivityAt) < INACTIVITY_FORCE_QUOTE_MS) return false;
 
     running = true;
-    markActivity('1 minute inactivity on Auto Data Prefill. Forcing Quote.');
+    const missing = getMissingGateLabels();
+    const suffix = missing.length ? ` (bypassing gate: missing ${missing.join(', ')})` : '';
+    markActivity(`1 minute inactivity on Auto Data Prefill. Forcing Quote.${suffix}`);
     try {
       const ok = await clickQuoteUpTo3IfStuck();
       if (ok) {
@@ -361,10 +366,11 @@
   // ---------- Main ----------
   async function runOnce() {
     if (!armed || finished || running || isGloballyPaused()) return;
-    if (!gateOK()) return;
 
     const forced = await maybeForceQuoteFromInactivity();
     if (forced) return;
+
+    if (!gateOK()) return;
 
     if (!waitKeyReady()) {
       sawFlagAt = 0;
