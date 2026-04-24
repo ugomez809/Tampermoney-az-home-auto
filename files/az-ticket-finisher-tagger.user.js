@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.20
+// @version      1.0.21
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.20';
+  const VERSION = '1.0.21';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -1224,23 +1224,7 @@
         } catch {}
       }
     }
-
-    let el = findVisibleElements(SEL.tagDropdown)[0];
-    if (el) return el;
-
-    const candidates = Array.from(document.querySelectorAll('#add-tag-form button, button[role="combobox"], button.dropdown-toggle'))
-      .filter(visible);
-
-    return candidates.find((node) => {
-      const title = norm(node.getAttribute('title') || '');
-      const text = norm(node.textContent || '');
-      return (
-        title.includes('EverQuote') ||
-        title.includes('Home') ||
-        text.includes('EverQuote') ||
-        text.includes('Home')
-      );
-    }) || null;
+    return null;
   }
 
   function getTagDropdownMenu(dropdown) {
@@ -1297,25 +1281,50 @@
     }
   }
 
+  function dispatchMouseBurst(el) {
+    if (!(el instanceof Element)) return;
+    const view = el.ownerDocument?.defaultView || window;
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view
+        }));
+      } catch {}
+    }
+  }
+
+  function getUnderlyingTagSelect(dropdown) {
+    if (!(dropdown instanceof Element)) return null;
+    const wrapper = dropdown.closest('.bootstrap-select, .dropdown, .btn-group, .az-tags-select');
+    if (!wrapper) return null;
+    return wrapper.querySelector('select') ||
+      (wrapper.previousElementSibling instanceof HTMLSelectElement ? wrapper.previousElementSibling : null);
+  }
+
   async function tryOpenTagDropdown(dropdown) {
     if (!(dropdown instanceof Element)) return false;
     if (isTagDropdownOpen(dropdown)) return true;
 
-    const wrapper = dropdown.closest('.bootstrap-select, .dropdown, .btn-group, .az-tags-select');
-    const clickTargets = [dropdown];
-    if (wrapper && wrapper !== dropdown) clickTargets.push(wrapper);
+    const waitAfterAttempt = async () => {
+      await sleep(450);
+      return isTagDropdownOpen(dropdown);
+    };
 
-    for (const target of clickTargets) {
-      strongClick(target);
-      await sleep(220);
-      if (isTagDropdownOpen(dropdown)) return true;
-    }
+    try {
+      dropdown.click();
+      if (await waitAfterAttempt()) {
+        log('Tag dropdown open method: direct click');
+        return true;
+      }
+    } catch {}
 
-    try { dropdown.focus({ preventScroll: true }); } catch {}
-    for (const key of ['ArrowDown', 'Enter', ' ']) {
-      dispatchKeySequence(dropdown, key);
-      await sleep(220);
-      if (isTagDropdownOpen(dropdown)) return true;
+    dispatchMouseBurst(dropdown);
+    if (await waitAfterAttempt()) {
+      log('Tag dropdown open method: mouse events');
+      return true;
     }
 
     try {
@@ -1324,24 +1333,32 @@
         const jqDropdown = $(dropdown);
         if (typeof jqDropdown.dropdown === 'function') {
           jqDropdown.dropdown('toggle');
-          await sleep(220);
-          if (isTagDropdownOpen(dropdown)) return true;
+          if (await waitAfterAttempt()) {
+            log('Tag dropdown open method: jQuery dropdown toggle');
+            return true;
+          }
         }
 
-        const jqWrapper = jqDropdown.closest('.bootstrap-select');
-        const wrapperEl = jqWrapper?.get?.(0) || jqWrapper?.[0] || dropdown.closest('.bootstrap-select');
-        const selectEl = wrapperEl?.querySelector?.('select') ||
-          (wrapperEl?.previousElementSibling instanceof HTMLSelectElement ? wrapperEl.previousElementSibling : null);
+        const selectEl = getUnderlyingTagSelect(dropdown);
         const jqSelect = selectEl ? $(selectEl) : null;
         if (jqSelect?.length && typeof jqSelect.selectpicker === 'function') {
           jqSelect.selectpicker('toggle');
-          await sleep(220);
-          if (isTagDropdownOpen(dropdown)) return true;
+          if (await waitAfterAttempt()) {
+            log('Tag dropdown open method: selectpicker toggle');
+            return true;
+          }
         }
       }
     } catch {}
 
-    return isTagDropdownOpen(dropdown);
+    try { dropdown.focus({ preventScroll: true }); } catch {}
+    dispatchKeySequence(dropdown, 'ArrowDown');
+    if (await waitAfterAttempt()) {
+      log('Tag dropdown open method: keyboard ArrowDown');
+      return true;
+    }
+
+    return false;
   }
 
   function findVisibleSavedTagTarget(kind) {
