@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.6
+// @version      4.1.7
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.6';
+  const VERSION = '4.1.7';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -56,6 +56,7 @@
     afterFieldMs: 250,
     afterQuoteWaitMs: 800,
     maxQuoteAttempts: 6,
+    coveragesRetryLimit: 2,
     quoteTransitionTimeoutMs: 8000,
     betweenQuoteAttemptsMs: 500,
     quoteActionReadyTimeoutMs: 12000,
@@ -126,6 +127,11 @@
     editQuote: 'Edit Quote',
     fairPlanCompanionEndorsement: 'FAIR Plan Companion Endorsement'
   };
+
+  const COVERAGES_WARNING_FRAGMENTS = [
+    'deductible has been increased.',
+    'minimum $5,000 split water deductible.'
+  ];
 
   const state = {
     running: true,
@@ -1198,6 +1204,24 @@
     return false;
   }
 
+  function getCoveragesRetryWarningText() {
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      try {
+        const messages = Array.from(doc.querySelectorAll('.gw-message')).filter(isVisibleEl);
+        for (const message of messages) {
+          const text = normalizeText(message.textContent || '');
+          if (!text) continue;
+          const lowerText = text.toLowerCase();
+          if (COVERAGES_WARNING_FRAGMENTS.every((fragment) => lowerText.includes(fragment))) {
+            return text;
+          }
+        }
+      } catch {}
+    }
+    return '';
+  }
+
   async function clickQuoteUntilTransition() {
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
@@ -1207,10 +1231,20 @@
         continue;
       }
       await sleep(CFG.afterQuoteWaitMs);
-      const movedOff = await waitFor(() => !headerStillCoverages(), CFG.quoteTransitionTimeoutMs, `Quote transition (attempt ${attempt})`);
+      const transitionOrWarning = await waitFor(
+        () => !headerStillCoverages() || !!getCoveragesRetryWarningText(),
+        CFG.quoteTransitionTimeoutMs,
+        `Quote transition (attempt ${attempt})`
+      );
+      const warningText = getCoveragesRetryWarningText();
+      const movedOff = transitionOrWarning && !headerStillCoverages() && !warningText;
       if (movedOff) {
         log('Quote succeeded (moved off Coverages)');
-        return true;
+        return { ok: true, needsCoverageReapply: false, warningText: '' };
+      }
+      if (warningText) {
+        log(`Detected Coverages warning after Quote attempt ${attempt}: ${warningText}`);
+        return { ok: false, needsCoverageReapply: true, warningText };
       }
       log(`Still on Coverages after Quote attempt ${attempt}`);
       if (attempt < CFG.maxQuoteAttempts) {
@@ -1218,7 +1252,7 @@
         await sleep(CFG.betweenQuoteAttemptsMs);
       }
     }
-    return false;
+    return { ok: false, needsCoverageReapply: false, warningText: '' };
   }
 
   async function ensureEditMode() {
@@ -1307,9 +1341,7 @@
     log(`${label}: checked`);
   }
 
-  async function driveCoveragesAndQuote() {
-    log('Phase 1: editing coverages');
-    await ensureEditMode();
+  async function applyCoverageSelections() {
     await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
     await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
     await setSelectVerified(SEL.enhSplitWater, ['Split Water'], ['$10,000', '10000'], 'Enhanced / Split Water');
@@ -1319,9 +1351,31 @@
     await ensureCheckboxVerified(SEL.enhExtendedReplacementCheckbox, ['Extended Replacement Cost'], 'Enhanced / Extended Replacement Cost checkbox');
     await setSelectVerified(SEL.enhExtendedReplacementSelect, ['Extended Replacement Cost'], ['120%', '120'], 'Enhanced / Extended Replacement Cost value');
     await ensureCheckboxVerified(SEL.personalInjuryCheckbox, ['Personal Injury'], 'Additional / Personal Injury');
-    log('Phase 1: clicking initial Quote');
-    const quoteOK = await clickQuoteUntilTransition();
-    if (!quoteOK) throw new Error('Initial Quote click did not move off Coverages');
+  }
+
+  async function driveCoveragesAndQuote() {
+    for (let coverageAttempt = 1; coverageAttempt <= CFG.coveragesRetryLimit; coverageAttempt++) {
+      const attemptLabel = coverageAttempt > 1 ? ` retry ${coverageAttempt}/${CFG.coveragesRetryLimit}` : '';
+      log(`Phase 1: editing coverages${attemptLabel}`);
+      await ensureEditMode();
+      await applyCoverageSelections();
+      log(`Phase 1: clicking initial Quote${attemptLabel}`);
+      const quoteResult = await clickQuoteUntilTransition();
+      if (quoteResult.ok) return;
+
+      if (quoteResult.needsCoverageReapply && coverageAttempt < CFG.coveragesRetryLimit) {
+        setStatus('Reapplying Coverages after deductible warning');
+        log('Re-running Edit All + coverages after deductible warning');
+        await sleep(CFG.betweenQuoteAttemptsMs);
+        continue;
+      }
+
+      if (quoteResult.needsCoverageReapply) {
+        throw new Error(`Deductible warning persisted after coverages retry: ${quoteResult.warningText || 'Split Water deductible warning'}`);
+      }
+
+      throw new Error('Initial Quote click did not move off Coverages');
+    }
   }
 
   function hasAnyNonEmptyHomeValues(values) {
