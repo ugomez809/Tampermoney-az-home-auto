@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.4
-// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs while leaving AgencyZoom available.
+// @version      1.0.5
+// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -254,6 +254,16 @@
     return isPlainObject(value) ? value : null;
   }
 
+  function isFreshCloseSignal(signal) {
+    if (!isPlainObject(signal)) return false;
+    const azId = norm(signal.azId || '');
+    const postedAt = norm(signal.postedAt || '');
+    if (!azId || !postedAt) return false;
+    const postedMs = Date.parse(postedAt);
+    if (!Number.isFinite(postedMs)) return false;
+    return (Date.now() - postedMs) <= CFG.maxSignalAgeMs;
+  }
+
   function readyMatchesSignal(signal) {
     const ready = readReadySignal();
     if (!ready || ready.ready !== true) return false;
@@ -399,11 +409,17 @@
     try { window.top?.close?.(); } catch {}
     if (window.closed) return;
 
-    try { location.replace('about:blank'); } catch {}
+    setTimeout(() => {
+      if (window.closed) return;
+      try { location.replace('about:blank'); } catch {}
+      setTimeout(() => {
+        try { window.close(); } catch {}
+      }, 100);
+    }, 350);
   }
 
   function attemptClose() {
-    if (!state.activeSignal) return;
+    if (!state.activeSignal && !isFreshCloseSignal(readCloseSignal())) return;
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
 
@@ -460,6 +476,7 @@
     }
 
     const signal = readSuccessSignal();
+    const closeSignal = readCloseSignal();
     if (isAzHost()) {
       const bridged = bridgePayloadToAzLocal();
       if (bridged && !signal) {
@@ -477,6 +494,17 @@
           attemptClose();
         }
       }
+    } else if (!isAzHost() && isFreshCloseSignal(closeSignal) && !state.closeAttempted) {
+      const signalKey = buildSignalKey(closeSignal);
+      if (signalKey && state.activeSignalKey !== signalKey) {
+        state.activeSignal = {
+          azId: norm(closeSignal.azId || ''),
+          postedAt: norm(closeSignal.postedAt || '')
+        };
+        state.activeSignalKey = signalKey;
+      }
+      log('Shared close signal received');
+      attemptClose();
     } else if (!signal) {
       setStatus('Watching for webhook success');
     } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {

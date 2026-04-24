@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.7
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, and keeps retrying Quote every 5 seconds for 1 minute before giving up. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.8
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, and keeps retrying Quote every 5 seconds for 1 minute before giving up. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -93,11 +93,42 @@
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
 
+  function getAccessibleDocs() {
+    const docs = [];
+    const seen = new Set();
+
+    function walk(win) {
+      try {
+        if (!win || seen.has(win)) return;
+        seen.add(win);
+        if (win.document) docs.push(win.document);
+        for (let i = 0; i < win.frames.length; i += 1) {
+          walk(win.frames[i]);
+        }
+      } catch {}
+    }
+
+    walk(window);
+    return docs;
+  }
+
+  function findInDocs(resolver) {
+    for (const doc of getAccessibleDocs()) {
+      try {
+        const found = resolver(doc);
+        if (found === true) return true;
+        if (found) return found;
+      } catch {}
+    }
+    return null;
+  }
+
   const isVisible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect?.();
     if (!r || r.width === 0 || r.height === 0) return false;
-    const cs = getComputedStyle(el);
+    const win = el.ownerDocument?.defaultView || window;
+    const cs = win.getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
     if (el.closest?.('[aria-hidden="true"]')) return false;
     return true;
@@ -119,8 +150,14 @@
   }
 
   function hasLabelExact(txt) {
-    return Array.from(document.querySelectorAll('.gw-label'))
-      .some(n => (n.textContent || '').trim() === txt && isVisible(n));
+    for (const doc of getAccessibleDocs()) {
+      try {
+        const found = Array.from(doc.querySelectorAll('.gw-label'))
+          .some(n => (n.textContent || '').trim() === txt && isVisible(n));
+        if (found) return true;
+      } catch {}
+    }
+    return false;
   }
 
   function gateOK() {
@@ -156,19 +193,21 @@
   }
 
   function findClickableOwnerByLabel(labelText) {
-    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${labelText}"]`)).filter(isVisible);
-    for (const label of direct) {
-      const owner = getClickableOwner(label);
-      if (owner && isVisible(owner)) return owner;
-    }
-
-    const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
-    for (const el of generic) {
-      const aria = String(el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
-      const txt = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-      if ((aria === labelText || txt === labelText) && isVisible(el)) {
-        const owner = getClickableOwner(el);
+    for (const doc of getAccessibleDocs()) {
+      const direct = Array.from(doc.querySelectorAll(`.gw-label[aria-label="${labelText}"]`)).filter(isVisible);
+      for (const label of direct) {
+        const owner = getClickableOwner(label);
         if (owner && isVisible(owner)) return owner;
+      }
+
+      const generic = Array.from(doc.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
+      for (const el of generic) {
+        const aria = String(el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
+        const txt = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+        if ((aria === labelText || txt === labelText) && isVisible(el)) {
+          const owner = getClickableOwner(el);
+          if (owner && isVisible(owner)) return owner;
+        }
       }
     }
     return null;
@@ -196,13 +235,20 @@
   }
 
   function headerStillAutoDataPrefill() {
-    const titles = Array.from(document.querySelectorAll('.gw-TitleBar--title')).filter(isVisible);
-    return titles.some(t => ((t.textContent || '').trim().startsWith(HEADER_STUCK_STARTS_WITH)));
+    for (const doc of getAccessibleDocs()) {
+      try {
+        const titles = Array.from(doc.querySelectorAll('.gw-TitleBar--title')).filter(isVisible);
+        if (titles.some(t => ((t.textContent || '').trim().startsWith(HEADER_STUCK_STARTS_WITH)))) {
+          return true;
+        }
+      } catch {}
+    }
+    return false;
   }
 
   // ---------- Specialty Product LV ----------
   function findLVRoot() {
-    return document.querySelector(`[id$="${LV_ID_SUFFIX}"]`);
+    return findInDocs((doc) => doc.querySelector(`[id$="${LV_ID_SUFFIX}"]`));
   }
 
   function isLVEmpty(root) {
@@ -222,8 +268,7 @@
   }
 
   function findRemoveSpecialtyButton() {
-    const lab = Array.from(document.querySelectorAll('.gw-label[aria-label="Remove Specialty product"]'))
-      .find(isVisible);
+    const lab = findInDocs((doc) => Array.from(doc.querySelectorAll('.gw-label[aria-label="Remove Specialty product"]')).find(isVisible));
     if (!lab) return null;
 
     let p = lab;
@@ -267,15 +312,19 @@
 
   function findQuoteCandidates() {
     const out = [];
-    const exactInner = document.querySelector('#SubmissionWizard-Quote > div.gw-action--inner.gw-hasDivider');
+    const exactInner = findInDocs((doc) => doc.querySelector('#SubmissionWizard-Quote > div.gw-action--inner.gw-hasDivider'));
     if (exactInner) out.unshift(exactInner);
 
-    const host = document.getElementById('SubmissionWizard-Quote');
+    const host = findInDocs((doc) => doc.getElementById('SubmissionWizard-Quote'));
     if (host) out.unshift(host);
 
-    out.push(...Array.from(document.querySelectorAll('.gw-label[aria-label="Quote"]')));
+    for (const doc of getAccessibleDocs()) {
+      try {
+        out.push(...Array.from(doc.querySelectorAll('.gw-label[aria-label="Quote"]')));
+      } catch {}
+    }
 
-    const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
+    const nextLab = findInDocs((doc) => doc.querySelector('.gw-label[aria-label="Next"]'));
     if (nextLab) {
       let p = nextLab;
       for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
