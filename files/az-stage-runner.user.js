@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.15
+// @version      2.5.16
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.15';
+  const VERSION = '2.5.16';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -395,6 +395,22 @@
     }, delay);
   }
 
+  // Every automatic reload must land on the clean pipeline URL. A plain
+  // location.reload() keeps whatever the operator drifted to (e.g. a
+  // ticket-drawer hash state). Normalize the URL bar with replaceState
+  // (silent same-origin update) and then reload so the new page loads
+  // at the canonical URL regardless of starting state.
+  const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
+
+  function reloadToPipelineRoot() {
+    try {
+      if (location.href !== PIPELINE_ROOT_URL) {
+        history.replaceState(null, '', PIPELINE_ROOT_URL);
+      }
+    } catch {}
+    try { location.reload(); } catch {}
+  }
+
   function consumeBootstrapReloadMode() {
     try {
       const mode = sessionStorage.getItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE) || '';
@@ -520,7 +536,7 @@
     log('Front idle timeout reached: reloading AgencyZoom pipeline page', 'warn');
     persistState();
     schedulePendingReload(() => {
-      if (!state.destroyed) location.reload();
+      if (!state.destroyed) reloadToPipelineRoot();
     }, 120);
   }
 
@@ -1082,7 +1098,7 @@
       log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
       setBootstrapReloadToken();
       schedulePendingReload(() => {
-        if (!state.destroyed) location.reload();
+        if (!state.destroyed) reloadToPipelineRoot();
       }, 120);
       return;
     }
