@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.4
+// @version      1.8.5
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -253,6 +253,12 @@
     out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
     out.push(...document.querySelectorAll('.gw-action--inner[aria-label="Quote"], [role="button"][aria-label="Quote"], [role="menuitem"][aria-label="Quote"]'));
     out.push(...document.querySelectorAll('.gw-action--inner.gw-hasDivider'));
+    out.push(...Array.from(document.querySelectorAll('div.gw-action--inner, div[role="menuitem"], div[role="tab"], div[role="button"], button, a'))
+      .filter(el => {
+        const aria = String(el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
+        const txt = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+        return isVisible(el) && (aria === 'Quote' || txt === 'Quote' || txt.includes('Quote'));
+      }));
 
     const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
     if (nextLab) {
@@ -309,7 +315,7 @@
       markActivity('Quote clicked via label fallback');
       return true;
     }
-    log('Quote target not found or not clickable');
+    log(candidates.length ? `Quote target found but not clickable (${candidates.length} candidates)` : 'Quote target not found or not clickable');
     return false;
   }
 

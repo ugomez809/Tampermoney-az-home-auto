@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.2
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, and saves timeout or selected errors into the shared GWPC payload flow without posting or closing tabs.
+// @version      2.2.3
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, and raises the sender trigger without posting or closing tabs itself.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,13 +20,15 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.2';
+  const VERSION = '2.2.3';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
+  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
@@ -1251,8 +1253,10 @@
     try {
       saveEventToPayload(context.product, context.job, event);
       saveEventToBundle(context.product, context.job, event);
+      requestSenderPost(context, event);
       rememberDispatchedEvent(event);
       log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to payload/bundle`);
+      log(`Raised sender trigger for ${context.product.toUpperCase()} ${event.triggerType} event`);
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();
       return true;
@@ -1262,6 +1266,34 @@
       renderAll();
       return false;
     }
+  }
+
+  function writeFlowStage(product, step, azId = '') {
+    const next = {
+      product: normalizeText(product || ''),
+      step: normalizeText(step || ''),
+      azId: normalizeText(azId || ''),
+      updatedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
+
+  function requestSenderPost(context, event) {
+    const request = {
+      requestedAt: nowIso(),
+      reason: normalizeText(`${context.product}_${event.triggerType}_error`),
+      source: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      azId: normalizeText(context.job?.['AZ ID'] || ''),
+      eventId: normalizeText(event.eventId || event.id || '')
+    };
+
+    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
+    writeFlowStage(context.product, 'sender', context.job?.['AZ ID'] || '');
   }
 
   function processHeaderTimeout() {
