@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.11
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, and reloads after 40s of meaningful inactivity while frontmost.
+// @version      2.5.13
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.11';
+  const VERSION = '2.5.13';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -68,6 +68,7 @@
 
   const SS_KEYS = {
     BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1',
+    BOOTSTRAP_RELOAD_MODE: 'tm_az_stage_runner_bootstrap_reload_mode_v1',
     LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED: 'tm_az_stage_runner_last_workflow_cleanup_request_handled_v1'
   };
 
@@ -195,7 +196,9 @@
     frontIdleReloadPending: false,
     refreshRequiredThisLoad: false,
     externalWakeTick: 0,
-    storageWakeHandler: null
+    storageWakeHandler: null,
+    pendingStartTimer: 0,
+    pendingReloadTimer: 0
   };
 
   init();
@@ -222,7 +225,7 @@
     log('ESC stops the run', 'info');
 
     state.keyHandler = (e) => {
-      if (e.key === 'Escape' && state.running) stopRun('ESC stop');
+      if (e.key === 'Escape' && state.running) stopRun('ESC stop', { manual: true });
     };
     window.addEventListener('keydown', state.keyHandler, true);
 
@@ -249,12 +252,18 @@
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
     if (hasBootstrapReloadToken()) {
+      const restoreMode = consumeBootstrapReloadMode();
       clearBootstrapReloadToken();
+      if (restoreMode) {
+        state.mode = restoreMode;
+        saveMode(state.mode);
+        syncUi();
+      }
       state.running = true;
       saveRunning(true);
       setStatus(`RESTORING (${state.mode.toUpperCase()})`);
       log(`Continuing after fresh reload | mode=${state.mode.toUpperCase()}`, 'ok');
-      setTimeout(() => {
+      schedulePendingStart(() => {
         if (!state.destroyed && state.running && !state.busy) {
           startRun(true);
         }
@@ -267,8 +276,8 @@
     syncUi();
     setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
     log(`Fresh auto bootstrap | mode=${state.mode.toUpperCase()}`, 'ok');
-    setTimeout(() => {
-      if (!state.destroyed && !state.running && !state.busy) {
+    schedulePendingStart(() => {
+      if (!state.destroyed && !state.running && !state.busy && !state.refreshRequiredThisLoad) {
         startRun(false);
       }
     }, 0);
@@ -291,6 +300,7 @@
     try { window.removeEventListener('scroll', state.frontIdleActivityHandler, true); } catch {}
     try { window.removeEventListener('focus', state.frontIdleFocusHandler, true); } catch {}
     try { window.removeEventListener('blur', state.frontIdleBlurHandler, true); } catch {}
+    clearPendingActionTimers();
 
     const panel = document.getElementById('hb-az-stage-runner-panel');
     if (panel) panel.remove();
@@ -333,8 +343,48 @@
     try { sessionStorage.setItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN, String(Date.now())); } catch {}
   }
 
+  function setBootstrapReloadMode(mode) {
+    try {
+      if (mode === 'auto' || mode === 'home') sessionStorage.setItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE, mode);
+      else sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE);
+    } catch {}
+  }
+
   function clearBootstrapReloadToken() {
     try { sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN); } catch {}
+  }
+
+  function clearPendingActionTimers() {
+    try { if (state.pendingStartTimer) clearTimeout(state.pendingStartTimer); } catch {}
+    try { if (state.pendingReloadTimer) clearTimeout(state.pendingReloadTimer); } catch {}
+    state.pendingStartTimer = 0;
+    state.pendingReloadTimer = 0;
+  }
+
+  function schedulePendingStart(fn, delay = 0) {
+    try { if (state.pendingStartTimer) clearTimeout(state.pendingStartTimer); } catch {}
+    state.pendingStartTimer = window.setTimeout(() => {
+      state.pendingStartTimer = 0;
+      fn();
+    }, delay);
+  }
+
+  function schedulePendingReload(fn, delay = 120) {
+    try { if (state.pendingReloadTimer) clearTimeout(state.pendingReloadTimer); } catch {}
+    state.pendingReloadTimer = window.setTimeout(() => {
+      state.pendingReloadTimer = 0;
+      fn();
+    }, delay);
+  }
+
+  function consumeBootstrapReloadMode() {
+    try {
+      const mode = sessionStorage.getItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE) || '';
+      sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE);
+      return mode === 'auto' || mode === 'home' ? mode : '';
+    } catch {
+      return '';
+    }
   }
 
   function isPipelinePage() {
@@ -395,6 +445,13 @@
 
   function runFrontIdleReloadWatchdog() {
     if (state.destroyed) return;
+    if (!state.running && !state.refreshRequiredThisLoad) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      state.frontIdleLastSignature = getFrontIdleSignature();
+      return;
+    }
 
     if (!isPipelinePage()) {
       state.frontIdleFrontSinceAt = 0;
@@ -436,9 +493,15 @@
     if (state.frontIdleReloadPending) return;
 
     state.frontIdleReloadPending = true;
+    setBootstrapReloadMode('home');
+    setBootstrapReloadToken();
+    state.mode = 'home';
+    saveMode(state.mode);
+    syncUi();
+    setStatus('RELOADING (HOME)');
     log('Front idle timeout reached: reloading AgencyZoom pipeline page', 'warn');
     persistState();
-    setTimeout(() => {
+    schedulePendingReload(() => {
       if (!state.destroyed) location.reload();
     }, 120);
   }
@@ -899,7 +962,7 @@
     });
 
     state.ui.start?.addEventListener('click', () => {
-      if (state.running) stopRun('Stopped');
+      if (state.running) stopRun('Stopped', { manual: true });
       else startRun(false);
     });
   }
@@ -947,7 +1010,7 @@
       log(`Cleared ${cleared} transient workflow key${cleared === 1 ? '' : 's'} before fresh run`, 'ok');
       log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
       setBootstrapReloadToken();
-      setTimeout(() => {
+      schedulePendingReload(() => {
         if (!state.destroyed) location.reload();
       }, 120);
       return;
@@ -970,7 +1033,13 @@
     });
   }
 
-  function stopRun(reason = 'Stopped') {
+  function stopRun(reason = 'Stopped', { manual = false } = {}) {
+    clearPendingActionTimers();
+    if (manual) {
+      state.refreshRequiredThisLoad = false;
+      setBootstrapReloadMode('');
+      clearBootstrapReloadToken();
+    }
     state.running = false;
     saveRunning(false);
     persistState();
@@ -985,6 +1054,10 @@
     state.refreshRequiredThisLoad = true;
     state.running = false;
     state.busy = false;
+    state.mode = 'home';
+    saveMode(state.mode);
+    setBootstrapReloadMode('home');
+    setBootstrapReloadToken();
     saveRunning(false);
     persistState();
     syncUi();
