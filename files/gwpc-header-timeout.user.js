@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.5
+// @version      2.3.6
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -9,8 +9,9 @@
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
-// @connect      script.google.com
-// @connect      script.googleusercontent.com
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // ==/UserScript==
@@ -22,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.5';
+  const VERSION = '2.3.6';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -38,6 +39,7 @@
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
+  const WATCH_ALERT_MESSAGE = 'Bot is not botting. Check it.';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
@@ -53,7 +55,8 @@
     watchModeEnabled: 'tm_pc_header_timeout_watch_mode_v1',
     watchPending: 'tm_pc_header_timeout_watch_pending_v1',
     selectorRuleTombstones: 'tm_pc_header_timeout_selector_rule_tombstones_v1',
-    sharedRulesClientId: 'tm_pc_header_timeout_shared_rules_client_id_v1'
+    sharedRulesClientId: 'tm_pc_header_timeout_shared_rules_client_id_v1',
+    watchAlertWebhookUrl: 'tm_pc_header_timeout_watch_alert_webhook_url_v1'
   };
 
   const CFG = {
@@ -83,6 +86,7 @@
     running: true,
     timeoutEnabled: true,
     watchModeEnabled: false,
+    watchAlertWebhookBusy: false,
     logs: [],
     els: {},
     panel: null,
@@ -120,6 +124,7 @@
     sharedRulesSyncing: false,
     sharedRulesSyncQueued: false,
     lastSharedRulesSyncError: '',
+    savedWatchAlertWebhookUrl: '',
     lastScanAt: 0,
     lastRuntimePersistKey: '',
     pausedAtMs: 0,
@@ -162,6 +167,7 @@
     const timeoutWasEnabled = readTimeoutEnabled();
     state.timeoutEnabled = true;
     state.watchModeEnabled = readWatchModeEnabled();
+    hydrateWatchAlertWebhookStorage();
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
     clearLegacyTimeoutProductPayloads();
@@ -215,6 +221,7 @@
     scheduleSharedRulesSync('boot', { force: true });
     setStatus('Watching header');
     syncWatchAlertFromStorage();
+    syncWatchAlertWebhookUi();
     renderAll();
   }
 
@@ -234,6 +241,7 @@
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
     try { document.removeEventListener('visibilitychange', handleVisibilityChange, true); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
+    try { persistWatchAlertWebhookFromUi(false); } catch {}
 
     closeSelectorSession('', { logIt: false, restorePause: true });
     closeManageRulesModal('', { logIt: false });
@@ -382,6 +390,13 @@
     return `${text.slice(0, max - 1)}...`;
   }
 
+  function truncateMiddle(text, max = 100) {
+    const value = String(text || '');
+    if (value.length <= max) return value;
+    const part = Math.max(12, Math.floor((max - 3) / 2));
+    return `${value.slice(0, part)}...${value.slice(-part)}`;
+  }
+
   function log(message) {
     const line = `[${timeNow()}] ${message}`;
     state.logs.unshift(line);
@@ -475,6 +490,92 @@
     renderButtons();
     renderAll();
     return state.watchModeEnabled;
+  }
+
+  function readWatchAlertWebhookUrlFromGM() {
+    try {
+      return normalizeText(GM_getValue(KEYS.watchAlertWebhookUrl, ''));
+    } catch {
+      return '';
+    }
+  }
+
+  function readWatchAlertWebhookUrlFromLocal() {
+    try {
+      return normalizeText(localStorage.getItem(KEYS.watchAlertWebhookUrl) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function mirrorWatchAlertWebhookUrl(url) {
+    const normalized = normalizeText(url);
+    try { GM_setValue(KEYS.watchAlertWebhookUrl, normalized); } catch {}
+    try { localStorage.setItem(KEYS.watchAlertWebhookUrl, normalized); } catch {}
+    try { sessionStorage.setItem(KEYS.watchAlertWebhookUrl, normalized); } catch {}
+    state.savedWatchAlertWebhookUrl = normalized;
+    return normalized;
+  }
+
+  function hydrateWatchAlertWebhookStorage() {
+    const gmUrl = readWatchAlertWebhookUrlFromGM();
+    const localUrl = readWatchAlertWebhookUrlFromLocal();
+    const resolved = gmUrl || localUrl || '';
+    if (resolved) mirrorWatchAlertWebhookUrl(resolved);
+    else state.savedWatchAlertWebhookUrl = '';
+  }
+
+  function getWatchAlertWebhookUrl() {
+    const gmUrl = readWatchAlertWebhookUrlFromGM();
+    const localUrl = readWatchAlertWebhookUrlFromLocal();
+    const resolved = gmUrl || localUrl || state.savedWatchAlertWebhookUrl || '';
+    if (resolved && (gmUrl !== resolved || localUrl !== resolved || state.savedWatchAlertWebhookUrl !== resolved)) {
+      mirrorWatchAlertWebhookUrl(resolved);
+    } else {
+      state.savedWatchAlertWebhookUrl = resolved;
+    }
+    return resolved;
+  }
+
+  function getCurrentWatchAlertWebhookUrlFromUi() {
+    const uiValue = normalizeText(state.els.watchAlertWebhookUrl?.value || '');
+    return uiValue || getWatchAlertWebhookUrl();
+  }
+
+  function isValidHttpUrl(url) {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch {
+      return false;
+    }
+  }
+
+  function updateWatchAlertWebhookActiveUi(url) {
+    const current = normalizeText(url);
+    if (state.els.watchAlertWebhookActive) {
+      state.els.watchAlertWebhookActive.textContent = current ? truncateMiddle(current, 110) : '(empty)';
+      state.els.watchAlertWebhookActive.title = current || '';
+    }
+  }
+
+  function syncWatchAlertWebhookUi() {
+    const url = getWatchAlertWebhookUrl();
+    if (state.els.watchAlertWebhookUrl && state.els.watchAlertWebhookUrl.value !== url) {
+      state.els.watchAlertWebhookUrl.value = url;
+    }
+    updateWatchAlertWebhookActiveUi(url);
+  }
+
+  function persistWatchAlertWebhookFromUi(withLog = false) {
+    const current = normalizeText(state.els.watchAlertWebhookUrl?.value || '');
+    const before = getWatchAlertWebhookUrl();
+    const saved = mirrorWatchAlertWebhookUrl(current);
+    updateWatchAlertWebhookActiveUi(saved);
+    if (withLog && saved !== before) {
+      log(saved ? 'Watch alert webhook URL saved' : 'Watch alert webhook URL cleared');
+    }
+    return saved;
   }
 
   function readPendingWatchPost() {
@@ -1213,10 +1314,15 @@
     if (state.selectorMode || state.modalOpen) {
       restoreSelectorPause();
     }
+    try { persistWatchAlertWebhookFromUi(false); } catch {}
     persistPanelPos();
   }
 
   function handleVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      try { persistWatchAlertWebhookFromUi(false); } catch {}
+      return;
+    }
     if (document.visibilityState === 'visible') {
       scheduleObserve();
       scheduleScan('visible');
@@ -1559,6 +1665,8 @@
       mode: 'watch-timeout',
       status: 'pending',
       savedAt: nowIso(),
+      alertWebhookSentAt: '',
+      alertWebhookError: '',
       dedupeKey: normalizeText(event?.dedupeKey || ''),
       event: deepClone(event),
       context: {
@@ -1572,6 +1680,110 @@
         submission: normalizeText(context?.submission || '')
       }
     };
+  }
+
+  function buildWatchAlertWebhookBody(record, options = {}) {
+    const test = options.test === true;
+    return {
+      message: WATCH_ALERT_MESSAGE,
+      event: test ? 'gwpc_watch_mode_alert_test' : 'gwpc_watch_mode_alert',
+      test,
+      source: SCRIPT_NAME,
+      version: VERSION,
+      azId: normalizeText(record?.context?.job?.['AZ ID'] || record?.event?.identity?.['AZ ID'] || ''),
+      product: normalizeText(record?.context?.productLabel || record?.context?.product || record?.event?.productLabel || record?.event?.product || ''),
+      submissionNumber: normalizeText(record?.context?.submission || record?.event?.submissionNumber || ''),
+      detectedAt: normalizeText(record?.event?.detectedAt || nowIso())
+    };
+  }
+
+  function updatePendingWatchPostAlertState(patch) {
+    const current = readPendingWatchPost();
+    if (!current) return null;
+    const next = {
+      ...current,
+      ...patch
+    };
+    writePendingWatchPost(next);
+    return next;
+  }
+
+  async function sendWatchAlertWebhook(record, options = {}) {
+    if (state.watchAlertWebhookBusy) {
+      if (options.test === true) log('Alert webhook test skipped: already busy');
+      return false;
+    }
+
+    const endpoint = options.url || getCurrentWatchAlertWebhookUrlFromUi();
+    if (!isValidHttpUrl(endpoint)) {
+      if (options.test === true) {
+        setStatus('Alert webhook missing');
+        log('Alert webhook test failed: webhook URL missing or invalid');
+        renderButtons();
+        renderAll();
+      } else if (record?.dedupeKey) {
+        updatePendingWatchPostAlertState({
+          alertWebhookError: 'Webhook URL missing or invalid'
+        });
+        log('Watch alert webhook skipped: webhook URL missing or invalid');
+      }
+      return false;
+    }
+
+    persistWatchAlertWebhookFromUi(false);
+
+    state.watchAlertWebhookBusy = true;
+    renderButtons();
+    if (options.test === true) {
+      setStatus('Sending alert test...');
+      log(`TEST ALERT POST ${endpoint}`);
+    }
+
+    try {
+      const res = await gmPostJson(endpoint, buildWatchAlertWebhookBody(record, options), CFG.sharedRulesRequestTimeoutMs);
+      const raw = typeof res?.responseText === 'string' ? res.responseText : '';
+      const json = safeJsonParse(raw, null);
+      if (Number(res?.status || 0) < 200 || Number(res?.status || 0) >= 400) {
+        throw new Error(`HTTP ${res.status}${raw ? ` | ${raw.slice(0, 300)}` : ''}`);
+      }
+      if (json && json.ok === false) {
+        throw new Error(json.error || json.message || 'Receiver returned ok:false');
+      }
+
+      if (options.test === true) {
+        setStatus('Alert test sent');
+        log('Alert webhook test success');
+      } else if (record?.dedupeKey) {
+        updatePendingWatchPostAlertState({
+          alertWebhookSentAt: nowIso(),
+          alertWebhookError: ''
+        });
+        log('Watch alert webhook sent');
+      }
+      return true;
+    } catch (err) {
+      const message = normalizeText(err?.message || err || 'Alert webhook failed') || 'Alert webhook failed';
+      if (options.test === true) {
+        setStatus('Alert test failed');
+        log(`Alert webhook test failed: ${message}`);
+      } else if (record?.dedupeKey) {
+        updatePendingWatchPostAlertState({
+          alertWebhookError: message
+        });
+        log(`Watch alert webhook failed: ${message}`);
+      }
+      return false;
+    } finally {
+      state.watchAlertWebhookBusy = false;
+      renderButtons();
+      renderAll();
+    }
+  }
+
+  function maybeSendWatchAlertWebhook(record) {
+    if (!isPlainObject(record?.event)) return;
+    if (normalizeText(record.alertWebhookSentAt || '')) return;
+    sendWatchAlertWebhook(record, { test: false }).catch(() => {});
   }
 
   function closeWatchAlert(message = '', options = {}) {
@@ -1649,6 +1861,7 @@
       return;
     }
     if (pending.status === 'pending') {
+      maybeSendWatchAlertWebhook(pending);
       openWatchAlert(pending);
       return;
     }
@@ -1712,8 +1925,11 @@
       if (!pending || normalizeText(pending.dedupeKey || '') !== normalizeText(event.dedupeKey)) {
         writePendingWatchPost(buildPendingWatchRecord(event, context));
         log(`Watch mode captured ${context.product.toUpperCase()} timeout; waiting for manual push or dismiss`);
-        openWatchAlert(readPendingWatchPost());
+        const saved = readPendingWatchPost();
+        maybeSendWatchAlertWebhook(saved);
+        openWatchAlert(saved);
       } else if (pending.status === 'pending') {
+        maybeSendWatchAlertWebhook(pending);
         openWatchAlert(pending);
       }
       return;
@@ -1907,6 +2123,25 @@
             }
             resolve(parsed);
           },
+          onerror: () => reject(new Error('Network error')),
+          ontimeout: () => reject(new Error('Request timeout'))
+        });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  function gmPostJson(url, data, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url,
+          headers: { 'Content-Type': 'application/json' },
+          data: JSON.stringify(data),
+          timeout: timeoutMs,
+          onload: (res) => resolve(res),
           onerror: () => reject(new Error('Network error')),
           ontimeout: () => reject(new Error('Request timeout'))
         });
@@ -2868,10 +3103,19 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-enable-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">TIMEOUT ON</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">WATCH MODE OFF</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-push" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#991b1b;color:#fff;font-weight:800;cursor:pointer;">PUSH WATCH PAYLOAD</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-test" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">TEST ALERT</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">MANAGE RULES</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-sync-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SYNC NOW</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px;">
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;font-size:11px;">Watch Alert Webhook</div>
+          <input ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-webhook-url" type="text" spellcheck="false" placeholder="https://your-webhook.example/..." style="width:100%;border:1px solid #374151;border-radius:10px;background:#0b1220;color:#f9fafb;padding:8px 10px;" />
+          <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:44px 1fr;gap:5px 8px;">
+            <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Active</div>
+            <div ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-webhook-active" style="word-break:break-all;">(empty)</div>
+          </div>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
         <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:72px 1fr;gap:5px 8px;margin-bottom:10px;">
@@ -2898,6 +3142,9 @@
     state.els.timeoutEnableToggle = $('#tm-timeout-enable-toggle', panel);
     state.els.watchModeToggle = $('#tm-timeout-watch-toggle', panel);
     state.els.watchPush = $('#tm-timeout-watch-push', panel);
+    state.els.watchAlertTest = $('#tm-timeout-watch-alert-test', panel);
+    state.els.watchAlertWebhookUrl = $('#tm-timeout-watch-alert-webhook-url', panel);
+    state.els.watchAlertWebhookActive = $('#tm-timeout-watch-alert-webhook-active', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
     state.els.manageRules = $('#tm-timeout-manage-rules', panel);
     state.els.syncRules = $('#tm-timeout-sync-rules', panel);
@@ -2963,6 +3210,32 @@
       dispatchPendingWatchPost();
     };
 
+    state.els.watchAlertTest.onclick = () => {
+      const testRecord = {
+        event: {
+          detectedAt: nowIso(),
+          product: state.current.product || '',
+          productLabel: state.current.productLabel || '',
+          submissionNumber: state.current.submission || ''
+        },
+        context: {
+          job: {
+            'AZ ID': state.current.azId || ''
+          },
+          product: state.current.product || '',
+          productLabel: state.current.productLabel || '',
+          submission: state.current.submission || ''
+        }
+      };
+      sendWatchAlertWebhook(testRecord, { test: true }).catch(() => {});
+    };
+
+    state.els.watchAlertWebhookUrl.onchange = () => {
+      persistWatchAlertWebhookFromUi(true);
+      renderButtons();
+      renderAll();
+    };
+
     state.els.selector.onclick = () => {
       if (!savedSelectorRulesEnabled()) {
         log('Saved selector rules are disabled in this version');
@@ -3001,6 +3274,7 @@
 
     state.els.copyLogs.onclick = () => copyLogsToClipboard();
 
+    syncWatchAlertWebhookUi();
     renderButtons();
     renderAll();
   }
@@ -3023,12 +3297,23 @@
     }
 
     if (state.els.watchPush) {
-      const enabled = state.watchModeEnabled && hasPendingWatchPost() && !state.busy;
+      const enabled = state.watchModeEnabled && hasPendingWatchPost() && !state.watchAlertWebhookBusy;
       state.els.watchPush.disabled = !enabled;
       state.els.watchPush.style.background = enabled ? '#991b1b' : '#334155';
       state.els.watchPush.style.color = enabled ? '#fff' : '#cbd5e1';
       state.els.watchPush.style.opacity = enabled ? '1' : '.7';
       state.els.watchPush.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    }
+
+    if (state.els.watchAlertTest) {
+      const hasUrl = isValidHttpUrl(getCurrentWatchAlertWebhookUrlFromUi());
+      const enabled = !state.watchAlertWebhookBusy && hasUrl;
+      state.els.watchAlertTest.textContent = state.watchAlertWebhookBusy ? 'SENDING ALERT...' : 'TEST ALERT';
+      state.els.watchAlertTest.disabled = !enabled;
+      state.els.watchAlertTest.style.background = state.watchAlertWebhookBusy ? '#2563eb' : (hasUrl ? '#2563eb' : '#334155');
+      state.els.watchAlertTest.style.color = hasUrl ? '#fff' : '#cbd5e1';
+      state.els.watchAlertTest.style.opacity = enabled || state.watchAlertWebhookBusy ? '1' : '.75';
+      state.els.watchAlertTest.style.cursor = enabled ? 'pointer' : 'not-allowed';
     }
 
     if (state.els.selector) {
