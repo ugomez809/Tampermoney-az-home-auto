@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8.3
+// @version      1.8.4
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning, and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -15,9 +15,10 @@
   'use strict';
 
   if (window.top !== window.self) return;
+  try { window.__APEX_DUPLICATES_CONTINUE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'APEX Duplicate Check Continue';
-  const VERSION = '1.8.3';
+  const VERSION = '1.8.4';
 
   const KEYS = {
     PANEL_POS: 'tm_apex_duplicates_continue_panel_pos_v18',
@@ -43,8 +44,10 @@
   const state = {
     running: true,
     busy: false,
+    destroyed: false,
     waitingLogged: false,
     scanTimer: null,
+    scanIntervalTimer: null,
     ui: null,
     observers: [],
     lastUrl: location.href,
@@ -821,8 +824,29 @@
     installObservers();
     watchRoute();
     startObserverHeartbeat();
-    setInterval(() => queueScan(20), CFG.scanMs);
+    state.scanIntervalTimer = setInterval(() => {
+      if (state.destroyed) return;
+      queueScan(20);
+    }, CFG.scanMs);
     queueScan(20);
+    window.__APEX_DUPLICATES_CONTINUE_CLEANUP__ = cleanup;
+  }
+
+  function cleanup() {
+    if (state.destroyed) return;
+    state.destroyed = true;
+    try { clearInterval(state.scanIntervalTimer); } catch {}
+    try { clearInterval(state.routeTimer); } catch {}
+    try { clearInterval(state.observerHeartbeat); } catch {}
+    try { clearInterval(state.forceCloseTimer); } catch {}
+    try { clearTimeout(state.scanTimer); } catch {}
+    state.scanIntervalTimer = null;
+    state.routeTimer = null;
+    state.observerHeartbeat = null;
+    state.forceCloseTimer = null;
+    state.scanTimer = null;
+    disconnectObservers();
+    try { delete window.__APEX_DUPLICATES_CONTINUE_CLEANUP__; } catch {}
   }
 
   if (document.readyState === 'loading') {

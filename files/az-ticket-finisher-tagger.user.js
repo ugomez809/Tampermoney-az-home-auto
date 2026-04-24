@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.29
+// @version      1.0.30
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.29';
+  const VERSION = '1.0.30';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -253,6 +253,18 @@
     log(`Sent launcher close trigger for AZ ${cleanAzId}`);
   }
 
+  // Clear the mirrored final payload handoff so the next ticket starts clean.
+  // If left in place, ticket N+1 can read the ready flag from ticket N before
+  // the mirror rewrites it, and race into fallback/wrong-tag territory.
+  function clearFinalPayloadHandoff(azId) {
+    const cleanAzId = norm(azId || '');
+    try { GM_setValue(GM_KEYS.finalPayload, null); } catch {}
+    try { GM_setValue(GM_KEYS.finalReady, null); } catch {}
+    try { localStorage.removeItem(GM_KEYS.finalPayload); } catch {}
+    try { localStorage.removeItem(GM_KEYS.finalReady); } catch {}
+    log(`Cleared mirrored final payload handoff${cleanAzId ? ` | ${cleanAzId}` : ''}`);
+  }
+
   function deepClone(value) {
     try { return JSON.parse(JSON.stringify(value)); }
     catch { return value; }
@@ -334,7 +346,10 @@
     const openId = norm(openTicketId || '');
     const targetId = norm(targetTicketId || '');
 
-    if (!openId || !targetId || openId === targetId) {
+    // Not-active cases:
+    //   - No open ticket in AZ → nothing to wait on
+    //   - Open ticket matches the payload's AZ ID → payload is ready, run normally
+    if (!openId || openId === targetId) {
       resetWaitingTicketMismatch();
       return { active: false, ready: false };
     }
@@ -344,13 +359,20 @@
       return { active: false, ready: false };
     }
 
+    // targetId='' means "no mirrored payload yet" — wait before blank-tagging,
+    // GWPC rating can take >20s and the mirror writes lag behind completion.
+    const awaitingAny = !targetId;
     const key = `${openId}|${targetId}`;
     const now = Date.now();
     if (state.waitingTicketMismatchKey !== key) {
       state.waitingTicketMismatchKey = key;
       state.waitingTicketMismatchSince = now;
       state.waitingTicketMismatchTriggeredKey = '';
-      log(`Open ticket ${openId} is waiting for ticket ${targetId}; fallback to missing payload in 20s if it stays open`);
+      if (awaitingAny) {
+        log(`Open ticket ${openId} has no mirrored payload yet; fallback to missing payload in 20s if none arrives`);
+      } else {
+        log(`Open ticket ${openId} is waiting for ticket ${targetId}; fallback to missing payload in 20s if it stays open`);
+      }
     }
 
     const elapsedMs = Math.max(0, now - state.waitingTicketMismatchSince);
@@ -2083,9 +2105,11 @@
         delete runRecord.closeFailedAt;
         runRecord.completedAt = nowIso();
         runRecord.payloadSavedAt = data.payloadSavedAt;
+        if (data.missingPayloadFallback) runRecord.missingPayloadFallback = true;
         saveRunRecord(runs, data.azId, runRecord);
         sendTicketClosedSignal(data.azId);
         requestWorkflowCleanup(data.azId);
+        clearFinalPayloadHandoff(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
       } else {
@@ -2118,7 +2142,8 @@
 
     if (mismatchWait.active && !mismatchWait.ready) {
       const remainingSeconds = Math.max(1, Math.ceil(mismatchWait.remainingMs / 1000));
-      setStatus(`Waiting for ticket ${mismatchWait.targetTicketId} (${remainingSeconds}s to missing payload)`);
+      const targetLabel = mismatchWait.targetTicketId ? `ticket ${mismatchWait.targetTicketId}` : 'mirrored payload';
+      setStatus(`Waiting for ${targetLabel} (${remainingSeconds}s to missing payload)`);
       renderAll();
       return;
     }
@@ -2128,9 +2153,12 @@
       fallbackTicketId = mismatchWait.openTicketId;
       if (state.waitingTicketMismatchTriggeredKey !== mismatchWait.key) {
         state.waitingTicketMismatchTriggeredKey = mismatchWait.key;
-        log(`Ticket ${mismatchWait.openTicketId} stayed open for 20s while waiting for ${mismatchWait.targetTicketId}; starting missing payload fallback`);
+        const reason = mismatchWait.targetTicketId
+          ? `while waiting for ${mismatchWait.targetTicketId}`
+          : 'without a mirrored payload';
+        log(`Ticket ${mismatchWait.openTicketId} stayed open for 20s ${reason}; starting missing payload fallback`);
       }
-    } else if (!finalPayload || !openTicket.ticketId || openTicket.ticketId === norm(finalPayload?.azId || '')) {
+    } else if (!openTicket.ticketId || (finalPayload && openTicket.ticketId === norm(finalPayload.azId || ''))) {
       resetWaitingTicketMismatch();
     }
 

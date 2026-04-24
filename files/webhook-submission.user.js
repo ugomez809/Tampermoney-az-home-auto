@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.2
+// @version      1.18.3
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.2';
+  const VERSION = '1.18.3';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -915,6 +915,13 @@
 
     setStatus('Send failed');
     state.busy = false;
+    // Release the pause flag + force-send request so the pipeline can continue
+    // with the next ticket. Without this the shared pause stays set and every
+    // downstream script sees "paused" forever after a transient network error.
+    if (hasForceSendRequest()) {
+      clearForceSendRequest();
+      log('Cleared force-send request after exhausted retries');
+    }
     renderButtons();
     log(`Send failed: ${lastErr?.message || lastErr || 'Unknown error'}`);
   }

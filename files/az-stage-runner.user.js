@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.13
+// @version      2.5.14
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.13';
+  const VERSION = '2.5.14';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -571,7 +571,16 @@
       return false;
     }
 
-    if (wantedId && signalId !== wantedId) return false;
+    if (wantedId && signalId !== wantedId) {
+      // Mismatched signal is for a previous ticket. Clear if older than 60s so
+      // it doesn't linger all the way to the 10-min emergency cutoff and pollute
+      // every subsequent wait loop poll.
+      if (Number.isFinite(closedAtMs) && (Date.now() - closedAtMs) > 60 * 1000) {
+        clearFinisherCloseSignal();
+        log(`Discarded stale finisher close signal | ${signalId}`, 'info');
+      }
+      return false;
+    }
 
     clearFinisherCloseSignal();
     log(`Received finisher close trigger | ${signalId}`, 'ok');

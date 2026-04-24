@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.2
+// @version      4.1.3
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,9 +19,10 @@
   'use strict';
 
   if (window.top !== window.self) return;
+  try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.2';
+  const VERSION = '4.1.3';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -117,6 +118,8 @@
   const state = {
     running: true,
     busy: false,
+    destroyed: false,
+    tickTimer: null,
     doneThisLoad: false,
     flowStartedThisLoad: false,
     triggerSince: 0,
@@ -720,7 +723,8 @@
     log(`Grants: GM_getValue=${typeof GM_getValue}, GM_setValue=${typeof GM_setValue}, GM_deleteValue=${typeof GM_deleteValue}`);
     log('Auto-run armed');
     setStatus('Background gatherer armed');
-    setInterval(() => {
+    state.tickTimer = setInterval(() => {
+      if (state.destroyed) return;
       try { tick(); } catch (err) {
         log(`tick() crashed: ${err?.message || err}`);
         setStatus('Tick error (see log)');
@@ -730,6 +734,16 @@
       log(`tick() crashed: ${err?.message || err}`);
       setStatus('Tick error (see log)');
     }
+
+    window.__HOME_QUOTE_GRABBER_CLEANUP__ = cleanup;
+  }
+
+  function cleanup() {
+    if (state.destroyed) return;
+    state.destroyed = true;
+    try { clearInterval(state.tickTimer); } catch {}
+    state.tickTimer = null;
+    try { delete window.__HOME_QUOTE_GRABBER_CLEANUP__; } catch {}
   }
 
   function announceSkipReason(reason) {
