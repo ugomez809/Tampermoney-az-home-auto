@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.18
+// @version      1.0.19
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.18';
+  const VERSION = '1.0.19';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -1220,6 +1220,103 @@
     }) || null;
   }
 
+  function getTagDropdownMenu(dropdown) {
+    if (!(dropdown instanceof Element)) return null;
+
+    const owns = norm(dropdown.getAttribute('aria-owns') || dropdown.getAttribute('aria-controls') || '');
+    if (owns) {
+      const owned = document.getElementById(owns);
+      if (owned) {
+        const menu = owned.closest('.dropdown-menu');
+        if (menu) return menu;
+        return owned;
+      }
+    }
+
+    const wrapper = dropdown.closest('.bootstrap-select, .dropdown, .btn-group, .az-tags-select');
+    if (wrapper) {
+      const menu = wrapper.querySelector('.dropdown-menu, .inner[role="listbox"], [role="listbox"]');
+      if (menu) return menu;
+    }
+
+    return findVisibleElements('#add-tag-form .dropdown-menu, .bootstrap-select .dropdown-menu, .dropdown-menu').find(Boolean) || null;
+  }
+
+  function isTagDropdownOpen(dropdown) {
+    if (!(dropdown instanceof Element)) return false;
+
+    const expanded = String(dropdown.getAttribute('aria-expanded') || '').toLowerCase() === 'true';
+    if (expanded) return true;
+
+    const wrapper = dropdown.closest('.bootstrap-select, .dropdown, .btn-group');
+    if (wrapper?.classList.contains('show')) return true;
+
+    const menu = getTagDropdownMenu(dropdown);
+    if (menu && visible(menu)) return true;
+
+    return false;
+  }
+
+  function dispatchKeySequence(el, key) {
+    if (!(el instanceof Element)) return;
+    const view = el.ownerDocument?.defaultView || window;
+    for (const type of ['keydown', 'keyup']) {
+      try {
+        el.dispatchEvent(new KeyboardEvent(type, {
+          key,
+          code: key === ' ' ? 'Space' : key,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view
+        }));
+      } catch {}
+    }
+  }
+
+  async function tryOpenTagDropdown(dropdown) {
+    if (!(dropdown instanceof Element)) return false;
+    if (isTagDropdownOpen(dropdown)) return true;
+
+    const wrapper = dropdown.closest('.bootstrap-select, .dropdown, .btn-group, .az-tags-select');
+    const clickTargets = [dropdown];
+    if (wrapper && wrapper !== dropdown) clickTargets.push(wrapper);
+
+    for (const target of clickTargets) {
+      strongClick(target);
+      await sleep(220);
+      if (isTagDropdownOpen(dropdown)) return true;
+    }
+
+    try { dropdown.focus({ preventScroll: true }); } catch {}
+    for (const key of ['ArrowDown', 'Enter', ' ']) {
+      dispatchKeySequence(dropdown, key);
+      await sleep(220);
+      if (isTagDropdownOpen(dropdown)) return true;
+    }
+
+    try {
+      const $ = window.jQuery || window.$;
+      if ($) {
+        const jqDropdown = $(dropdown);
+        if (typeof jqDropdown.dropdown === 'function') {
+          jqDropdown.dropdown('toggle');
+          await sleep(220);
+          if (isTagDropdownOpen(dropdown)) return true;
+        }
+
+        const jqSelect = jqDropdown.closest('.bootstrap-select').prev('select');
+        if (jqSelect?.length && typeof jqSelect.selectpicker === 'function') {
+          jqSelect.selectpicker('toggle');
+          await sleep(220);
+          if (isTagDropdownOpen(dropdown)) return true;
+        }
+      }
+    } catch {}
+
+    return isTagDropdownOpen(dropdown);
+  }
+
   function findVisibleSavedTagTarget(kind) {
     const targets = getTagTargets();
     const record = targets[kind];
@@ -1245,22 +1342,26 @@
       return false;
     }
 
-    strongClick(dropdown);
-    log('Clicked: Tag dropdown');
+    const openedNow = await tryOpenTagDropdown(dropdown);
+    if (!openedNow) {
+      log('Tag dropdown did not open');
+      return false;
+    }
+    log('Opened: Tag dropdown');
     await sleep(CFG.bigActionDelayMs);
 
     const opened = await waitFor(() =>
-      findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
+      isTagDropdownOpen(dropdown) && (findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag')),
     3000);
     if (!opened) {
       await sleep(CFG.bigActionDelayMs);
-      strongClick(dropdown);
-      log('Retried: Tag dropdown');
+      const reopened = await tryOpenTagDropdown(dropdown);
+      log(reopened ? 'Retried: Tag dropdown' : 'Retried tag dropdown but still closed');
       await sleep(CFG.bigActionDelayMs);
-      const reopened = await waitFor(() =>
-        findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
+      const choicesVisible = await waitFor(() =>
+        isTagDropdownOpen(dropdown) && (findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag')),
       3000);
-      if (!reopened) {
+      if (!choicesVisible) {
         log('Tag choices not visible after opening tag dropdown');
         return false;
       }
