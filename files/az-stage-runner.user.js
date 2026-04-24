@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.10
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and reloads after 40s of no meaningful visible AZ page changes while frontmost.
+// @version      2.5.11
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, and reloads after 40s of meaningful inactivity while frontmost.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.10';
+  const VERSION = '2.5.11';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -193,6 +193,7 @@
     frontIdleLastSignature: '',
     frontIdleArmedLogged: false,
     frontIdleReloadPending: false,
+    refreshRequiredThisLoad: false,
     externalWakeTick: 0,
     storageWakeHandler: null
   };
@@ -914,6 +915,16 @@
   }
 
   function startRun(isRestore = false) {
+    if (state.refreshRequiredThisLoad) {
+      state.running = false;
+      saveRunning(false);
+      persistState();
+      syncUi();
+      setStatus('REFRESH REQUIRED');
+      log('Refresh required before next ticket on this page load', 'warn');
+      return;
+    }
+
     if (!state.mode) {
       state.running = false;
       saveRunning(false);
@@ -967,6 +978,21 @@
     syncUi();
     setStatus(reason.toUpperCase());
     log(reason, 'warn');
+  }
+
+  function blockUntilRefresh(ticketId = '') {
+    const cleanTicketId = norm(ticketId || '');
+    state.refreshRequiredThisLoad = true;
+    state.running = false;
+    state.busy = false;
+    saveRunning(false);
+    persistState();
+    syncUi();
+    setStatus('REFRESH REQUIRED');
+    updateLastId(cleanTicketId || '');
+    markFrontIdleActivity();
+    state.frontIdleLastSignature = getFrontIdleSignature();
+    log(`Refresh required before next ticket${cleanTicketId ? ` | ${cleanTicketId}` : ''}`, 'warn');
   }
 
   async function runLoop() {
@@ -1071,7 +1097,8 @@
 
         state.processedIds.add(ticketId);
         clearDockHighlight();
-        await foregroundSleep(CFG.nextRunAfterCloseMs);
+        blockUntilRefresh(ticketId);
+        return;
       }
     } finally {
       state.busy = false;
