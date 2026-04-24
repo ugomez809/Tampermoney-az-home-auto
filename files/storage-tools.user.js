@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.2
+// @version      1.5.3
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,9 +21,9 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.2';
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v152';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v152';
+  const VERSION = '1.5.3';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v153';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v153';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   // Log-export feature: any tracked-prefix key ending in _logs_v1 is a
   // per-script rolling log buffer written by individual scripts so this
@@ -432,7 +432,30 @@
     }
   }
 
+  function syncSharedLogKeys() {
+    // Mirror the current origin's per-script log keys into storage-tools'
+    // own GM namespace so an export triggered from ANY origin can reach
+    // every script's logs. This piggybacks on the shared-GM-by-@namespace
+    // behavior already used by setCachedRecord() for payload mirroring.
+    let keys;
+    try { keys = Object.keys(localStorage); } catch { return; }
+    for (const key of keys) {
+      if (!isLogKey(key)) continue;
+      let rawValue;
+      try { rawValue = localStorage.getItem(key); } catch { continue; }
+      if (rawValue == null) continue;
+      const lastKey = `${key}__lastRaw`;
+      if (state.lastSeen[lastKey] === rawValue) continue;
+      state.lastSeen[lastKey] = rawValue;
+      const parsed = safeJsonParse(rawValue);
+      if (!parsed || typeof parsed !== 'object') continue;
+      try { GM_setValue(key, parsed); } catch {}
+    }
+  }
+
   function syncSharedCaches() {
+    syncSharedLogKeys();
+
     if (isAzHost()) {
       syncCacheFromCandidates(CACHE_KEYS.azPayload, LIVE_KEYS.azPayloadCandidates, ['localStorage', 'sessionStorage']);
     }
@@ -706,6 +729,9 @@
         try {
           if (typeof GM_deleteValue === 'function') { GM_deleteValue(record.key); gmCount++; }
         } catch {}
+        // Drop the lastSeen cache so the next syncSharedLogKeys tick
+        // re-mirrors the script's fresh (empty) buffer into GM.
+        delete state.lastSeen[`${record.key}__lastRaw`];
       }
 
       // Broadcast the clear-request signal so every running script empties
