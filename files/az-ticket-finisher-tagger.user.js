@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.13
+// @version      1.0.14
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.13';
+  const VERSION = '1.0.14';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -552,6 +552,7 @@
       payload.bundle?.home?.ready ? 'Yes' : ''
     );
 
+    const autoBranchExists = isPlainObject(payload.bundle?.auto) || isPlainObject(autoRaw) || isPlainObject(payload.autoPayload);
     const autoValue = pickFirst(
       autoRaw['Auto'],
       auto['Auto'],
@@ -560,7 +561,7 @@
       autoRaw.data?.auto,
       auto.data?.auto,
       autoRow['Auto'],
-      payload.bundle?.auto?.ready ? 'Yes' : ''
+      payload.bundle?.auto?.ready ? 'Yes' : (autoBranchExists ? 'No' : '')
     );
 
     const homeSubmission = pickFirst(
@@ -1151,6 +1152,11 @@
     for (const label of FIELD_ORDER) {
       const rawValue = norm(data.fields[label] || '');
       const value = formatFieldValue(label, rawValue);
+      if (!value) {
+        log(`Skipped blank field: ${label}`);
+        await sleep(CFG.bigActionDelayMs);
+        continue;
+      }
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
         log(`Filled field: ${label} = ${value || '(blank)'}${rawValue && rawValue !== value ? ` (from ${rawValue})` : ''}`);
@@ -1384,8 +1390,7 @@
     state.picker = {
       type,
       items: type === 'fields' ? FIELD_ORDER.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
-      index: 0,
-      waitingForPrimerClick: type === 'tags'
+      index: 0
     };
 
     ensureHoverBox();
@@ -1398,9 +1403,13 @@
     state.pickerClick = (event) => {
       const target = getSelectableTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
       if (!target) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
+      const current = state.picker?.items?.[state.picker.index];
+      const passThrough = state.picker?.type === 'tags' && current?.key === 'tagDropdown';
+      if (!passThrough) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+      }
       handlePickerSelection(target);
     };
 
@@ -1414,27 +1423,18 @@
     document.addEventListener('keydown', state.pickerKeydown, true);
 
     if (type === 'tags') {
-      state.pickerPrimerClick = () => {
+      setTimeout(() => {
         if (!state.picker) return;
-        state.picker.waitingForPrimerClick = false;
-        setStatus(`Picker: click ${state.picker.items[state.picker.index].label}`);
-        log('Picker ignored the first click by design. Now click the requested tag.');
-        document.removeEventListener('click', state.pickerPrimerClick, true);
-        state.pickerPrimerClick = null;
-        setTimeout(() => {
-          if (!state.picker) return;
-          document.addEventListener('click', state.pickerClick, true);
-        }, 0);
-      };
-      document.addEventListener('click', state.pickerPrimerClick, true);
+        document.addEventListener('click', state.pickerClick, true);
+      }, 0);
     } else {
       document.addEventListener('click', state.pickerClick, true);
     }
 
     const current = state.picker.items[state.picker.index];
     if (type === 'tags') {
-      setStatus(`Picker: first click ignored, then click ${current.label}`);
-      log(`Tag picker started: first click ignored, then click ${current.label}`);
+      setStatus(`Picker: click ${current.label}`);
+      log(`Tag picker started: click ${current.label}${current.key === 'tagDropdown' ? ' (click passes through)' : ''}`);
     } else {
       setStatus(`Picker: click ${current.label}`);
       log(`Picker started: click ${current.label}`);
