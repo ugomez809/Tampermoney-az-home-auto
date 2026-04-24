@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.10
+// @version      1.0.11
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.10';
+  const VERSION = '1.0.11';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -60,6 +60,7 @@
     dockTop: '.az-dock__top',
     topName: 'h3.currentCustomerName',
     topTags: '.az-dock__display-tags .az-def-badge, .az-dock__display-tags .az-def-badge.tag',
+    vendorSync: '.origin-vendor-sync, [class*="vendor-sync"], [class*="origin-vendor"]',
     mainTab: 'a[href="#tabDetail"][data-toggle="tab"]',
     mainPane: '#tabDetail',
     detailForm: '#detailDockform',
@@ -353,8 +354,49 @@
     return nodes.find((node) => lower(node.textContent || '').includes(want)) || null;
   }
 
+  function extractTicketIdFromText(text) {
+    const clean = norm(text || '');
+    if (!clean) return '';
+    const match = clean.match(/\bID:\s*(\d{5,})\b/i) || clean.match(/\b(\d{5,})\b/);
+    return match ? match[1] : '';
+  }
+
+  function scoreDockRoot(root) {
+    if (!(root instanceof Element) || !visible(root)) return -1;
+    let score = 0;
+    if (root.matches('#serviceDetailDock')) score += 8;
+    if (root.querySelector(SEL.detailForm)) score += 6;
+    if (root.querySelector(SEL.topName)) score += 5;
+    if (root.querySelector(SEL.vendorSync)) score += 5;
+    if (extractTicketIdFromText(root.textContent || '')) score += 4;
+    if (root.querySelector(SEL.noteOpener)) score += 2;
+    if (root.querySelector(SEL.tagOpener)) score += 2;
+    if (root.querySelector(SEL.mainTab)) score += 2;
+    if (root.matches('#notePanelContainer')) score -= 4;
+    if (root.matches('.az-dock__top')) score -= 2;
+    return score;
+  }
+
   function getOpenDockRoot() {
-    return document.querySelector(SEL.dockRoot) || null;
+    const seen = new Set();
+    const candidates = [];
+    for (const root of Array.from(document.querySelectorAll(SEL.dockRoot))) {
+      if (!(root instanceof Element) || seen.has(root)) continue;
+      seen.add(root);
+      candidates.push(root);
+    }
+    if (!candidates.length) return null;
+
+    let best = null;
+    let bestScore = -1;
+    for (const root of candidates) {
+      const score = scoreDockRoot(root);
+      if (score > bestScore) {
+        best = root;
+        bestScore = score;
+      }
+    }
+    return bestScore >= 0 ? best : null;
   }
 
   function getOpenTicketInfo() {
@@ -372,10 +414,13 @@
     }
 
     let ticketId = '';
-    const syncNode = root.querySelector('.origin-vendor-sync');
-    const syncText = norm(syncNode?.textContent || '');
-    const match = syncText.match(/\bID:\s*(\d+)\b/i);
-    if (match) ticketId = match[1];
+    const syncNode = root.querySelector(SEL.vendorSync);
+    ticketId = extractTicketIdFromText(syncNode?.textContent || '');
+    if (!ticketId) ticketId = extractTicketIdFromText(root.textContent || '');
+    if (!ticketId) {
+      const topText = norm((document.querySelector(SEL.dockTop)?.textContent || ''));
+      ticketId = extractTicketIdFromText(topText);
+    }
 
     const tags = Array.from(root.querySelectorAll(SEL.topTags))
       .map((el) => norm(el.textContent))
