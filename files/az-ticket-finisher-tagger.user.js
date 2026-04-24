@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.30
+// @version      1.0.31
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,10 +20,20 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.30';
+  const VERSION = '1.0.31';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
+
+  // Persist state.logs to a tracked key so storage-tools.user.js can export
+  // every script's logs in one click, and listen for a cross-origin clear
+  // signal so CLEAR LOGS empties every running script's buffer at once.
+  const LOG_PERSIST_KEY = 'tm_az_ticket_finisher_tagger_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const GM_KEYS = {
     finalPayload: 'tm_az_gwpc_final_payload_v1',
@@ -119,6 +129,7 @@
     panel: null,
     ui: {},
     tickTimer: null,
+    logsIntervalTimer: null,
     picker: null,
     hoverBox: null,
     hoveredEl: null,
@@ -148,9 +159,12 @@
     setStatus(state.running ? 'Waiting for mirrored payload' : 'Stopped');
 
     state.tickTimer = setInterval(() => tick(), CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
     window.addEventListener('beforeunload', persistPanelPos, true);
     window.addEventListener('pagehide', persistPanelPos, true);
     window.addEventListener('resize', keepPanelInView, true);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
 
     tick();
     window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__ = cleanup;
@@ -160,9 +174,11 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('beforeunload', persistPanelPos, true); } catch {}
     try { window.removeEventListener('pagehide', persistPanelPos, true); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     stopPicker('', false);
     try { state.hoverBox?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
@@ -320,7 +336,52 @@
     state.logs.unshift(line);
     state.logs = state.logs.slice(0, CFG.maxLogLines);
     renderLogs();
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    try { renderAll(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function setStatus(text) {

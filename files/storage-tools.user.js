@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.1
+// @version      1.5.2
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,10 +21,15 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.1';
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v151';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v151';
+  const VERSION = '1.5.2';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v152';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v152';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
+  // Log-export feature: any tracked-prefix key ending in _logs_v1 is a
+  // per-script rolling log buffer written by individual scripts so this
+  // hub can aggregate + download them in one click.
+  const LOG_KEY_SUFFIX = '_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
 
   const TRACKED_PREFIXES = [
     'tm_',
@@ -540,6 +545,182 @@
     }
   }
 
+  function isLogKey(key) {
+    if (typeof key !== 'string' || !key.endsWith(LOG_KEY_SUFFIX)) return false;
+    return TRACKED_PREFIXES.some(prefix => key.startsWith(prefix));
+  }
+
+  function collectAllLogRecords() {
+    // Merge logs from localStorage, sessionStorage, and GM storage. Each
+    // record is { key, value, source }. GM is filled by the running
+    // origin's scripts; storage-tools already mirrors cross-origin state
+    // on a timer so by the time the operator clicks LOGS TXT, GM should
+    // carry logs from all three origins' scripts.
+    const byKey = new Map();
+    const take = (key, rawValue, source) => {
+      if (!isLogKey(key)) return;
+      let value = rawValue;
+      if (typeof value === 'string') value = safeJsonParse(value) ?? value;
+      if (!value || typeof value !== 'object') return;
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { key, value, source });
+        return;
+      }
+      const existingAt = Date.parse(existing.value?.updatedAt || '') || 0;
+      const candidateAt = Date.parse(value?.updatedAt || '') || 0;
+      if (candidateAt > existingAt) byKey.set(key, { key, value, source });
+    };
+
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key) take(key, localStorage.getItem(key), 'localStorage');
+      }
+    } catch {}
+    try {
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key) take(key, sessionStorage.getItem(key), 'sessionStorage');
+      }
+    } catch {}
+    try {
+      const gmKeys = typeof GM_listValues === 'function' ? GM_listValues() : [];
+      for (const key of gmKeys || []) take(key, GM_getValue(key, null), 'GM');
+    } catch {}
+
+    return Array.from(byKey.values()).sort((a, b) => {
+      const oa = originRank(a.value?.origin || '');
+      const ob = originRank(b.value?.origin || '');
+      if (oa !== ob) return oa - ob;
+      return String(a.value?.script || a.key).localeCompare(String(b.value?.script || b.key));
+    });
+  }
+
+  function originRank(origin) {
+    const o = String(origin || '');
+    if (o.includes('agencyzoom.com')) return 0;
+    if (o.includes('lightning.force.com')) return 1;
+    if (o.includes('policycenter')) return 2;
+    return 9;
+  }
+
+  function buildLogsTxt(records) {
+    const parts = [];
+    parts.push('AZ + APEX + GWPC SCRIPT LOG EXPORT');
+    parts.push('');
+    parts.push('WARNING: This file may contain customer names, addresses, ticket IDs,');
+    parts.push('and other sensitive data from operator logs. Do NOT share outside the team.');
+    parts.push('');
+    parts.push(`EXPORTED AT: ${new Date().toISOString()}`);
+    parts.push(`EXPORTED FROM: ${location.origin}`);
+    parts.push(`SCRIPTS CAPTURED: ${records.length}`);
+    parts.push('');
+
+    if (!records.length) {
+      parts.push('(no log buffers were found — install the latest script versions or trigger some activity first)');
+      return parts.join('\n');
+    }
+
+    for (const record of records) {
+      const v = record.value || {};
+      const lines = Array.isArray(v.lines) ? v.lines : [];
+      parts.push('==============================');
+      parts.push(`${v.script || '(unknown script)'} v${v.version || '?'}`);
+      parts.push(`Origin:  ${v.origin || '(unknown)'}`);
+      parts.push(`Updated: ${v.updatedAt || '(unknown)'}`);
+      parts.push(`Source:  ${record.source}`);
+      parts.push(`Key:     ${record.key}`);
+      parts.push(`Lines:   ${lines.length}`);
+      parts.push('==============================');
+      if (!lines.length) {
+        parts.push('(empty buffer)');
+      } else {
+        // state.logs is newest-first in every script; reverse so the export
+        // reads chronologically top-to-bottom.
+        for (const line of [...lines].reverse()) parts.push(String(line));
+      }
+      parts.push('');
+    }
+
+    return parts.join('\n');
+  }
+
+  function exportLogsTxt() {
+    try {
+      if (typeof window.confirm === 'function') {
+        const ok = window.confirm(
+          'Exported logs may contain customer names, addresses, and ticket IDs.\n' +
+          'Do not share the downloaded TXT outside the team.\n\nContinue?'
+        );
+        if (!ok) {
+          toast('Log export cancelled');
+          return;
+        }
+      }
+
+      syncSharedCaches();
+      const records = collectAllLogRecords();
+      const txt = buildLogsTxt(records);
+      const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+      const fileName = `az-apex-gwpc-logs_${location.host.replace(/[^\w.-]+/g, '_')}_${safeNowStamp()}.txt`;
+
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 1000);
+
+      toast(`Logs exported (${records.length} script${records.length === 1 ? '' : 's'})`);
+    } catch (err) {
+      console.error('[AZ+APEX+GWPC Storage Tools] Log export failed:', err);
+      toast('Log export failed');
+    }
+  }
+
+  function clearAllLogs() {
+    try {
+      if (typeof window.confirm === 'function') {
+        const ok = window.confirm(
+          'Clear the log buffers of every running script across AZ, APEX, and GWPC?\n' +
+          'Script UIs will empty within a couple of seconds. Continue?'
+        );
+        if (!ok) {
+          toast('Log clear cancelled');
+          return;
+        }
+      }
+
+      const records = collectAllLogRecords();
+      let localCount = 0;
+      let sessionCount = 0;
+      let gmCount = 0;
+
+      for (const record of records) {
+        try { if (localStorage.getItem(record.key) != null) { localStorage.removeItem(record.key); localCount++; } } catch {}
+        try { if (sessionStorage.getItem(record.key) != null) { sessionStorage.removeItem(record.key); sessionCount++; } } catch {}
+        try {
+          if (typeof GM_deleteValue === 'function') { GM_deleteValue(record.key); gmCount++; }
+        } catch {}
+      }
+
+      // Broadcast the clear-request signal so every running script empties
+      // its in-memory buffer on its next log tick (2 s poll + storage event).
+      const signal = { requestedAt: new Date().toISOString(), source: 'storage-tools' };
+      try { localStorage.setItem(LOG_CLEAR_SIGNAL_KEY, JSON.stringify(signal)); } catch {}
+      try { if (typeof GM_setValue === 'function') GM_setValue(LOG_CLEAR_SIGNAL_KEY, signal); } catch {}
+
+      toast(`Cleared ${records.length} log buffer${records.length === 1 ? '' : 's'} (local ${localCount}, session ${sessionCount}, GM ${gmCount})`);
+    } catch (err) {
+      console.error('[AZ+APEX+GWPC Storage Tools] Log clear failed:', err);
+      toast('Log clear failed');
+    }
+  }
+
   function clearCachedRecords() {
     clearCachedRecord(CACHE_KEYS.azPayload);
     clearCachedRecord(CACHE_KEYS.apexPayload);
@@ -755,8 +936,24 @@
       () => clearTrackedKeysAndCaches({ confirmFirst: true, autoMode: false })
     );
 
+    const logsExportBtn = makeButton(
+      'LOGS TXT',
+      'Download logs from every running script (AZ + APEX + GWPC) as one TXT',
+      '#1e5a9c',
+      exportLogsTxt
+    );
+
+    const logsClearBtn = makeButton(
+      'CLEAR LOGS',
+      'Empty the log buffers of every running script across all three origins',
+      '#c56a1a',
+      clearAllLogs
+    );
+
     wrap.appendChild(exportBtn);
     wrap.appendChild(clearBtn);
+    wrap.appendChild(logsExportBtn);
+    wrap.appendChild(logsClearBtn);
     document.body.appendChild(wrap);
   }
 

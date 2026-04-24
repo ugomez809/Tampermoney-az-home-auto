@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.14
+// @version      2.5.15
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
+// @grant        GM_getValue
 // @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
@@ -19,7 +20,17 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.14';
+  const VERSION = '2.5.15';
+
+  // Persist state.logs to a tracked key so storage-tools.user.js can export
+  // every script's logs in one click, and listen for a cross-origin clear
+  // signal so CLEAR LOGS empties every running script's buffer at once.
+  const LOG_PERSIST_KEY = 'tm_az_stage_runner_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -198,7 +209,8 @@
     externalWakeTick: 0,
     storageWakeHandler: null,
     pendingStartTimer: 0,
-    pendingReloadTimer: 0
+    pendingReloadTimer: 0,
+    logsIntervalTimer: null
   };
 
   init();
@@ -281,11 +293,17 @@
         startRun(false);
       }
     }, 0);
+
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   function cleanup() {
     state.destroyed = true;
     state.busy = false;
+    try { clearInterval(state.logsIntervalTimer); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
 
     try { window.removeEventListener('keydown', state.keyHandler, true); } catch {}
     try { window.removeEventListener('beforeunload', state.persistHandler, true); } catch {}
@@ -802,9 +820,53 @@
     state.logs.unshift({ line, kind });
     state.logs = state.logs.slice(0, CFG.maxLogLines);
     renderLogs();
+    persistLogsThrottled();
 
     if (kind === 'error') console.error(`[${SCRIPT_NAME}] ${msg}`);
     else console.log(`[${SCRIPT_NAME}] ${msg}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function renderLogs() {
