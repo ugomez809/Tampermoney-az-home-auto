@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.27
+// @version      1.0.28
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.27';
+  const VERSION = '1.0.28';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -99,6 +99,9 @@
     actionSettleMs: 900,
     noteSettleMs: 1200,
     updateSettleMs: 1200,
+    closeWaitMs: 5000,
+    closeRetryMs: 700,
+    closeAttempts: 4,
     stalePayloadSlackMs: 1500,
     maxLogLines: 90,
     zIndex: 2147483647,
@@ -1780,18 +1783,76 @@
     return true;
   }
 
-  function findDockCloseButton() {
-    const exact = findVisibleElements(SEL.dockClose)[0];
-    if (exact) return exact;
+  function fireEscape() {
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true
+      }));
+      document.dispatchEvent(new KeyboardEvent('keyup', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true
+      }));
+    } catch {}
+  }
 
+  function getDockRootTicketId(root) {
+    if (!(root instanceof Element)) return '';
+    const syncNode = root.querySelector('.origin-vendor-sync');
+    const syncText = norm(syncNode?.textContent || '');
+    const match = syncText.match(/\bID:\s*(\d+)\b/i);
+    return match ? match[1] : '';
+  }
+
+  function getTicketDockRoots() {
     const roots = [
       document.querySelector('#serviceDetailDock'),
       document.querySelector('#notePanelContainer'),
       getOpenDockRoot(),
-      document
-    ].filter(Boolean);
+      ...Array.from(document.querySelectorAll('.az-dock'))
+    ].filter((root, index, list) => root instanceof Element && list.indexOf(root) === index);
 
-    for (const root of roots) {
+    return roots.filter((root) => visible(root) || root.querySelector('.az-dock__close'));
+  }
+
+  function getTicketDockRoot(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    const roots = getTicketDockRoots();
+    if (wantedId) {
+      const exact = roots.find((root) => getDockRootTicketId(root) === wantedId);
+      if (exact) return exact;
+    }
+    return roots.find((root) => root.id === 'serviceDetailDock') || roots[0] || null;
+  }
+
+  function isTicketDockClosed(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    const root = getTicketDockRoot(wantedId);
+    if (!root || !visible(root)) return true;
+
+    const info = getOpenTicketInfo();
+    const openId = norm(info.ticketId || '');
+    if (!openId) return true;
+    if (wantedId && openId !== wantedId) return true;
+
+    return false;
+  }
+
+  function findDockCloseButton(ticketId = '') {
+    const preferredRoot = getTicketDockRoot(ticketId);
+    if (preferredRoot) {
+      const scoped = Array.from(preferredRoot.querySelectorAll('.az-dock__close')).find(visible);
+      if (scoped) return scoped;
+    }
+
+    const exact = findVisibleElements(SEL.dockClose)[0];
+    if (exact) return exact;
+
+    for (const root of getTicketDockRoots()) {
       const found = Array.from(root.querySelectorAll('.az-dock__close')).find(visible);
       if (found) return found;
     }
@@ -1799,23 +1860,43 @@
     return null;
   }
 
-  async function closeTicketDockAtEnd() {
-    const button = findDockCloseButton();
-    if (!button) {
-      log('Ticket close button not found');
-      return false;
-    }
-
-    strongClick(button);
-    log('Clicked: Ticket close');
-
-    const closed = await waitFor(() => !getOpenDockRoot(), 5000);
-    if (closed) {
-      log('Ticket drawer closed');
+  async function closeTicketDockAtEnd(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    if (isTicketDockClosed(wantedId)) {
+      log(`Ticket drawer already closed${wantedId ? ` | ${wantedId}` : ''}`);
       return true;
     }
 
-    log('Ticket drawer did not close after click');
+    for (let attempt = 1; attempt <= CFG.closeAttempts; attempt += 1) {
+      const button = findDockCloseButton(wantedId);
+      const root = getTicketDockRoot(wantedId);
+      const rootLabel = root?.id || root?.className || 'dock';
+
+      if (button) {
+        strongClick(button);
+        log(`Clicked: Ticket close | attempt ${attempt} | root ${norm(rootLabel) || 'dock'}`);
+      } else {
+        log(`Ticket close button not found | attempt ${attempt} | sending Escape`);
+        fireEscape();
+      }
+
+      const closed = await waitFor(() => isTicketDockClosed(wantedId), CFG.closeWaitMs);
+      if (closed) {
+        log(`Ticket drawer closed${wantedId ? ` | ${wantedId}` : ''}`);
+        return true;
+      }
+
+      fireEscape();
+      const closedAfterEscape = await waitFor(() => isTicketDockClosed(wantedId), 1200);
+      if (closedAfterEscape) {
+        log(`Ticket drawer closed with Escape${wantedId ? ` | ${wantedId}` : ''}`);
+        return true;
+      }
+
+      await sleep(CFG.closeRetryMs);
+    }
+
+    log(`Ticket drawer did not close after ${CFG.closeAttempts} attempts${wantedId ? ` | ${wantedId}` : ''}`);
     return false;
   }
 
@@ -1972,14 +2053,25 @@
       }
 
       if (runRecord.fieldsUpdatedAt && runRecord.noteSavedAt && runRecord.tagAppliedAt) {
+        setStatus('Closing ticket');
+        await sleep(CFG.actionSettleMs);
+
+        const closeOk = await closeTicketDockAtEnd(data.azId);
+        if (!closeOk) {
+          runRecord.closeFailedAt = nowIso();
+          saveRunRecord(runs, data.azId, runRecord);
+          setStatus('Close failed');
+          log(`Ticket close failed for AZ ${data.azId}; will retry`);
+          return;
+        }
+
+        delete runRecord.closeFailedAt;
         runRecord.completedAt = nowIso();
         runRecord.payloadSavedAt = data.payloadSavedAt;
         saveRunRecord(runs, data.azId, runRecord);
         requestWorkflowCleanup(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
-        await sleep(3000);
-        await closeTicketDockAtEnd();
       } else {
         setStatus('Partial completion');
       }
