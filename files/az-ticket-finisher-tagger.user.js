@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.31
+// @version      1.0.32
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,11 +20,10 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.31';
+  const VERSION = '1.0.32';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
-
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
   // signal so CLEAR LOGS empties every running script's buffer at once.
@@ -143,7 +142,10 @@
     lastStatus: '',
     waitingTicketMismatchKey: '',
     waitingTicketMismatchSince: 0,
-    waitingTicketMismatchTriggeredKey: ''
+    waitingTicketMismatchTriggeredKey: '',
+    frontSession: 1,
+    wasFrontActive: isFrontActive(),
+    completedFrontRunKeys: new Set()
   };
 
   init();
@@ -163,6 +165,9 @@
     window.addEventListener('beforeunload', persistPanelPos, true);
     window.addEventListener('pagehide', persistPanelPos, true);
     window.addEventListener('resize', keepPanelInView, true);
+    document.addEventListener('visibilitychange', onFrontStateChange, true);
+    window.addEventListener('focus', onFrontStateChange, true);
+    window.addEventListener('blur', onFrontStateChange, true);
     window.addEventListener('storage', handleLogClearStorageEvent, true);
     persistLogsThrottled();
 
@@ -178,6 +183,9 @@
     try { window.removeEventListener('beforeunload', persistPanelPos, true); } catch {}
     try { window.removeEventListener('pagehide', persistPanelPos, true); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
+    try { document.removeEventListener('visibilitychange', onFrontStateChange, true); } catch {}
+    try { window.removeEventListener('focus', onFrontStateChange, true); } catch {}
+    try { window.removeEventListener('blur', onFrontStateChange, true); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     stopPicker('', false);
     try { state.hoverBox?.remove(); } catch {}
@@ -395,6 +403,45 @@
     } catch {
       return document.visibilityState !== 'hidden';
     }
+  }
+
+  function getFrontRunKey(ticketId = '') {
+    const cleanTicketId = norm(ticketId || '');
+    if (!cleanTicketId) return '';
+    return `${state.frontSession}|${cleanTicketId}`;
+  }
+
+  function hasCompletedFrontRun(ticketId = '') {
+    const key = getFrontRunKey(ticketId);
+    return !!(key && state.completedFrontRunKeys.has(key));
+  }
+
+  function markFrontRunCompleted(ticketId = '') {
+    const key = getFrontRunKey(ticketId);
+    if (!key) return;
+    state.completedFrontRunKeys.add(key);
+  }
+
+  function syncFrontSession() {
+    const frontActive = isFrontActive();
+    if (frontActive && !state.wasFrontActive) {
+      state.frontSession += 1;
+      state.completedFrontRunKeys.clear();
+      state.lastPayloadSeenKey = '';
+      resetWaitingTicketMismatch();
+      log(`AgencyZoom returned to front; finisher re-armed for session ${state.frontSession}`);
+    }
+    state.wasFrontActive = frontActive;
+    return frontActive;
+  }
+
+  function onFrontStateChange() {
+    const frontActive = syncFrontSession();
+    renderAll();
+    if (!frontActive || state.destroyed || !state.running || state.busy || state.picker) return;
+    setTimeout(() => {
+      if (!state.destroyed) tick();
+    }, 0);
   }
 
   function resetWaitingTicketMismatch() {
@@ -2043,7 +2090,8 @@
     const {
       forceRun = false,
       finalPayload = null,
-      fallbackTicketId = ''
+      fallbackTicketId = '',
+      runTicketId = ''
     } = options;
 
     const data = finalPayload
@@ -2084,8 +2132,7 @@
     const runs = readRuns();
     const runRecord = computeRunRecord(runs, data.azId);
     if (!forceRun && runRecord.completedAt) {
-      setStatus('Already completed');
-      return;
+      log(`Previous completion found for AZ ${data.azId}; rerunning for front session ${state.frontSession}`);
     }
 
     state.busy = true;
@@ -2168,6 +2215,7 @@
         runRecord.payloadSavedAt = data.payloadSavedAt;
         if (data.missingPayloadFallback) runRecord.missingPayloadFallback = true;
         saveRunRecord(runs, data.azId, runRecord);
+        markFrontRunCompleted(runTicketId || data.azId);
         sendTicketClosedSignal(data.azId);
         requestWorkflowCleanup(data.azId);
         clearFinalPayloadHandoff(data.azId);
@@ -2184,6 +2232,8 @@
   }
 
   function tick() {
+    syncFrontSession();
+
     if (state.destroyed || state.busy || state.picker) {
       renderAll();
       return;
@@ -2254,22 +2304,23 @@
       return;
     }
 
-    const runs = readRuns();
-    const record = computeRunRecord(runs, effectiveAzId);
-    if (record.completedAt && !state.forceRunRequested) {
-      setStatus('Already completed');
+    const currentFrontRunTicketId = norm(openTicket.ticketId || effectiveAzId || '');
+    const completedThisFrontSession = hasCompletedFrontRun(currentFrontRunTicketId);
+    if (completedThisFrontSession && !state.forceRunRequested) {
+      setStatus('Completed for current front session');
       renderAll();
       return;
     }
 
     const payloadKey = workflowPayload?.payloadKey || `missing-payload|${fallbackTicketId || openTicket.ticketId}`;
-    const shouldRun = state.forceRunRequested || state.lastPayloadSeenKey !== payloadKey || !record.completedAt;
+    const shouldRun = state.forceRunRequested || !completedThisFrontSession;
     if (shouldRun) {
       state.lastPayloadSeenKey = payloadKey;
       runWorkflow({
         forceRun: state.forceRunRequested,
         finalPayload: workflowPayload,
-        fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : ''
+        fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : '',
+        runTicketId: currentFrontRunTicketId
       }).catch((err) => {
         log(`Workflow failed: ${err?.message || err}`);
         setStatus('Workflow failed');
