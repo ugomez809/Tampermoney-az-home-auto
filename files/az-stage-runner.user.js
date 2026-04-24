@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.1
-// @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Fresh-start reload clears transient workflow data, restores active-on-reload, switches to Ignored tags, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
+// @version      2.5.2
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, clears transient workflow data, reloads, restores active-on-reload, switches to Ignored tags, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.1';
+  const VERSION = '2.5.2';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -194,10 +194,17 @@
     syncUi();
     renderLogs();
 
+    if (!state.mode) {
+      state.mode = 'home';
+      saveMode(state.mode);
+      syncUi();
+      log('Default mode set: Home', 'info');
+    }
+
     log(`${SCRIPT_NAME} V${VERSION} loaded`, 'ok');
-    log('Pick Auto or Home, then click Start', 'info');
+    log(`Auto start enabled | mode=${state.mode.toUpperCase()}`, 'info');
     log(`Main must return ${FIELD_ORDER.length}/${FIELD_ORDER.length} AZ fields before Quotes`, 'info');
-    log(`Start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
+    log(`Auto start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
     log('Ticket is only done when the finisher closes it', 'info');
     log('ESC stops the run', 'info');
 
@@ -222,23 +229,21 @@
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
     if (state.running) {
-      if (!state.mode) {
-        state.running = false;
-        saveRunning(false);
-        syncUi();
-        setStatus('PICK AUTO/HOME');
-        log('Saved ON state found but no mode was saved. Forced OFF.', 'warn');
-      } else {
-        setStatus(`RESTORING (${state.mode.toUpperCase()})`);
-        log(`Restoring saved ON state | mode=${state.mode.toUpperCase()}`, 'ok');
-        setTimeout(() => {
-          if (!state.destroyed && state.running && !state.busy) {
-            startRun(true);
-          }
-        }, 0);
-      }
+      setStatus(`RESTORING (${state.mode.toUpperCase()})`);
+      log(`Restoring saved ON state | mode=${state.mode.toUpperCase()}`, 'ok');
+      setTimeout(() => {
+        if (!state.destroyed && state.running && !state.busy) {
+          startRun(true);
+        }
+      }, 0);
     } else {
-      setStatus('STOPPED');
+      setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
+      log(`Fresh auto start | mode=${state.mode.toUpperCase()}`, 'ok');
+      setTimeout(() => {
+        if (!state.destroyed && !state.running && !state.busy) {
+          startRun(false);
+        }
+      }, 0);
     }
   }
 
