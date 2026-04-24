@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.6
+// @version      2.5.7
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.6';
+  const VERSION = '2.5.7';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -62,7 +62,8 @@
     SHARED_JOB: 'tm_shared_az_job_v1',
     CURRENT_JOB: 'tm_pc_current_job_v1',
     AZ_CURRENT_JOB: 'tm_az_current_job_v1',
-    WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1'
+    WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1',
+    FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1'
   };
 
   const SS_KEYS = {
@@ -128,6 +129,7 @@
     'tm_pc_flow_stage_v1',
     'tm_az_ticket_finisher_runs_v1',
     KEYS.WORKFLOW_CLEANUP_REQUEST,
+    KEYS.FINISHER_CLOSE_SIGNAL,
     'tm_shared_cache_az_payload_v1',
     'tm_shared_cache_apex_payload_v1',
     'tm_shared_cache_apex_ready_v1',
@@ -437,6 +439,44 @@
 
   function writeJson(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function clearFinisherCloseSignal() {
+    try {
+      localStorage.removeItem(KEYS.FINISHER_CLOSE_SIGNAL);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.FINISHER_CLOSE_SIGNAL);
+    } catch {}
+  }
+
+  function readFinisherCloseSignal() {
+    const signal = readJson(KEYS.FINISHER_CLOSE_SIGNAL, null);
+    return signal && typeof signal === 'object' ? signal : null;
+  }
+
+  function consumeFinisherCloseSignal(ticketId) {
+    const wantedId = norm(ticketId || '');
+    const signal = readFinisherCloseSignal();
+    if (!signal || signal.ready !== true) return false;
+
+    const signalId = norm(signal.ticketId || signal.azId || '');
+    const closedAtMs = Date.parse(norm(signal.closedAt || ''));
+    if (!signalId) {
+      clearFinisherCloseSignal();
+      return false;
+    }
+
+    if (Number.isFinite(closedAtMs) && (Date.now() - closedAtMs) > (10 * 60 * 1000)) {
+      clearFinisherCloseSignal();
+      return false;
+    }
+
+    if (wantedId && signalId !== wantedId) return false;
+
+    clearFinisherCloseSignal();
+    log(`Received finisher close trigger | ${signalId}`, 'ok');
+    return true;
   }
 
   function nowIso() {
@@ -943,6 +983,7 @@
         highlightCard(card, 'saved');
         writeScanState('payload-saved', ready.payload.ticketId, pageLabel);
         log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/${FIELD_ORDER.length}`, 'ok');
+        clearFinisherCloseSignal();
 
         const quoteStarted = await startQuoteFlow();
         if (!quoteStarted) {
@@ -994,8 +1035,13 @@
     while (state.running && !state.destroyed) {
       await waitUntilFrontStable(CFG.frontStableMs);
 
+      if (consumeFinisherCloseSignal(ticketId)) {
+        return true;
+      }
+
       const info = getOpenTicketInfo();
       if (!isTicketDrawerOpen() || !String(info.ticketId || '')) {
+        clearFinisherCloseSignal();
         log(`Ticket closed after finisher | ${ticketId}`, 'ok');
         return true;
       }
