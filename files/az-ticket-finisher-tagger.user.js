@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.16
+// @version      1.0.17
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.16';
+  const VERSION = '1.0.17';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -53,7 +53,6 @@
   ];
 
   const TAG_ORDER = [
-    { key: 'tagDropdown', label: 'Tag dropdown' },
     { key: 'successfulTag', label: 'Success tag' },
     { key: 'failedTag', label: 'Failed tag' }
   ];
@@ -83,9 +82,7 @@
     noteEditor: 'div.ql-editor[contenteditable="true"], div[data-placeholder="Add note here"][contenteditable="true"], .ql-editor',
     pinTop: 'a.pin-top[data-value="0"], a.pin-top',
     saveNote: 'button#add-note, button.btn-primary#add-note',
-    tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
-    tagDropdown: 'button.dropdown-toggle.btn-light[role="combobox"], button[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle',
-    tagMenu: '.dropdown-menu.show, .dropdown-menu[style*="display: block"], .bootstrap-select.show .dropdown-menu, .show > .dropdown-menu'
+    tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag'
   };
 
   const CFG = {
@@ -1203,6 +1200,14 @@
     return null;
   }
 
+  function findVisibleSavedTagTarget(kind) {
+    const targets = getTagTargets();
+    const record = targets[kind];
+    if (!isPlainObject(record)) return null;
+    const found = findSavedElement(record);
+    return visible(found) ? found : null;
+  }
+
   async function openTagPicker() {
     const opener = findTagOpener();
     if (!opener) {
@@ -1214,37 +1219,22 @@
     log('Clicked: Tag opener');
     await sleep(CFG.bigActionDelayMs);
 
-    const dropdownTargetRecord = getTagTargets().tagDropdown;
-    let dropdown = null;
-    if (isPlainObject(dropdownTargetRecord)) {
-      dropdown = await waitFor(() => findSavedElement(dropdownTargetRecord), 5000);
-      if (dropdown) log(`Using saved tag dropdown target: ${dropdownTargetRecord.label || 'Tag dropdown'}`);
-    }
-    if (!dropdown) {
-      dropdown = await waitFor(() => findVisibleElements(SEL.tagDropdown)[0], 5000);
-    }
-    if (!dropdown) {
-      log('Tag dropdown not found');
-      return false;
-    }
-
-    strongClick(dropdown);
-    log('Clicked: Tag dropdown');
-    const opened = await waitFor(() => {
-      const expanded = String(dropdown.getAttribute('aria-expanded') || '').toLowerCase() === 'true';
-      const menu = findVisibleElements(SEL.tagMenu)[0];
-      return expanded || !!menu;
-    }, 3000);
+    const opened = await waitFor(() =>
+      findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
+    3000);
     if (!opened) {
       await sleep(CFG.bigActionDelayMs);
-      strongClick(dropdown);
-      log('Retried: Tag dropdown');
-      await waitFor(() => {
-        const expanded = String(dropdown.getAttribute('aria-expanded') || '').toLowerCase() === 'true';
-        const menu = findVisibleElements(SEL.tagMenu)[0];
-        return expanded || !!menu;
-      }, 3000);
+      strongClick(opener);
+      log('Retried: Tag opener');
+      const reopened = await waitFor(() =>
+        findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
+      3000);
+      if (!reopened) {
+        log('Tag choices not visible after opening tag panel');
+        return false;
+      }
     }
+
     await sleep(CFG.bigActionDelayMs);
     return true;
   }
@@ -1268,7 +1258,10 @@
       return true;
     }
 
-    const target = await waitFor(() => findSavedElement(record), 4000);
+    const target = await waitFor(() => {
+      const found = findSavedElement(record);
+      return visible(found) ? found : null;
+    }, 4000);
     if (!target) {
       log(`Tag target not found: ${record.label || kind}`);
       return false;
@@ -1559,10 +1552,19 @@
   function startPicker(type) {
     if (state.busy || state.picker) return;
 
+    if (type === 'tags') {
+      const existing = getTagTargets();
+      if (isPlainObject(existing) && Object.prototype.hasOwnProperty.call(existing, 'tagDropdown')) {
+        delete existing.tagDropdown;
+        saveTargets(GM_KEYS.tagTargets, existing);
+      }
+    }
+
     state.picker = {
       type,
       items: type === 'fields' ? FIELD_ORDER.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
-      index: 0
+      index: 0,
+      primerPending: type === 'tags'
     };
 
     ensureHoverBox();
@@ -1575,9 +1577,15 @@
     state.pickerClick = (event) => {
       const target = getSelectableTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
       if (!target) return;
-      const current = state.picker?.items?.[state.picker.index];
-      const passThrough = state.picker?.type === 'tags' && current?.key === 'tagDropdown';
-      if (!passThrough) {
+      if (state.picker?.type === 'tags' && state.picker?.primerPending) {
+        state.picker.primerPending = false;
+        const current = state.picker.items[state.picker.index];
+        setStatus(`Picker: click ${current.label}`);
+        log(`First click ignored by design. Now click ${current.label}`);
+        renderAll();
+        return;
+      }
+      if (state.picker?.type !== 'tags' || !state.picker?.primerPending) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
@@ -1606,7 +1614,7 @@
     const current = state.picker.items[state.picker.index];
     if (type === 'tags') {
       setStatus(`Picker: click ${current.label}`);
-      log(`Tag picker started: click ${current.label}${current.key === 'tagDropdown' ? ' (click passes through)' : ''}`);
+      log(`Tag picker started: first click ignored without blocking, then click ${current.label}`);
     } else {
       setStatus(`Picker: click ${current.label}`);
       log(`Picker started: click ${current.label}`);
