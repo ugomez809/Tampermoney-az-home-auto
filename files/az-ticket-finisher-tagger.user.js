@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.6
+// @version      1.0.7
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -98,6 +98,7 @@
     hoverBox: null,
     hoveredEl: null,
     pickerMove: null,
+    pickerPrimerClick: null,
     pickerClick: null,
     pickerKeydown: null,
     activeAzId: '',
@@ -1171,7 +1172,7 @@
       type,
       items: type === 'fields' ? FIELD_ORDER.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
       index: 0,
-      ignoreNextClick: type === 'tags'
+      waitingForPrimerClick: type === 'tags'
     };
 
     ensureHoverBox();
@@ -1182,12 +1183,6 @@
     };
 
     state.pickerClick = (event) => {
-      if (state.picker?.ignoreNextClick) {
-        state.picker.ignoreNextClick = false;
-        setStatus(`Picker: click ${state.picker.items[state.picker.index].label}`);
-        log('Picker ignored the first click by design. Now click the requested tag.');
-        return;
-      }
       const target = getSelectableTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
       if (!target) return;
       event.preventDefault();
@@ -1203,8 +1198,25 @@
     };
 
     document.addEventListener('mousemove', state.pickerMove, true);
-    document.addEventListener('click', state.pickerClick, true);
     document.addEventListener('keydown', state.pickerKeydown, true);
+
+    if (type === 'tags') {
+      state.pickerPrimerClick = () => {
+        if (!state.picker) return;
+        state.picker.waitingForPrimerClick = false;
+        setStatus(`Picker: click ${state.picker.items[state.picker.index].label}`);
+        log('Picker ignored the first click by design. Now click the requested tag.');
+        document.removeEventListener('click', state.pickerPrimerClick, true);
+        state.pickerPrimerClick = null;
+        setTimeout(() => {
+          if (!state.picker) return;
+          document.addEventListener('click', state.pickerClick, true);
+        }, 0);
+      };
+      document.addEventListener('click', state.pickerPrimerClick, true);
+    } else {
+      document.addEventListener('click', state.pickerClick, true);
+    }
 
     const current = state.picker.items[state.picker.index];
     if (type === 'tags') {
@@ -1221,9 +1233,11 @@
     if (!state.picker) return;
 
     document.removeEventListener('mousemove', state.pickerMove, true);
+    document.removeEventListener('click', state.pickerPrimerClick, true);
     document.removeEventListener('click', state.pickerClick, true);
     document.removeEventListener('keydown', state.pickerKeydown, true);
     state.pickerMove = null;
+    state.pickerPrimerClick = null;
     state.pickerClick = null;
     state.pickerKeydown = null;
     state.picker = null;

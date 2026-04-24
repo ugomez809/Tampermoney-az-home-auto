@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.5
-// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available.
+// @version      1.0.6
+// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.5';
+  const VERSION = '1.0.6';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -247,6 +247,19 @@
   function readReadySignal() {
     const ready = readGM(GM_KEYS.finalReady, null);
     return isPlainObject(ready) ? ready : null;
+  }
+
+  function readMirroredPayloadMeta() {
+    const payload = readGM(GM_KEYS.finalPayload, null);
+    const ready = readGM(GM_KEYS.finalReady, null);
+    const azId = norm(payload?.azId || ready?.azId || '');
+    const savedAt = norm(payload?.savedAt || ready?.savedAt || '');
+    if (!azId) return null;
+    return {
+      azId,
+      savedAt,
+      ready: ready?.ready === true
+    };
   }
 
   function readCloseSignal() {
@@ -477,10 +490,18 @@
 
     const signal = readSuccessSignal();
     const closeSignal = readCloseSignal();
+    const mirroredMeta = readMirroredPayloadMeta();
     if (isAzHost()) {
       const bridged = bridgePayloadToAzLocal();
-      if (bridged && !signal) {
+      if (mirroredMeta?.azId && (!state.activeSignal || !norm(state.activeSignal.azId))) {
+        state.activeSignal = {
+          azId: mirroredMeta.azId,
+          postedAt: mirroredMeta.savedAt || ''
+        };
+      }
+      if ((bridged || mirroredMeta?.azId) && !signal) {
         setStatus('Mirrored payload available in AZ');
+        state.mirrored = true;
       }
     }
     if (signal) {
@@ -505,6 +526,8 @@
       }
       log('Shared close signal received');
       attemptClose();
+    } else if (!signal && isAzHost() && mirroredMeta?.azId) {
+      setStatus('Mirrored payload available in AZ');
     } else if (!signal) {
       setStatus('Watching for webhook success');
     } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
@@ -516,7 +539,8 @@
   }
 
   function renderAll() {
-    if (state.ui.azId) state.ui.azId.textContent = norm(state.activeSignal?.azId || '-') || '-';
+    const mirroredMeta = readMirroredPayloadMeta();
+    if (state.ui.azId) state.ui.azId.textContent = norm(state.activeSignal?.azId || mirroredMeta?.azId || '-') || '-';
     if (state.ui.mirrored) state.ui.mirrored.textContent = state.mirrored || readyMatchesSignal(state.activeSignal) ? 'Yes' : 'No';
 
     if (state.ui.countdown) {
