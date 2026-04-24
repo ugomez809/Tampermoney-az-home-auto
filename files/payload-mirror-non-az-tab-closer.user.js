@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.13
+// @version      1.0.14
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.13';
+  const VERSION = '1.0.14';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -930,6 +930,21 @@
     if (signalKey) markSignalHandled(signalKey);
 
     state.closeAttempts += 1;
+
+    if (state.closeAttempts === 1) {
+      const postedMs = Date.parse(norm(effectiveSignal?.postedAt || ''));
+      const signalAgeSec = Number.isFinite(postedMs) ? Math.round((Date.now() - postedMs) / 1000) : -1;
+      const successSig = readSuccessSignal();
+      const successPostedMs = Date.parse(norm(successSig?.postedAt || ''));
+      const successAgeSec = Number.isFinite(successPostedMs) ? Math.round((Date.now() - successPostedMs) / 1000) : -1;
+      const closeSig = readCloseSignal();
+      const closePostedMs = Date.parse(norm(closeSig?.postedAt || ''));
+      const closeAgeSec = Number.isFinite(closePostedMs) ? Math.round((Date.now() - closePostedMs) / 1000) : -1;
+      log(`[CLOSE-TAB-DIAG] payload-mirror FIRING close | signalKey=${signalKey || '(none)'} | azId=${norm(effectiveSignal?.azId || '(none)')} | signalPostedAt=${norm(effectiveSignal?.postedAt || '(none)')} | signalAgeSec=${signalAgeSec} | successAgeSec=${successAgeSec} | closeSignalAgeSec=${closeAgeSec} | hadCountdown=${Boolean(state.countdownEndsAt)} | host=${location.hostname} | url=${location.href}`);
+      _lastLogPersistAt = 0;
+      persistLogsThrottled();
+    }
+
     log(`Attempting to close current non-AZ tab (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
     setStatus(`Attempting to close tab (${state.closeAttempts})`);
     tryCloseCurrentTab();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Global Clear Launcher
 // @namespace    homebot.global-clear-launcher
-// @version      1.0.3
+// @version      1.0.4
 // @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -24,7 +24,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin Global Clear Launcher';
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
 
   // Log-export integration — key picked by origin since this runs on all 3.
   const LOG_PERSIST_KEY = (() => {
@@ -288,9 +288,21 @@
       hasResetParam() &&
       !isSameOriginAsLastAction();
 
+    const packetAgeSec = Math.round((Date.now() - Number(packet.createdAt || 0)) / 1000);
+    const urlResetParam = (() => {
+      try { return new URL(location.href).searchParams.get('hb_global_reset') || '(none)'; }
+      catch { return '(url-parse-error)'; }
+    })();
+
     if (shouldAutoClose) {
-      log('Auto-close after reset');
+      log(`[CLOSE-TAB-DIAG] global-clear-launcher FIRING close | packetAgeSec=${packetAgeSec} | token=${token.slice(-8)} | url_hb_global_reset=${urlResetParam} | sameOriginAsLastAction=${isSameOriginAsLastAction()} | url=${location.href}`);
+      _lastLogPersistAt = 0;
+      persistLogsThrottled();
       setTimeout(() => tryCloseTab(), CFG.autoCloseMs);
+    } else {
+      log(`[CLOSE-TAB-DIAG] global-clear-launcher reset applied but close NOT fired | packetAgeSec=${packetAgeSec} | hasResetParam=${hasResetParam()} | closeAfterApply=${packet.closeAfterApply === true} | sameOriginAsLastAction=${isSameOriginAsLastAction()} | url_hb_global_reset=${urlResetParam}`);
+      _lastLogPersistAt = 0;
+      persistLogsThrottled();
     }
   }
 
