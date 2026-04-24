@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8.4
+// @version      1.8.5
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning, and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
 // ==/UserScript==
@@ -18,7 +19,17 @@
   try { window.__APEX_DUPLICATES_CONTINUE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'APEX Duplicate Check Continue';
-  const VERSION = '1.8.4';
+  const VERSION = '1.8.5';
+
+  // Log-export integration — this script's log() renders directly to DOM
+  // without an in-memory array, so we add state.logLines below in parallel
+  // and persist it to a tracked key for storage-tools to discover.
+  const LOG_PERSIST_KEY = 'tm_apex_duplicates_continue_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const KEYS = {
     PANEL_POS: 'tm_apex_duplicates_continue_panel_pos_v18',
@@ -48,6 +59,7 @@
     waitingLogged: false,
     scanTimer: null,
     scanIntervalTimer: null,
+    logsIntervalTimer: null,
     ui: null,
     observers: [],
     lastUrl: location.href,
@@ -56,7 +68,8 @@
     forceCloseDeadlineAt: 0,
     forceCloseTriggered: false,
     forceCloseAttempts: 0,
-    forceCloseTimer: null
+    forceCloseTimer: null,
+    logLines: []
   };
 
   /******************************************************************
@@ -233,16 +246,68 @@
   function log(msg) {
     try { console.log(`[${SCRIPT_NAME}] ${msg}`); } catch {}
 
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    state.logLines.unshift(line);
+    if (state.logLines.length > CFG.maxLogs) state.logLines.length = CFG.maxLogs;
+    persistLogsThrottled();
+
     if (!state.ui?.logs) return;
 
     const row = document.createElement('div');
     row.className = 'hb-dup-v18-log';
-    row.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    row.textContent = line;
     state.ui.logs.prepend(row);
 
     while (state.ui.logs.children.length > CFG.maxLogs) {
       state.ui.logs.removeChild(state.ui.logs.lastChild);
     }
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logLines) ? state.logLines : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logLines.length = 0;
+    _lastLogPersistAt = 0;
+    if (state.ui?.logs) {
+      while (state.ui.logs.firstChild) state.ui.logs.removeChild(state.ui.logs.firstChild);
+    }
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function sleep(ms) {
@@ -828,6 +893,9 @@
       if (state.destroyed) return;
       queueScan(20);
     }, CFG.scanMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     queueScan(20);
     window.__APEX_DUPLICATES_CONTINUE_CLEANUP__ = cleanup;
   }
@@ -839,11 +907,14 @@
     try { clearInterval(state.routeTimer); } catch {}
     try { clearInterval(state.observerHeartbeat); } catch {}
     try { clearInterval(state.forceCloseTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { clearTimeout(state.scanTimer); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     state.scanIntervalTimer = null;
     state.routeTimer = null;
     state.observerHeartbeat = null;
     state.forceCloseTimer = null;
+    state.logsIntervalTimer = null;
     state.scanTimer = null;
     disconnectObservers();
     try { delete window.__APEX_DUPLICATES_CONTINUE_CLEANUP__; } catch {}

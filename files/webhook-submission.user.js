@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.3
+// @version      1.18.4
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,17 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.3';
+  const VERSION = '1.18.4';
+
+  // Log-export integration: persist state.logLines to a tracked key so
+  // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
+  // buffer from any origin. Key matches suffix `_logs_v1` + tracked prefix.
+  const LOG_PERSIST_KEY = 'tm_pc_webhook_submission_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -55,6 +65,7 @@
     quoteSeenAt: 0,
     destroyed: false,
     tickTimer: null,
+    logsIntervalTimer: null,
     panel: null,
     statusEl: null,
     logsEl: null,
@@ -85,11 +96,14 @@
     setStatus('Waiting for current job handoff');
 
     state.tickTimer = setInterval(tick, CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
 
     window.addEventListener('beforeunload', persistWebhookBeforeUnload, { once: true, capture: true });
     window.addEventListener('pagehide', persistWebhookBeforeUnload, true);
     window.addEventListener('resize', keepPanelInView, true);
     document.addEventListener('visibilitychange', onVisibilityChange, true);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
 
     tick();
   }
@@ -100,7 +114,9 @@
 
     try { persistWebhookFromUi(false); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { window.removeEventListener('pagehide', persistWebhookBeforeUnload, true); } catch {}
     try { document.removeEventListener('visibilitychange', onVisibilityChange, true); } catch {}
     try { state.panel?.remove(); } catch {}
@@ -201,7 +217,51 @@
     state.logLines.unshift(line);
     state.logLines = state.logLines.slice(0, CFG.maxLogLines);
     renderLogs();
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${msg}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logLines) ? state.logLines : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logLines.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function logWait(key, msg) {

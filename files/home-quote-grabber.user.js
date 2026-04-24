@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.3
+// @version      4.1.4
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,16 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.3';
+  const VERSION = '4.1.4';
+
+  // Log-export integration — matches the suffix + prefix used by
+  // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
+  const LOG_PERSIST_KEY = 'tm_pc_home_quote_grabber_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -120,6 +129,7 @@
     busy: false,
     destroyed: false,
     tickTimer: null,
+    logsIntervalTimer: null,
     doneThisLoad: false,
     flowStartedThisLoad: false,
     triggerSince: 0,
@@ -730,6 +740,9 @@
         setStatus('Tick error (see log)');
       }
     }, CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     try { tick(); } catch (err) {
       log(`tick() crashed: ${err?.message || err}`);
       setStatus('Tick error (see log)');
@@ -742,7 +755,10 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     state.tickTimer = null;
+    state.logsIntervalTimer = null;
     try { delete window.__HOME_QUOTE_GRABBER_CLEANUP__; } catch {}
   }
 
@@ -2277,6 +2293,50 @@
         .map((x) => `<div style="margin-bottom:4px;">${escapeHtml(x)}</div>`)
         .join('');
     }
+    persistLogsThrottled();
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logLines) ? state.logLines : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logLines.length = 0;
+    _lastLogPersistAt = 0;
+    if (state.ui?.logs) state.ui.logs.innerHTML = '';
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function makeDraggable(panel, handle) {

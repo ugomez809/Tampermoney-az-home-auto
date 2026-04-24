@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.1
+// @version      2.3.2
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // ==/UserScript==
@@ -20,8 +21,16 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.1';
+  const VERSION = '2.3.2';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_header_timeout_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -69,6 +78,7 @@
     bootstrapTimer: null,
     tickTimer: null,
     uiTimer: null,
+    logsIntervalTimer: null,
     mutationObserver: null,
     scanQueued: false,
     observeScheduled: false,
@@ -164,10 +174,15 @@
     if (state.uiTimer) clearInterval(state.uiTimer);
     state.uiTimer = setInterval(renderAll, CFG.uiMs);
 
+    if (state.logsIntervalTimer) clearInterval(state.logsIntervalTimer);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+
     window.addEventListener('beforeunload', handleBeforeUnload, true);
     window.addEventListener('pagehide', handleBeforeUnload, true);
     window.addEventListener('resize', keepPanelInView, true);
     document.addEventListener('visibilitychange', handleVisibilityChange, true);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
 
     window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__ = cleanup;
     setStatus('Watching header');
@@ -181,12 +196,14 @@
     try { clearInterval(state.bootstrapTimer); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.uiTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
     try { state.mutationObserver?.disconnect(); } catch {}
 
     try { window.removeEventListener('beforeunload', handleBeforeUnload, true); } catch {}
     try { window.removeEventListener('pagehide', handleBeforeUnload, true); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
     try { document.removeEventListener('visibilitychange', handleVisibilityChange, true); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
 
     closeSelectorSession('', { logIt: false, restorePause: true });
     closeManageRulesModal('', { logIt: false });
@@ -334,7 +351,53 @@
       state.els.logs.value = state.logs.join('\n');
       state.els.logs.scrollTop = 0;
     }
+    persistLogsThrottled();
     console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { if (typeof GM_setValue === 'function') GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) {
+      try { if (typeof GM_getValue === 'function') req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {}
+    }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    if (state.els.logs) state.els.logs.value = '';
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function readTimeoutEnabled() {

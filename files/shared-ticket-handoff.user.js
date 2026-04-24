@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.3
+// @version      1.9.4
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,7 +22,19 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.3';
+  const VERSION = '1.9.4';
+
+  // Log-export integration — key choice depends on origin since this script
+  // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
+  // what storage-tools.user.js discovers via TRACKED_PREFIXES.
+  const LOG_PERSIST_KEY = String(location.host || '').includes('agencyzoom.com')
+    ? 'tm_az_shared_ticket_handoff_logs_v1'
+    : 'tm_pc_shared_ticket_handoff_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
@@ -79,6 +91,9 @@
     ensureGwpcEntryResetOnce();
     setStatus(state.running ? 'Running' : 'Stopped');
     setInterval(tick, CFG.tickMs);
+    setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     tick();
   }
 
@@ -935,6 +950,47 @@
     if (state.logs.length > CFG.maxLogs) state.logs.length = CFG.maxLogs;
     console.log(`[${SCRIPT_NAME}] ${msg}`);
     renderLogs();
+    persistLogsThrottled();
+  }
+
+  function persistLogsThrottled() {
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logs) ? state.logs : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logs.length = 0;
+    _lastLogPersistAt = 0;
+    try { renderLogs(); } catch {}
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function renderLogs() {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.4
+// @version      2.9.5
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,15 @@
   try { window.__AUTO_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
-  const VERSION = '2.9.4';
+  const VERSION = '2.9.5';
+
+  // Log-export integration — matches storage-tools.user.js discovery rules.
+  const LOG_PERSIST_KEY = 'tm_pc_auto_quote_grabber_logs_v1';
+  const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
+  const LOG_PERSIST_THROTTLE_MS = 1500;
+  const LOG_TICK_MS = 2000;
+  let _lastLogPersistAt = 0;
+  let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
@@ -327,6 +335,7 @@
     busy: false,
     destroyed: false,
     tickTimer: null,
+    logsIntervalTimer: null,
     doneThisLoad: false,
     triggerSince: 0,
     lastWaitReason: '',
@@ -347,6 +356,9 @@
       if (state.destroyed) return;
       tick();
     }, CFG.tickMs);
+    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
     tick();
     window.__AUTO_QUOTE_GRABBER_CLEANUP__ = cleanup;
   }
@@ -355,7 +367,10 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    try { clearInterval(state.logsIntervalTimer); } catch {}
+    try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     state.tickTimer = null;
+    state.logsIntervalTimer = null;
     try { delete window.__AUTO_QUOTE_GRABBER_CLEANUP__; } catch {}
   }
 
@@ -1640,6 +1655,50 @@
         .map((x) => `<div style="margin-bottom:4px;white-space:pre-wrap;">${escapeHtml(x)}</div>`)
         .join('');
     }
+    persistLogsThrottled();
+  }
+
+  function persistLogsThrottled() {
+    if (state.destroyed) return;
+    const now = Date.now();
+    if (now - _lastLogPersistAt < LOG_PERSIST_THROTTLE_MS) return;
+    _lastLogPersistAt = now;
+    const raw = Array.isArray(state.logLines) ? state.logLines : [];
+    const lines = raw.map(entry => (typeof entry === 'string' ? entry : (entry?.line || '')));
+    const payload = {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      origin: location.origin,
+      updatedAt: new Date().toISOString(),
+      lines
+    };
+    try { localStorage.setItem(LOG_PERSIST_KEY, JSON.stringify(payload)); } catch {}
+    try { GM_setValue(LOG_PERSIST_KEY, payload); } catch {}
+  }
+
+  function checkLogClearRequest() {
+    if (state.destroyed) return;
+    let req = null;
+    try { req = JSON.parse(localStorage.getItem(LOG_CLEAR_SIGNAL_KEY) || 'null'); } catch {}
+    if (!req) { try { req = GM_getValue(LOG_CLEAR_SIGNAL_KEY, null); } catch {} }
+    const at = typeof req?.requestedAt === 'string' ? req.requestedAt : '';
+    if (!at || at === _lastLogClearHandledAt) return;
+    _lastLogClearHandledAt = at;
+    state.logLines.length = 0;
+    _lastLogPersistAt = 0;
+    if (state.ui?.logs) state.ui.logs.innerHTML = '';
+    persistLogsThrottled();
+  }
+
+  function handleLogClearStorageEvent(event) {
+    if (!event || event.key !== LOG_CLEAR_SIGNAL_KEY) return;
+    checkLogClearRequest();
+  }
+
+  function logsTick() {
+    if (state.destroyed) return;
+    persistLogsThrottled();
+    checkLogClearRequest();
   }
 
   function escapeHtml(value) {
