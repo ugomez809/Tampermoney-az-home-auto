@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.1
+// @version      1.0.2
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC 100 AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0';
+  const VERSION = '1.0.2';
   const UI_ATTR = 'data-tm-az-finisher-ui';
 
   const GM_KEYS = {
@@ -385,15 +385,21 @@
   function getFinalPayload() {
     const ready = readGM(GM_KEYS.finalReady, null);
     const payload = readGM(GM_KEYS.finalPayload, null);
-    if (!isPlainObject(ready) || ready.ready !== true) return null;
     if (!isPlainObject(payload)) return null;
-    const azId = norm(payload.azId || ready.azId || '');
+    const readyLike = isPlainObject(ready) ? ready : {};
+    const readyOk = readyLike.ready === true;
+    const azId = norm(payload.azId || readyLike.azId || '');
+    const savedAt = norm(payload.savedAt || readyLike.savedAt || '');
     if (!azId) return null;
     return {
-      ready,
+      ready: readyOk ? readyLike : {
+        ready: true,
+        azId,
+        savedAt
+      },
       payload,
       azId,
-      payloadKey: `${azId}|${norm(payload.savedAt || ready.savedAt || '')}`
+      payloadKey: `${azId}|${savedAt}`
     };
   }
 

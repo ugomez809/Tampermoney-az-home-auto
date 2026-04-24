@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.1
+// @version      1.0.2
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs while leaving AgencyZoom available.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -23,12 +23,13 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC 99 Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0';
+  const VERSION = '1.0.2';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
     finalPayload: 'tm_az_gwpc_final_payload_v1',
-    finalReady: 'tm_az_gwpc_final_payload_ready_v1'
+    finalReady: 'tm_az_gwpc_final_payload_ready_v1',
+    closeSignal: 'tm_pc_payload_mirror_close_signal_v1'
   };
 
   const LS_KEYS = {
@@ -57,7 +58,8 @@
     maxLogLines: 70,
     zIndex: 2147483647,
     panelWidth: 330,
-    closeRetryMs: 1200
+    closeRetryMs: 1200,
+    maxCloseAttempts: 6
   };
 
   const state = {
@@ -73,7 +75,9 @@
     activeSignalKey: '',
     countdownEndsAt: 0,
     mirrored: false,
-    closeAttempted: false
+    closeAttempted: false,
+    closeAttempts: 0,
+    closeSignalKey: ''
   };
 
   init();
@@ -98,6 +102,12 @@
       try {
         state.gmReadyListener = GM_addValueChangeListener(GM_KEYS.finalReady, () => {
           scheduleImmediateCheck('gm-ready');
+        });
+      } catch {}
+
+      try {
+        GM_addValueChangeListener(GM_KEYS.closeSignal, () => {
+          scheduleImmediateCheck('gm-close');
         });
       } catch {}
     }
@@ -234,6 +244,11 @@
     return isPlainObject(ready) ? ready : null;
   }
 
+  function readCloseSignal() {
+    const value = readGM(GM_KEYS.closeSignal, null);
+    return isPlainObject(value) ? value : null;
+  }
+
   function readyMatchesSignal(signal) {
     const ready = readReadySignal();
     if (!ready || ready.ready !== true) return false;
@@ -323,26 +338,66 @@
 
     state.countdownEndsAt = Date.now() + CFG.closeDelayMs;
     state.closeAttempted = false;
+    state.closeAttempts = 0;
     state.mirrored = readyMatchesSignal(signal);
     markSignalHandled(buildSignalKey(signal));
     log(`Close countdown started for AZ ${signal.azId}`);
     setStatus('Closing non-AZ tab soon');
   }
 
+  function publishCloseSignal(signal) {
+    const signalKey = buildSignalKey(signal);
+    if (!signalKey || state.closeSignalKey === signalKey) return;
+    state.closeSignalKey = signalKey;
+    writeGM(GM_KEYS.closeSignal, {
+      azId: norm(signal.azId || ''),
+      postedAt: norm(signal.postedAt || ''),
+      closeAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    });
+    log(`Close signal published for AZ ${signal.azId}`);
+  }
+
+  function closeSignalMatches(signal) {
+    const closeSignal = readCloseSignal();
+    if (!closeSignal) return false;
+    return buildSignalKey(closeSignal) === buildSignalKey(signal);
+  }
+
+  function tryCloseCurrentTab() {
+    const wasClosed = !!window.closed;
+    try { window.close(); } catch {}
+    if (window.closed || wasClosed) return;
+
+    try { window.open('', '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.top?.close?.(); } catch {}
+    if (window.closed) return;
+
+    try { location.replace('about:blank'); } catch {}
+  }
+
   function attemptClose() {
-    if (state.closeAttempted) return;
+    if (!state.activeSignal) return;
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
 
-    log('Attempting to close current non-AZ tab');
-    setStatus('Attempting to close tab');
+    state.closeAttempts += 1;
+    log(`Attempting to close current non-AZ tab (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
+    setStatus(`Attempting to close tab (${state.closeAttempts})`);
+    tryCloseCurrentTab();
 
-    try { window.close(); } catch {}
     setTimeout(() => {
-      if (!state.destroyed) {
-        log('Close blocked by browser');
-        setStatus('Close blocked');
+      if (state.destroyed || window.closed) return;
+      if (state.closeAttempts < CFG.maxCloseAttempts) {
+        attemptClose();
+        return;
       }
+      log('Close blocked by browser after repeated attempts');
+      setStatus('Close blocked');
     }, CFG.closeRetryMs);
   }
 
@@ -356,6 +411,7 @@
       state.countdownEndsAt = 0;
       state.mirrored = false;
       state.closeAttempted = false;
+      state.closeAttempts = 0;
       log(`Webhook success detected for AZ ${signal.azId}${reason ? ` | ${reason}` : ''}`);
     }
 
@@ -385,10 +441,16 @@
 
     if (state.countdownEndsAt) {
       if (Date.now() >= state.countdownEndsAt) {
-        attemptClose();
+        publishCloseSignal(state.activeSignal || signal);
+        if (closeSignalMatches(state.activeSignal || signal)) {
+          attemptClose();
+        }
       }
     } else if (!signal) {
       setStatus('Watching for webhook success');
+    } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
+      log('Shared close signal received');
+      attemptClose();
     }
 
     renderAll();
