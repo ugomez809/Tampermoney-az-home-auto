@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.5
+// @version      2.2.6
 // @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.5';
+  const VERSION = '2.2.6';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -73,6 +73,7 @@
     observeScheduled: false,
     selectorMode: false,
     modalOpen: false,
+    manageRulesOpen: false,
     selectorListeners: [],
     hoverBoxEl: null,
     hoveredEl: null,
@@ -178,6 +179,7 @@
     try { document.removeEventListener('visibilitychange', handleVisibilityChange, true); } catch {}
 
     closeSelectorSession('', { logIt: false, restorePause: true });
+    closeManageRulesModal('', { logIt: false });
 
     try { state.hoverBoxEl?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
@@ -1489,6 +1491,7 @@
 
   function saveSelectorRules(rules) {
     localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
+    renderManageRulesModal();
     renderAll();
   }
 
@@ -1786,6 +1789,137 @@
     if (overlay) overlay.remove();
   }
 
+  function removeManageRulesModal() {
+    const overlay = $('#tm-timeout-manage-rules-overlay');
+    if (overlay) overlay.remove();
+  }
+
+  function deleteSelectorRule(ruleId) {
+    const id = normalizeText(ruleId);
+    if (!id) return false;
+    const currentRules = getSelectorRules();
+    const nextRules = currentRules.filter((rule) => normalizeText(rule.ruleId) !== id);
+    if (nextRules.length === currentRules.length) return false;
+    saveSelectorRules(nextRules);
+    return true;
+  }
+
+  function clearSelectorRules() {
+    saveSelectorRules([]);
+  }
+
+  function renderManageRulesModal() {
+    if (!state.manageRulesOpen) return;
+    const overlay = $('#tm-timeout-manage-rules-overlay');
+    const body = $('#tm-timeout-manage-rules-body', overlay);
+    const countEl = $('#tm-timeout-manage-rules-count', overlay);
+    if (!overlay || !body) return;
+
+    const rules = getSelectorRules()
+      .slice()
+      .sort((a, b) => Date.parse(b.updatedAt || b.createdAt || 0) - Date.parse(a.updatedAt || a.createdAt || 0));
+
+    if (countEl) countEl.textContent = `${rules.length} saved`;
+
+    if (!rules.length) {
+      body.innerHTML = `
+        <div ${UI_MARKER_ATTR}="1" style="padding:14px;border:1px solid #243041;border-radius:12px;background:#111827;color:#cbd5e1;">
+          No saved selector rules.
+        </div>
+      `;
+      return;
+    }
+
+    body.innerHTML = rules.map((rule) => `
+      <div ${UI_MARKER_ATTR}="1" style="border:1px solid #243041;border-radius:12px;background:#111827;padding:12px;">
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:8px;">
+          <div ${UI_MARKER_ATTR}="1" style="font-weight:800;color:#f8fafc;word-break:break-word;">${escapeHtml(rule.label || rule.savedErrorText || 'Saved selector rule')}</div>
+          <button ${UI_MARKER_ATTR}="1" type="button" data-timeout-delete-rule="${escapeHtml(rule.ruleId)}" style="border:0;border-radius:10px;padding:7px 10px;background:#dc2626;color:#fff;font-weight:800;cursor:pointer;white-space:nowrap;">DELETE</button>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:11px;opacity:.8;margin-bottom:6px;">Saved error text</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;line-height:1.45;background:#020617;border:1px solid #243041;border-radius:10px;padding:8px;margin-bottom:8px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(rule.savedErrorText || '')}</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:11px;opacity:.8;margin-bottom:6px;">Selector</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:11px;line-height:1.45;background:#020617;border:1px solid #243041;border-radius:10px;padding:8px;word-break:break-all;">${escapeHtml(rule.selector || '')}</div>
+      </div>
+    `).join('');
+
+    body.querySelectorAll('[data-timeout-delete-rule]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const ruleId = normalizeText(btn.getAttribute('data-timeout-delete-rule') || '');
+        if (!ruleId) return;
+        if (deleteSelectorRule(ruleId)) {
+          log(`Deleted saved rule: ${ruleId}`);
+        }
+      });
+    });
+  }
+
+  function closeManageRulesModal(message, options = {}) {
+    state.manageRulesOpen = false;
+    removeManageRulesModal();
+    if (options.logIt !== false && normalizeText(message)) log(message);
+    if (!state.destroyed) setStatus(state.running ? 'Watching header' : 'Stopped');
+    renderButtons();
+    renderAll();
+  }
+
+  function openManageRulesModal() {
+    if (state.manageRulesOpen) return;
+    if (state.selectorMode || state.modalOpen) {
+      closeSelectorSession('', { logIt: false, restorePause: true });
+    }
+
+    removeManageRulesModal();
+    state.manageRulesOpen = true;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'tm-timeout-manage-rules-overlay';
+    overlay.setAttribute(UI_MARKER_ATTR, '1');
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: String(CFG.zIndex),
+      background: 'rgba(2, 6, 23, 0.55)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px'
+    });
+
+    overlay.innerHTML = `
+      <div ${UI_MARKER_ATTR}="1" style="width:min(760px,100%);max-height:min(82vh,900px);background:#0f172a;color:#e5e7eb;border:1px solid rgba(255,255,255,0.12);border-radius:16px;box-shadow:0 22px 60px rgba(0,0,0,.45);padding:18px;display:flex;flex-direction:column;gap:12px;">
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+          <div ${UI_MARKER_ATTR}="1">
+            <div ${UI_MARKER_ATTR}="1" style="font-size:16px;font-weight:800;">Saved Selector Rules</div>
+            <div ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules-count" style="font-size:12px;opacity:.8;">0 saved</div>
+          </div>
+          <div ${UI_MARKER_ATTR}="1" style="display:flex;gap:10px;align-items:center;">
+            <button ${UI_MARKER_ATTR}="1" id="tm-timeout-clear-rules" type="button" style="border:0;border-radius:10px;padding:8px 12px;background:#b91c1c;color:#fff;font-weight:800;cursor:pointer;">CLEAR ALL</button>
+            <button ${UI_MARKER_ATTR}="1" id="tm-timeout-close-rules" type="button" style="border:0;border-radius:10px;padding:8px 12px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">CLOSE</button>
+          </div>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules-body" style="display:flex;flex-direction:column;gap:10px;overflow:auto;padding-right:4px;"></div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
+
+    $('#tm-timeout-close-rules', overlay)?.addEventListener('click', () => closeManageRulesModal('Rule manager closed'));
+    $('#tm-timeout-clear-rules', overlay)?.addEventListener('click', () => {
+      clearSelectorRules();
+      log('Cleared all saved selector rules');
+    });
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) closeManageRulesModal('Rule manager closed');
+    });
+
+    renderManageRulesModal();
+    setStatus('Rule manager');
+    renderButtons();
+    renderAll();
+  }
+
   function matchRuleToElement(rule, el) {
     if (!(el instanceof Element) || isScriptUiElement(el) || !isVisible(el)) return false;
     const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
@@ -1903,6 +2037,7 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">STOP</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-enable-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">TIMEOUT ON</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">MANAGE RULES</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
@@ -1929,6 +2064,7 @@
     state.els.toggle = $('#tm-timeout-toggle', panel);
     state.els.timeoutEnableToggle = $('#tm-timeout-enable-toggle', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
+    state.els.manageRules = $('#tm-timeout-manage-rules', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
     state.els.status = $('#tm-timeout-status', panel);
     state.els.header = $('#tm-timeout-header', panel);
@@ -1981,6 +2117,14 @@
       }
     };
 
+    state.els.manageRules.onclick = () => {
+      if (state.manageRulesOpen) {
+        closeManageRulesModal('Rule manager closed');
+      } else {
+        openManageRulesModal();
+      }
+    };
+
     state.els.copyLogs.onclick = () => copyLogsToClipboard();
 
     renderButtons();
@@ -2006,6 +2150,15 @@
       state.els.selector.style.cursor = 'pointer';
     }
 
+    if (state.els.manageRules) {
+      const ruleCount = getSelectorRules().length;
+      state.els.manageRules.textContent = state.manageRulesOpen
+        ? 'CLOSE RULES'
+        : `MANAGE RULES${ruleCount ? ` (${ruleCount})` : ''}`;
+      state.els.manageRules.style.background = state.manageRulesOpen ? '#f59e0b' : '#7c3aed';
+      state.els.manageRules.style.color = '#fff';
+    }
+
   }
 
   function renderAll() {
@@ -2019,6 +2172,7 @@
 
     if (state.els.status) {
       const statusText =
+        state.manageRulesOpen ? 'Rule manager' :
         state.modalOpen ? 'Selector config' :
         state.selectorMode ? 'Selector mode' :
         state.running ? (state.lastStatus || 'Watching header') :
@@ -2026,6 +2180,7 @@
 
       state.els.status.textContent = statusText;
       state.els.status.style.color =
+        state.manageRulesOpen ? '#c4b5fd' :
         state.selectorMode || state.modalOpen ? '#67e8f9' :
         state.running ? '#86efac' : '#fca5a5';
     }
