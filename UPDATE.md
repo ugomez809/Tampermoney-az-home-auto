@@ -34,10 +34,8 @@ For each script:
 
 | Script | Install |
 | --- | --- |
-| Home Bot: APEX Quote New Account | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-quote-new-account.user.js) |
 | Home Bot: APEX Duplicates Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js) |
 | Home Bot: APEX Continue New Quote | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js) |
-| Home Bot: APEX Inactivity Reload Failsafe | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-inactivity-reload.user.js) |
 
 ### Guidewire PolicyCenter
 
@@ -64,7 +62,6 @@ For each script:
 | --- | --- |
 | AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js) |
 | Home Bot: Global Clear Launcher | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js) |
-| Home Bot: Clean All → Refresh → Home | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/clean-refresh-home.user.js) |
 | Home Bot: UI Dock Organizer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js) |
 | AZ TO GWPC 99 Payload Mirror + Non-AZ Tab Closer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js) |
 
