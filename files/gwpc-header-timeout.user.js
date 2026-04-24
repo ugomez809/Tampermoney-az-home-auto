@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.3
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, and raises the sender trigger without posting or closing tabs itself.
+// @version      2.2.4
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, and saves timeout or selected errors into the shared GWPC payload flow without posting or closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,15 +20,13 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.3';
+  const VERSION = '2.2.4';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
-  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
-  const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
@@ -744,15 +742,28 @@
 
   function saveEventToPayload(product, job, event) {
     const { key, payload } = ensurePayloadForJob(product, job);
+    const eventSubmission = normalizeText(event?.submissionNumber || '');
     payload.script = SCRIPT_NAME;
     payload.version = VERSION;
     payload.event = 'gwpc_timeout_gathered';
     payload.product = product;
     payload['AZ ID'] = job['AZ ID'];
-    payload.currentJob = normalizeCurrentJob({
+    const nextCurrentJob = {
       ...(isPlainObject(payload.currentJob) ? payload.currentJob : {}),
       ...job
-    });
+    };
+    if (product === 'auto' && !eventSubmission) {
+      nextCurrentJob.SubmissionNumber = normalizeText(
+        (isPlainObject(payload.currentJob) ? payload.currentJob.SubmissionNumber : '') ||
+        payload.submissionNumberAuto ||
+        payload.autoSubmissionNumber ||
+        payload.submissionNumber ||
+        ''
+      );
+    } else if (eventSubmission) {
+      nextCurrentJob.SubmissionNumber = eventSubmission;
+    }
+    payload.currentJob = normalizeCurrentJob(nextCurrentJob);
     payload.savedAt = nowIso();
     payload.page = { url: location.href, title: document.title };
     payload.errors = mergeEventList(payload.errors, event);
@@ -764,10 +775,18 @@
     if (product === 'home') {
       payload.row['Done?'] = event.resultValue;
       payload.row['Result'] = event.errorText;
+      if (eventSubmission) payload.row['Submission Number'] = eventSubmission;
       payload['Done?'] = event.resultValue;
       payload['Result'] = event.errorText;
     } else {
       payload.row['Auto'] = event.resultValue;
+      if (eventSubmission) {
+        payload.row['Submission Number (Auto)'] = eventSubmission;
+        payload.submissionNumberAuto = eventSubmission;
+        payload.autoSubmissionNumber = eventSubmission;
+        payload.submissionNumber = eventSubmission;
+        payload['Submission Number (Auto)'] = eventSubmission;
+      }
       payload['Auto'] = event.resultValue;
     }
 
@@ -780,6 +799,7 @@
     if (!bundle) throw new Error('Missing current AZ job');
 
     const next = deepClone(bundle);
+    const eventSubmission = normalizeText(event?.submissionNumber || '');
     next.timeout = isPlainObject(next.timeout) ? next.timeout : { ready: false, events: [] };
     next.timeout.ready = true;
     next.timeout.events = mergeEventList(next.timeout.events, event);
@@ -800,11 +820,21 @@
       if (isPlainObject(section.data.row)) {
         section.data.row['Done?'] = event.resultValue;
         section.data.row['Result'] = event.errorText;
+        if (eventSubmission) section.data.row['Submission Number'] = eventSubmission;
       }
+      if (eventSubmission) section.submissionNumber = eventSubmission;
     } else {
       section.data['Auto'] = event.resultValue;
       if (isPlainObject(section.data.row)) {
         section.data.row['Auto'] = event.resultValue;
+        if (eventSubmission) section.data.row['Submission Number (Auto)'] = eventSubmission;
+      }
+      if (eventSubmission) {
+        section.submissionNumber = eventSubmission;
+        section.data.submissionNumberAuto = eventSubmission;
+        section.data.autoSubmissionNumber = eventSubmission;
+        section.data.submissionNumber = eventSubmission;
+        section.data['Submission Number (Auto)'] = eventSubmission;
       }
     }
 
@@ -1253,10 +1283,8 @@
     try {
       saveEventToPayload(context.product, context.job, event);
       saveEventToBundle(context.product, context.job, event);
-      requestSenderPost(context, event);
       rememberDispatchedEvent(event);
       log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to payload/bundle`);
-      log(`Raised sender trigger for ${context.product.toUpperCase()} ${event.triggerType} event`);
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();
       return true;
@@ -1266,34 +1294,6 @@
       renderAll();
       return false;
     }
-  }
-
-  function writeFlowStage(product, step, azId = '') {
-    const next = {
-      product: normalizeText(product || ''),
-      step: normalizeText(step || ''),
-      azId: normalizeText(azId || ''),
-      updatedAt: nowIso(),
-      source: SCRIPT_NAME,
-      version: VERSION
-    };
-    try { localStorage.setItem(FLOW_STAGE_KEY, JSON.stringify(next, null, 2)); } catch {}
-    return next;
-  }
-
-  function requestSenderPost(context, event) {
-    const request = {
-      requestedAt: nowIso(),
-      reason: normalizeText(`${context.product}_${event.triggerType}_error`),
-      source: SCRIPT_NAME,
-      sourceVersion: VERSION,
-      azId: normalizeText(context.job?.['AZ ID'] || ''),
-      eventId: normalizeText(event.eventId || event.id || '')
-    };
-
-    try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
-    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
-    writeFlowStage(context.product, 'sender', context.job?.['AZ ID'] || '');
   }
 
   function processHeaderTimeout() {

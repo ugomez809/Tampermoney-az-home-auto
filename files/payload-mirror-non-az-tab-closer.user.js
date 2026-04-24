@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.3
+// @version      1.0.4
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs while leaving AgencyZoom available.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @match        https://farmersagent.lightning.force.com/*
+// @match        https://app.agencyzoom.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
@@ -23,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -180,6 +181,10 @@
     return /^farmersagent\.lightning\.force\.com$/i.test(location.hostname);
   }
 
+  function isAzHost() {
+    return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
+  }
+
   function readGM(key, fallback = null) {
     try { return readJson(GM_getValue(key, fallback), fallback); }
     catch { return fallback; }
@@ -320,6 +325,19 @@
     return true;
   }
 
+  function bridgePayloadToAzLocal() {
+    if (!isAzHost()) return false;
+    const payload = readGM(GM_KEYS.finalPayload, null);
+    const ready = readGM(GM_KEYS.finalReady, null);
+    if (!isPlainObject(payload)) return false;
+    try { localStorage.setItem(GM_KEYS.finalPayload, JSON.stringify(payload, null, 2)); } catch {}
+    if (isPlainObject(ready)) {
+      try { localStorage.setItem(GM_KEYS.finalReady, JSON.stringify(ready, null, 2)); } catch {}
+    }
+    state.mirrored = true;
+    return true;
+  }
+
   function scheduleImmediateCheck(reason) {
     try { tick(reason); } catch {}
   }
@@ -370,6 +388,10 @@
     try { window.close(); } catch {}
     if (window.closed || wasClosed) return;
 
+    try { window.open(location.href, '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
     try { window.open('', '_self'); } catch {}
     try { window.close(); } catch {}
     if (window.closed) return;
@@ -418,6 +440,9 @@
     if (isGwpcHost() && !readyMatchesSignal(signal)) {
       mirrorPayloadFromGwpc(signal);
     }
+    if (isAzHost()) {
+      bridgePayloadToAzLocal();
+    }
 
     if (readyMatchesSignal(signal)) {
       startCountdown(signal);
@@ -435,6 +460,12 @@
     }
 
     const signal = readSuccessSignal();
+    if (isAzHost()) {
+      const bridged = bridgePayloadToAzLocal();
+      if (bridged && !signal) {
+        setStatus('Mirrored payload available in AZ');
+      }
+    }
     if (signal) {
       activateForSignal(signal, reason);
     }
