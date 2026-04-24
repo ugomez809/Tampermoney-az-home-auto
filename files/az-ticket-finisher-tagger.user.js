@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.19
+// @version      1.0.20
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.19';
+  const VERSION = '1.0.20';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -83,6 +83,7 @@
     pinTop: 'a.pin-top[data-value="0"], a.pin-top',
     saveNote: 'button#add-note, button.btn-primary#add-note',
     tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
+    tagForm: '#add-tag-form',
     tagDropdown: '#add-tag-form > div > div > div.az-form-group.az-tags-select.mb-2 > div > button, button.btn.dropdown-toggle.btn-light[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle.btn-light[role="combobox"], button.dropdown-toggle[role="combobox"]'
   };
 
@@ -1202,10 +1203,32 @@
   }
 
   function findTagDropdown() {
+    const form = findVisibleElements(SEL.tagForm)[0];
+    if (form) {
+      const exactCandidates = [
+        '#add-tag-form > div > div > div.az-form-group.az-tags-select.mb-2 > div > button',
+        'div.az-form-group.az-tags-select.mb-2 > div > button',
+        '.az-form-group.az-tags-select button.dropdown-toggle.btn-light',
+        'button.dropdown-toggle.btn-light[data-toggle="dropdown"][role="combobox"]',
+        'button.dropdown-toggle.btn-light[role="combobox"]',
+        'button[role="combobox"]',
+        'button.dropdown-toggle'
+      ];
+
+      for (const selector of exactCandidates) {
+        try {
+          const el = selector.startsWith('#add-tag-form')
+            ? document.querySelector(selector)
+            : form.querySelector(selector);
+          if (visible(el)) return el;
+        } catch {}
+      }
+    }
+
     let el = findVisibleElements(SEL.tagDropdown)[0];
     if (el) return el;
 
-    const candidates = Array.from(document.querySelectorAll('button[role="combobox"], button.dropdown-toggle, #add-tag-form button'))
+    const candidates = Array.from(document.querySelectorAll('#add-tag-form button, button[role="combobox"], button.dropdown-toggle'))
       .filter(visible);
 
     return candidates.find((node) => {
@@ -1305,7 +1328,11 @@
           if (isTagDropdownOpen(dropdown)) return true;
         }
 
-        const jqSelect = jqDropdown.closest('.bootstrap-select').prev('select');
+        const jqWrapper = jqDropdown.closest('.bootstrap-select');
+        const wrapperEl = jqWrapper?.get?.(0) || jqWrapper?.[0] || dropdown.closest('.bootstrap-select');
+        const selectEl = wrapperEl?.querySelector?.('select') ||
+          (wrapperEl?.previousElementSibling instanceof HTMLSelectElement ? wrapperEl.previousElementSibling : null);
+        const jqSelect = selectEl ? $(selectEl) : null;
         if (jqSelect?.length && typeof jqSelect.selectpicker === 'function') {
           jqSelect.selectpicker('toggle');
           await sleep(220);
@@ -1336,11 +1363,19 @@
     log('Clicked: Tag opener');
     await sleep(CFG.bigActionDelayMs);
 
+    const tagForm = await waitFor(() => findVisibleElements(SEL.tagForm)[0], 3000);
+    if (!tagForm) {
+      log('Tag form not visible after opening tag panel');
+      return false;
+    }
+
     const dropdown = await waitFor(() => findTagDropdown(), 3000);
     if (!dropdown) {
       log('Tag dropdown not found');
       return false;
     }
+
+    log(`Using tag dropdown: ${norm(dropdown.getAttribute('title') || dropdown.textContent || '') || '(no label)'}`);
 
     const openedNow = await tryOpenTagDropdown(dropdown);
     if (!openedNow) {
