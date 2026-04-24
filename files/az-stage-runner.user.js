@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.9
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and reloads after 40s of no visible AZ page changes while frontmost.
+// @version      2.5.10
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and reloads after 40s of no meaningful visible AZ page changes while frontmost.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.9';
+  const VERSION = '2.5.10';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -188,7 +188,6 @@
     frontIdleActivityHandler: null,
     frontIdleFocusHandler: null,
     frontIdleBlurHandler: null,
-    frontIdleMutationObserver: null,
     frontIdleFrontSinceAt: 0,
     frontIdleLastActivityAt: Date.now(),
     frontIdleLastSignature: '',
@@ -287,9 +286,10 @@
     try { document.removeEventListener('click', state.frontIdleActivityHandler, true); } catch {}
     try { document.removeEventListener('keydown', state.frontIdleActivityHandler, true); } catch {}
     try { document.removeEventListener('input', state.frontIdleActivityHandler, true); } catch {}
+    try { document.removeEventListener('pointerdown', state.frontIdleActivityHandler, true); } catch {}
+    try { window.removeEventListener('scroll', state.frontIdleActivityHandler, true); } catch {}
     try { window.removeEventListener('focus', state.frontIdleFocusHandler, true); } catch {}
     try { window.removeEventListener('blur', state.frontIdleBlurHandler, true); } catch {}
-    try { state.frontIdleMutationObserver?.disconnect(); } catch {}
 
     const panel = document.getElementById('hb-az-stage-runner-panel');
     if (panel) panel.remove();
@@ -361,23 +361,6 @@
     ].join('|');
   }
 
-  function isInsideStageRunnerPanel(node) {
-    if (!node) return false;
-    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    return !!element?.closest?.('#hb-az-stage-runner-panel');
-  }
-
-  function mutationTouchesAzPage(records) {
-    for (const record of records) {
-      if (isInsideStageRunnerPanel(record.target)) continue;
-      if (record.type === 'attributes') return true;
-      if ([...record.addedNodes].some(node => !isInsideStageRunnerPanel(node))) return true;
-      if ([...record.removedNodes].some(node => !isInsideStageRunnerPanel(node))) return true;
-      if (record.type === 'characterData') return true;
-    }
-    return false;
-  }
-
   function setupFrontIdleReloadWatchdog() {
     const onTrustedActivity = (event) => {
       if (!event?.isTrusted) return;
@@ -388,6 +371,8 @@
     document.addEventListener('click', onTrustedActivity, true);
     document.addEventListener('keydown', onTrustedActivity, true);
     document.addEventListener('input', onTrustedActivity, true);
+    document.addEventListener('pointerdown', onTrustedActivity, true);
+    window.addEventListener('scroll', onTrustedActivity, true);
 
     state.frontIdleFocusHandler = () => {
       state.frontIdleFrontSinceAt = 0;
@@ -401,20 +386,6 @@
     };
     window.addEventListener('focus', state.frontIdleFocusHandler, true);
     window.addEventListener('blur', state.frontIdleBlurHandler, true);
-
-    if (document.body && typeof MutationObserver === 'function') {
-      state.frontIdleMutationObserver = new MutationObserver((records) => {
-        if (!isPipelinePage()) return;
-        if (!mutationTouchesAzPage(records)) return;
-        markFrontIdleActivity();
-      });
-      state.frontIdleMutationObserver.observe(document.body, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true
-      });
-    }
 
     state.frontIdleLastSignature = getFrontIdleSignature();
     state.frontIdleLastActivityAt = Date.now();
