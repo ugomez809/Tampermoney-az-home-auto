@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.11
+// @version      1.0.12
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.11';
+  const VERSION = '1.0.12';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -70,13 +70,15 @@
     pinTop: 'a.pin-top[data-value="0"], a.pin-top',
     saveNote: 'button#add-note, button.btn-primary#add-note',
     tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
-    tagDropdown: 'button.dropdown-toggle.btn-light[role="combobox"], button[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle'
+    tagDropdown: 'button.dropdown-toggle.btn-light[role="combobox"], button[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle',
+    tagMenu: '.dropdown-menu.show, .dropdown-menu[style*="display: block"], .bootstrap-select.show .dropdown-menu, .show > .dropdown-menu'
   };
 
   const CFG = {
     tickMs: 800,
     stepPollMs: 150,
     mainReadyMs: 10000,
+    bigActionDelayMs: 500,
     actionSettleMs: 900,
     noteSettleMs: 1200,
     updateSettleMs: 1200,
@@ -497,33 +499,48 @@
 
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
-    const home = unwrapProductPayload(payload.homePayload || payload.bundle?.home?.data || {});
-    const auto = unwrapProductPayload(payload.autoPayload || payload.bundle?.auto?.data || {});
-    const homeRow = isPlainObject(home.row) ? home.row : {};
-    const autoRow = isPlainObject(auto.row) ? auto.row : {};
+    const homeRaw = isPlainObject(payload.homePayload) ? payload.homePayload : (payload.bundle?.home?.data || {});
+    const autoRaw = isPlainObject(payload.autoPayload) ? payload.autoPayload : (payload.bundle?.auto?.data || {});
+    const home = unwrapProductPayload(homeRaw);
+    const auto = unwrapProductPayload(autoRaw);
+    const homeRow = isPlainObject(homeRaw.row) ? homeRaw.row : (isPlainObject(home.row) ? home.row : {});
+    const autoRow = isPlainObject(autoRaw.row) ? autoRaw.row : (isPlainObject(auto.row) ? auto.row : {});
 
     const doneValue = pickFirst(
+      homeRaw['Done?'],
+      home['Done?'],
       homeRow['Done?'],
       payload.bundle?.home?.data?.row?.['Done?'],
       payload.bundle?.home?.ready ? 'Yes' : ''
     );
 
     const autoValue = pickFirst(
+      autoRaw['Auto'],
       auto['Auto'],
+      autoRaw.auto,
+      auto.auto,
+      autoRaw.data?.auto,
       auto.data?.auto,
       autoRow['Auto'],
       payload.bundle?.auto?.ready ? 'Yes' : ''
     );
 
     const homeSubmission = pickFirst(
+      homeRaw['Submission Number'],
+      home['Submission Number'],
       homeRow['Submission Number'],
+      homeRaw.submissionNumber,
+      home.submissionNumber,
       home.currentJob?.SubmissionNumber,
       payload.bundle?.home?.submissionNumber
     );
 
     const autoSubmission = pickFirst(
+      autoRaw['Submission Number (Auto)'],
       auto['Submission Number (Auto)'],
+      autoRaw.submissionNumberAuto,
       auto.submissionNumberAuto,
+      autoRaw.autoSubmissionNumber,
       auto.autoSubmissionNumber,
       autoRow['Submission Number (Auto)'],
       payload.bundle?.auto?.submissionNumber
@@ -695,21 +712,42 @@
     const add = (el) => {
       if (el && el instanceof Element && !candidates.includes(el)) candidates.push(el);
     };
+    const group = baseEl.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control');
+    const bootstrapSelect = baseEl.closest('.bootstrap-select') || group?.querySelector?.('.bootstrap-select');
 
-    add(baseEl);
     try { baseEl.matches(selectors) && add(baseEl); } catch {}
     try { baseEl.querySelectorAll(selectors).forEach(add); } catch {}
-    const parent = baseEl.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control');
-    try { parent?.querySelectorAll(selectors).forEach(add); } catch {}
+    try { group?.querySelectorAll(selectors).forEach(add); } catch {}
     try { baseEl.parentElement?.querySelectorAll(selectors).forEach(add); } catch {}
+    try { bootstrapSelect?.parentElement?.querySelectorAll('select:not([disabled])').forEach(add); } catch {}
+    try {
+      const active = document.activeElement;
+      if (active instanceof Element && (active === baseEl || baseEl.contains(active) || active.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control') === group)) {
+        add(active);
+      }
+    } catch {}
 
-    return candidates.find(visible) || null;
+    const score = (el) => {
+      if (!(el instanceof Element)) return -1;
+      let points = 0;
+      if (el instanceof HTMLSelectElement) points += 8;
+      else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) points += 7;
+      else if (el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') points += 6;
+      else points += 1;
+      if (visible(el)) points += 3;
+      if (el === document.activeElement) points += 5;
+      if (el !== baseEl) points += 2;
+      if (bootstrapSelect && (bootstrapSelect.contains(el) || el.closest('.bootstrap-select') === bootstrapSelect)) points += 2;
+      return points;
+    };
+
+    return candidates.sort((a, b) => score(b) - score(a))[0] || baseEl;
   }
 
   function dispatchFieldEvents(target) {
-    for (const type of ['input', 'change', 'blur']) {
+    for (const type of ['focus', 'input', 'change', 'blur']) {
       try {
-        const event = type === 'blur'
+        const event = type === 'blur' || type === 'focus'
           ? new FocusEvent(type, { bubbles: true, composed: true })
           : new Event(type, { bubbles: true, composed: true });
         target.dispatchEvent(event);
@@ -746,11 +784,12 @@
     const base = findSavedElement(record);
     if (!base) return { ok: false, reason: 'saved field target not found' };
 
-    const target = resolveEditableTarget(base) || base;
     const nextValue = norm(value);
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-      try { strongClick(target); } catch {}
+      try { strongClick(base); } catch {}
+      await sleep(140);
+      const target = resolveEditableTarget(base) || base;
 
       if (target instanceof HTMLSelectElement) {
         const options = Array.from(target.options || []);
@@ -760,21 +799,25 @@
         }
         target.value = match ? match.value : '';
         if (match) match.selected = true;
+        try { target.setAttribute('value', target.value); } catch {}
         dispatchFieldEvents(target);
       } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        try { target.focus({ preventScroll: true }); } catch {}
         setNativeValue(target, '');
+        try { target.setAttribute('value', ''); } catch {}
         dispatchFieldEvents(target);
         setNativeValue(target, nextValue);
+        try { target.setAttribute('value', nextValue); } catch {}
         dispatchFieldEvents(target);
       } else if (target.getAttribute('contenteditable') === 'true' || target.getAttribute('role') === 'textbox') {
-        target.textContent = nextValue;
+        target.innerHTML = nextValue ? `<p>${escapeHtml(nextValue)}</p>` : '<p><br></p>';
         dispatchFieldEvents(target);
       } else {
         target.textContent = nextValue;
         dispatchFieldEvents(target);
       }
 
-      await sleep(160);
+      await sleep(220);
       if (verifyFieldValue(target, nextValue)) return { ok: true };
     }
 
@@ -790,6 +833,7 @@
 
     showBootstrapTab(mainTab);
     log('Clicked: Main tab');
+    await sleep(CFG.bigActionDelayMs);
 
     const ready = await waitFor(() => {
       const pane = document.querySelector(SEL.mainPane);
@@ -846,6 +890,7 @@
 
     strongClick(opener);
     log('Clicked: Note opener');
+    await sleep(CFG.bigActionDelayMs);
     const editor = await waitFor(() => findVisibleElements(SEL.noteEditor)[0], 8000);
     if (!editor) {
       log('Note editor not found');
@@ -894,7 +939,7 @@
     if (pin) {
       strongClick(pin);
       log('Clicked: Pin to top');
-      await sleep(250);
+      await sleep(CFG.bigActionDelayMs);
     } else {
       log('Pin to top not found');
     }
@@ -930,7 +975,7 @@
 
     strongClick(opener);
     log('Clicked: Tag opener');
-    await sleep(250);
+    await sleep(CFG.bigActionDelayMs);
 
     const dropdown = await waitFor(() => findVisibleElements(SEL.tagDropdown)[0], 5000);
     if (!dropdown) {
@@ -940,7 +985,22 @@
 
     strongClick(dropdown);
     log('Clicked: Tag dropdown');
-    await sleep(300);
+    const opened = await waitFor(() => {
+      const expanded = String(dropdown.getAttribute('aria-expanded') || '').toLowerCase() === 'true';
+      const menu = findVisibleElements(SEL.tagMenu)[0];
+      return expanded || !!menu;
+    }, 3000);
+    if (!opened) {
+      await sleep(CFG.bigActionDelayMs);
+      strongClick(dropdown);
+      log('Retried: Tag dropdown');
+      await waitFor(() => {
+        const expanded = String(dropdown.getAttribute('aria-expanded') || '').toLowerCase() === 'true';
+        const menu = findVisibleElements(SEL.tagMenu)[0];
+        return expanded || !!menu;
+      }, 3000);
+    }
+    await sleep(CFG.bigActionDelayMs);
     return true;
   }
 
@@ -971,7 +1031,7 @@
 
     strongClick(target);
     log(`Clicked tag target: ${record.label || kind}`);
-    await sleep(400);
+    await sleep(CFG.bigActionDelayMs);
     return true;
   }
 
@@ -1015,11 +1075,12 @@
       const value = norm(data.fields[label] || '');
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
-        log(`Filled field: ${label}`);
+        log(`Filled field: ${label} = ${value || '(blank)'}`);
         changed = true;
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
       }
+      await sleep(CFG.bigActionDelayMs);
     }
 
     const updateOk = await clickUpdateButton();
@@ -1079,6 +1140,7 @@
         setStatus('Main tab failed');
         return;
       }
+      await sleep(CFG.bigActionDelayMs);
 
       if (forceRun || !runRecord.fieldsUpdatedAt) {
         await fillTicketFields(data, runRecord, forceRun);
@@ -1088,6 +1150,7 @@
       }
 
       if (forceRun || !runRecord.noteSavedAt) {
+        log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Auto Submission=${data.note.autoSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'} | Auto=${data.note.autoValue || '(blank)'}`);
         const noteOk = await addPinnedNote(data.note.text);
         if (noteOk) {
           runRecord.noteSavedAt = nowIso();
