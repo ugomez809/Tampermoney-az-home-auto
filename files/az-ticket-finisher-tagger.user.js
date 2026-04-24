@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.17
+// @version      1.0.18
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.17';
+  const VERSION = '1.0.18';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -82,7 +82,8 @@
     noteEditor: 'div.ql-editor[contenteditable="true"], div[data-placeholder="Add note here"][contenteditable="true"], .ql-editor',
     pinTop: 'a.pin-top[data-value="0"], a.pin-top',
     saveNote: 'button#add-note, button.btn-primary#add-note',
-    tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag'
+    tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
+    tagDropdown: '#add-tag-form > div > div > div.az-form-group.az-tags-select.mb-2 > div > button, button.btn.dropdown-toggle.btn-light[data-toggle="dropdown"][role="combobox"], button.dropdown-toggle.btn-light[role="combobox"], button.dropdown-toggle[role="combobox"]'
   };
 
   const CFG = {
@@ -1200,6 +1201,25 @@
     return null;
   }
 
+  function findTagDropdown() {
+    let el = findVisibleElements(SEL.tagDropdown)[0];
+    if (el) return el;
+
+    const candidates = Array.from(document.querySelectorAll('button[role="combobox"], button.dropdown-toggle, #add-tag-form button'))
+      .filter(visible);
+
+    return candidates.find((node) => {
+      const title = norm(node.getAttribute('title') || '');
+      const text = norm(node.textContent || '');
+      return (
+        title.includes('EverQuote') ||
+        title.includes('Home') ||
+        text.includes('EverQuote') ||
+        text.includes('Home')
+      );
+    }) || null;
+  }
+
   function findVisibleSavedTagTarget(kind) {
     const targets = getTagTargets();
     const record = targets[kind];
@@ -1219,18 +1239,29 @@
     log('Clicked: Tag opener');
     await sleep(CFG.bigActionDelayMs);
 
+    const dropdown = await waitFor(() => findTagDropdown(), 3000);
+    if (!dropdown) {
+      log('Tag dropdown not found');
+      return false;
+    }
+
+    strongClick(dropdown);
+    log('Clicked: Tag dropdown');
+    await sleep(CFG.bigActionDelayMs);
+
     const opened = await waitFor(() =>
       findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
     3000);
     if (!opened) {
       await sleep(CFG.bigActionDelayMs);
-      strongClick(opener);
-      log('Retried: Tag opener');
+      strongClick(dropdown);
+      log('Retried: Tag dropdown');
+      await sleep(CFG.bigActionDelayMs);
       const reopened = await waitFor(() =>
         findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag'),
       3000);
       if (!reopened) {
-        log('Tag choices not visible after opening tag panel');
+        log('Tag choices not visible after opening tag dropdown');
         return false;
       }
     }
