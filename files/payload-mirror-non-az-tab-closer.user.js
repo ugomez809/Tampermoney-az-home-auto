@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.8
+// @version      1.0.9
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.8';
+  const VERSION = '1.0.9';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -264,6 +264,112 @@
       signalPostedAt,
       ready: ready?.ready === true
     };
+  }
+
+  function pickPreferredPayload(localValue, gmValue, getId, getSavedMs) {
+    const localOk = isPlainObject(localValue) && norm(getId(localValue));
+    const gmOk = isPlainObject(gmValue) && norm(getId(gmValue));
+    if (localOk && !gmOk) return localValue;
+    if (!localOk && gmOk) return gmValue;
+    if (!localOk && !gmOk) return null;
+
+    const localMs = Number(getSavedMs(localValue) || 0);
+    const gmMs = Number(getSavedMs(gmValue) || 0);
+    if (localMs && gmMs && localMs !== gmMs) return localMs > gmMs ? localValue : gmValue;
+    return localValue;
+  }
+
+  function readPreferredMirroredFinalPayload() {
+    const localPayload = readLocalJson(GM_KEYS.finalPayload);
+    const gmPayload = readGM(GM_KEYS.finalPayload, null);
+    return pickPreferredPayload(
+      localPayload,
+      gmPayload,
+      (value) => norm(value?.azId || ''),
+      (value) => {
+        const candidates = [value?.savedAt, value?.signalPostedAt];
+        let best = 0;
+        for (const candidate of candidates) {
+          const ms = Date.parse(norm(candidate || ''));
+          if (Number.isFinite(ms) && ms > best) best = ms;
+        }
+        return best;
+      }
+    );
+  }
+
+  function readPreferredMirroredProductPayload(key) {
+    const localPayload = readLocalJson(key);
+    const gmPayload = readGM(key, null);
+    return pickPreferredPayload(
+      localPayload,
+      gmPayload,
+      (value) => extractProductAzId(value),
+      (value) => getProductSavedMs(value)
+    );
+  }
+
+  function readDownloadableMirrorSnapshot() {
+    const finalPayload = readPreferredMirroredFinalPayload();
+    const finalReady = readGM(GM_KEYS.finalReady, null);
+    const homePayload = readPreferredMirroredProductPayload(GM_KEYS.homePayload);
+    const autoPayload = readPreferredMirroredProductPayload(GM_KEYS.autoPayload);
+
+    const azId = norm(
+      finalPayload?.azId
+      || finalReady?.azId
+      || extractProductAzId(homePayload)
+      || extractProductAzId(autoPayload)
+      || ''
+    );
+
+    if (!azId && !isPlainObject(finalPayload) && !isPlainObject(homePayload) && !isPlainObject(autoPayload)) {
+      return null;
+    }
+
+    return {
+      exportedAt: nowIso(),
+      host: location.hostname,
+      origin: location.origin,
+      sourceScript: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      azId,
+      finalPayload: isPlainObject(finalPayload) ? deepClone(finalPayload) : {},
+      finalReady: isPlainObject(finalReady) ? deepClone(finalReady) : {},
+      homePayload: isPlainObject(homePayload) ? deepClone(homePayload) : {},
+      autoPayload: isPlainObject(autoPayload) ? deepClone(autoPayload) : {}
+    };
+  }
+
+  function buildDownloadFilename(snapshot) {
+    const azId = norm(snapshot?.azId || 'unknown');
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d+Z$/, 'Z')
+      .replace('T', '_');
+    return `gwpc-payload-mirror_${azId}_${stamp}.json`;
+  }
+
+  function downloadMirrorSnapshot() {
+    const snapshot = readDownloadableMirrorSnapshot();
+    if (!snapshot) {
+      log('Download skipped: no mirrored payload available yet');
+      setStatus('No mirrored payload to download');
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = buildDownloadFilename(snapshot);
+    document.documentElement.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    log(`Mirror downloaded for AZ ${snapshot.azId || '(unknown)'}`);
+    setStatus('Mirror downloaded');
   }
 
   function readCloseSignal() {
@@ -775,6 +881,13 @@
       state.ui.toggle.style.background = state.running ? '#b91c1c' : '#15803d';
     }
 
+    if (state.ui.download) {
+      const canDownload = !!readDownloadableMirrorSnapshot();
+      state.ui.download.disabled = !canDownload;
+      state.ui.download.style.opacity = canDownload ? '1' : '.55';
+      state.ui.download.style.cursor = canDownload ? 'pointer' : 'not-allowed';
+    }
+
     renderLogs();
   }
 
@@ -813,6 +926,7 @@
       <div style="padding:12px;">
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button id="tm-payload-mirror-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
+          <button id="tm-payload-mirror-download" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#1d4ed8;color:#fff;font-weight:800;cursor:pointer;">DOWNLOAD MIRROR</button>
         </div>
         <div id="tm-payload-mirror-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching for webhook success</div>
         <div style="display:grid;grid-template-columns:110px 1fr;gap:6px 8px;margin-bottom:10px;">
@@ -828,6 +942,7 @@
     state.panel = panel;
     state.ui.head = panel.querySelector('#tm-payload-mirror-head');
     state.ui.toggle = panel.querySelector('#tm-payload-mirror-toggle');
+    state.ui.download = panel.querySelector('#tm-payload-mirror-download');
     state.ui.status = panel.querySelector('#tm-payload-mirror-status');
     state.ui.azId = panel.querySelector('#tm-payload-mirror-azid');
     state.ui.mirrored = panel.querySelector('#tm-payload-mirror-mirrored');
@@ -850,6 +965,11 @@
         log('Monitoring started');
         tick('manual-start');
       }
+      renderAll();
+    });
+
+    state.ui.download?.addEventListener('click', () => {
+      downloadMirrorSnapshot();
       renderAll();
     });
   }
