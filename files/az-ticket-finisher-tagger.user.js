@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.24
+// @version      1.0.25
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.24';
+  const VERSION = '1.0.25';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -797,6 +797,39 @@
         auto: `${autoChoice.source}${autoChoice.savedAt ? ` @ ${autoChoice.savedAt}` : ''}`
       },
       chooseSuccessfulTag: normalizeYes(doneValue) && normalizeYes(autoValue)
+    };
+  }
+
+  function buildMissingPayloadWorkflowData(ticketId) {
+    const azId = norm(ticketId || '');
+    return {
+      azId,
+      payloadSavedAt: '',
+      fields: {
+        'CFP?': '',
+        'Reconstruction Cost': '',
+        'Year Built': '',
+        'Square FT': '',
+        '# of Story': '',
+        'Water Device?': '',
+        'Standard Pricing No Auto Discount': '',
+        'Enhance Pricing No Auto Discount': '',
+        'Standard Pricing Auto Discount': '',
+        'Enhance Pricing Auto Discount': ''
+      },
+      note: {
+        homeSubmission: '',
+        autoSubmission: '',
+        doneValue: 'Skipped missing payload',
+        autoValue: 'No',
+        text: 'Skipped missing payload'
+      },
+      sources: {
+        home: 'missing-payload',
+        auto: 'missing-payload'
+      },
+      chooseSuccessfulTag: false,
+      missingPayloadFallback: true
     };
   }
 
@@ -1710,14 +1743,22 @@
     }
   }
 
-  async function runWorkflow(forceRun = false) {
-    const finalPayload = getFinalPayload();
-    if (!finalPayload) {
+  async function runWorkflow(options = {}) {
+    const {
+      forceRun = false,
+      finalPayload = null,
+      fallbackTicketId = ''
+    } = options;
+
+    const data = finalPayload
+      ? extractWorkflowData(finalPayload)
+      : buildMissingPayloadWorkflowData(fallbackTicketId);
+
+    if (!data.azId) {
       setStatus('Payload missing');
       return;
     }
 
-    const data = extractWorkflowData(finalPayload);
     state.activeAzId = data.azId;
     const sourceSignature = `${data.sources.home} | ${data.sources.auto}`;
     if (state.lastPayloadSourceSignature !== sourceSignature) {
@@ -1764,7 +1805,13 @@
       }
       await sleep(CFG.bigActionDelayMs);
 
-      if (forceRun || !runRecord.fieldsUpdatedAt) {
+      if (data.missingPayloadFallback) {
+        if (!runRecord.fieldsUpdatedAt) {
+          runRecord.fieldsUpdatedAt = nowIso();
+          saveRunRecord(runs, data.azId, runRecord);
+        }
+        log(`Missing payload fallback active for AZ ${data.azId}`);
+      } else if (forceRun || !runRecord.fieldsUpdatedAt) {
         await fillTicketFields(data, runRecord, forceRun);
         saveRunRecord(runs, data.azId, runRecord);
       } else {
@@ -1772,7 +1819,11 @@
       }
 
       if (forceRun || !runRecord.noteSavedAt) {
-        log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Auto Submission=${data.note.autoSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'} | Auto=${data.note.autoValue || '(blank)'}`);
+        if (data.missingPayloadFallback) {
+          log('Note data | Skipped missing payload');
+        } else {
+          log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Auto Submission=${data.note.autoSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'} | Auto=${data.note.autoValue || '(blank)'}`);
+        }
         const noteOk = await addPinnedNote(data.note.text);
         if (noteOk) {
           runRecord.noteSavedAt = nowIso();
@@ -1794,7 +1845,7 @@
             await maybeClickTagApplyButton();
             runRecord.tagAppliedAt = nowIso();
             saveRunRecord(runs, data.azId, runRecord);
-            log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}`);
+            log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}${data.missingPayloadFallback ? ' (missing payload)' : ''}`);
           } else {
             log('Tag selection failed');
           }
@@ -1834,16 +1885,20 @@
       return;
     }
 
+    const openTicket = getOpenTicketInfo();
     const finalPayload = getFinalPayload();
-    if (!finalPayload) {
-      setStatus('Payload missing');
+    const fallbackMissingPayload = !finalPayload && !!openTicket.ticketId;
+    const effectiveAzId = norm(finalPayload?.azId || openTicket.ticketId || '');
+
+    state.activeAzId = effectiveAzId;
+
+    if (!openTicket.ticketId && !finalPayload) {
+      setStatus('Waiting for open ticket');
       renderAll();
       return;
     }
 
-    state.activeAzId = finalPayload.azId;
-
-    if (!hasAllFieldTargets()) {
+    if (!fallbackMissingPayload && !hasAllFieldTargets()) {
       setStatus('Field setup required');
       renderAll();
       return;
@@ -1855,19 +1910,35 @@
       return;
     }
 
+    if (!openTicket.ticketId) {
+      setStatus('Waiting for open ticket');
+      renderAll();
+      return;
+    }
+
+    if (finalPayload?.azId && openTicket.ticketId !== finalPayload.azId) {
+      setStatus(`Waiting for ticket ${finalPayload.azId}`);
+      renderAll();
+      return;
+    }
+
     const runs = readRuns();
-    const record = computeRunRecord(runs, finalPayload.azId);
+    const record = computeRunRecord(runs, effectiveAzId);
     if (record.completedAt && !state.forceRunRequested) {
       setStatus('Already completed');
       renderAll();
       return;
     }
 
-    const payloadKey = finalPayload.payloadKey;
+    const payloadKey = finalPayload?.payloadKey || `missing-payload|${openTicket.ticketId}`;
     const shouldRun = state.forceRunRequested || state.lastPayloadSeenKey !== payloadKey || !record.completedAt;
     if (shouldRun) {
       state.lastPayloadSeenKey = payloadKey;
-      runWorkflow(state.forceRunRequested).catch((err) => {
+      runWorkflow({
+        forceRun: state.forceRunRequested,
+        finalPayload,
+        fallbackTicketId: fallbackMissingPayload ? openTicket.ticketId : ''
+      }).catch((err) => {
         log(`Workflow failed: ${err?.message || err}`);
         setStatus('Workflow failed');
         state.busy = false;
