@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.3
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, clears transient workflow data plus sticky AZ handoff stop state, reloads, restores active-on-reload, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
+// @version      2.5.4
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, then waits for the finisher to close the ticket before continuing.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.3';
+  const VERSION = '2.5.4';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -63,6 +63,10 @@
     CURRENT_JOB: 'tm_pc_current_job_v1',
     AZ_CURRENT_JOB: 'tm_az_current_job_v1',
     WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1'
+  };
+
+  const SS_KEYS = {
+    BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1'
   };
 
   const SEL = {
@@ -231,23 +235,30 @@
 
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
-    if (state.running) {
+    if (hasBootstrapReloadToken()) {
+      clearBootstrapReloadToken();
+      state.running = true;
+      saveRunning(true);
       setStatus(`RESTORING (${state.mode.toUpperCase()})`);
-      log(`Restoring saved ON state | mode=${state.mode.toUpperCase()}`, 'ok');
+      log(`Continuing after fresh reload | mode=${state.mode.toUpperCase()}`, 'ok');
       setTimeout(() => {
         if (!state.destroyed && state.running && !state.busy) {
           startRun(true);
         }
       }, 0);
-    } else {
-      setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
-      log(`Fresh auto start | mode=${state.mode.toUpperCase()}`, 'ok');
-      setTimeout(() => {
-        if (!state.destroyed && !state.running && !state.busy) {
-          startRun(false);
-        }
-      }, 0);
+      return;
     }
+
+    state.running = false;
+    saveRunning(false);
+    syncUi();
+    setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
+    log(`Fresh auto bootstrap | mode=${state.mode.toUpperCase()}`, 'ok');
+    setTimeout(() => {
+      if (!state.destroyed && !state.running && !state.busy) {
+        startRun(false);
+      }
+    }, 0);
   }
 
   function cleanup() {
@@ -296,6 +307,18 @@
     try {
       localStorage.setItem(KEYS.RUNNING, on ? '1' : '0');
     } catch {}
+  }
+
+  function hasBootstrapReloadToken() {
+    try { return !!sessionStorage.getItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN); } catch { return false; }
+  }
+
+  function setBootstrapReloadToken() {
+    try { sessionStorage.setItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN, String(Date.now())); } catch {}
+  }
+
+  function clearBootstrapReloadToken() {
+    try { sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN); } catch {}
   }
 
   function isPipelinePage() {
@@ -799,6 +822,7 @@
       const cleared = clearTransientWorkflowData();
       log(`Cleared ${cleared} transient workflow key${cleared === 1 ? '' : 's'} before fresh run`, 'ok');
       log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
+      setBootstrapReloadToken();
       setTimeout(() => {
         if (!state.destroyed) location.reload();
       }, 120);
