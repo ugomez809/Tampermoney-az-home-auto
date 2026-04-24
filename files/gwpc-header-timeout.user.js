@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.4
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, and saves timeout or selected errors into the shared GWPC payload flow without posting or closing tabs.
+// @version      2.2.5
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,13 +20,14 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.4';
+  const VERSION = '2.2.5';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
+  const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
   const KEYS = {
     panelPos: 'tm_pc_header_timeout_panel_pos_v112',
@@ -347,6 +348,28 @@
   function timeoutActionsEnabled() {
     state.timeoutEnabled = readTimeoutEnabled();
     return state.timeoutEnabled;
+  }
+
+  function raiseWebhookSendSignal(event, context) {
+    if (!event || !context?.job?.['AZ ID']) return false;
+    const request = {
+      azId: context.job['AZ ID'],
+      product: context.product || '',
+      eventId: event.eventId || event.id || '',
+      triggerType: event.triggerType || '',
+      reason: `${event.triggerType || 'timeout'}:${event.eventId || event.id || 'event'}`,
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try {
+      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2));
+      log(`Raised webhook send signal for ${String(context.product || '').toUpperCase()} ${event.triggerType || 'event'}`);
+      return true;
+    } catch (err) {
+      log(`Failed to raise webhook send signal: ${err?.message || err}`);
+      return false;
+    }
   }
 
   function logWait(key, message) {
@@ -1285,6 +1308,7 @@
       saveEventToBundle(context.product, context.job, event);
       rememberDispatchedEvent(event);
       log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to payload/bundle`);
+      raiseWebhookSendSignal(event, context);
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();
       return true;

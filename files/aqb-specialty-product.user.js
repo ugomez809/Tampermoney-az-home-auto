@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.6
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill even if the normal page labels drift. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.7
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, and keeps retrying Quote every 5 seconds for 1 minute before giving up. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -27,7 +27,11 @@
   const AFTER_REMOVE_WAIT_MS = 3000; // wait 3s after clicking Remove
   const AFTER_QUOTE_WAIT_MS  = 3000; // wait 3s after clicking Quote to see if header changed
   const MAX_QUOTE_ATTEMPTS   = 3;    // total Quote clicks
+  const BETWEEN_QUOTE_ATTEMPTS_MS = 500;
+  const QUOTE_ACTION_READY_TIMEOUT_MS = 12000;
   const INACTIVITY_FORCE_QUOTE_MS = 60000;
+  const QUOTE_RETRY_EVERY_MS = 5000;
+  const QUOTE_RETRY_WINDOW_MS = 60000;
 
   const LV_ID_SUFFIX = 'ForemostVehiclesLV';
   const EMPTY_TEXT = 'No data to display';
@@ -69,6 +73,21 @@
 
   // ---------- Helpers ----------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  async function waitFor(fn, timeoutMs, stepMs = 250) {
+    const start = Date.now();
+    while ((Date.now() - start) < timeoutMs) {
+      try {
+        if (fn()) return true;
+      } catch {}
+      await sleep(stepMs);
+    }
+    try {
+      return !!fn();
+    } catch {
+      return false;
+    }
+  }
 
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
@@ -254,15 +273,7 @@
     const host = document.getElementById('SubmissionWizard-Quote');
     if (host) out.unshift(host);
 
-    out.push(...document.querySelectorAll('.gw-label[aria-label="Quote"]'));
-    out.push(...document.querySelectorAll('.gw-action--inner[aria-label="Quote"], [role="button"][aria-label="Quote"], [role="menuitem"][aria-label="Quote"]'));
-    out.push(...document.querySelectorAll('.gw-action--inner.gw-hasDivider'));
-    out.push(...Array.from(document.querySelectorAll('div.gw-action--inner, div[role="menuitem"], div[role="tab"], div[role="button"], button, a'))
-      .filter(el => {
-        const aria = String(el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
-        const txt = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-        return isVisible(el) && (aria === 'Quote' || txt === 'Quote' || txt.includes('Quote'));
-      }));
+    out.push(...Array.from(document.querySelectorAll('.gw-label[aria-label="Quote"]')));
 
     const nextLab = document.querySelector('.gw-label[aria-label="Next"]');
     if (nextLab) {
@@ -301,34 +312,45 @@
     return isVisible(el) ? el : null;
   }
 
-  function clickQuoteOnce() {
-    if (quoteRecentlyClicked()) return false;
-
+  function getClickableQuoteTarget() {
     const candidates = findQuoteCandidates();
     for (const el of candidates) {
       const target = upgradeToClickable(el);
-      if (target && strongClick(target)) {
-        markQuoteClicked();
-        markActivity('Quote clicked');
-        return true;
-      }
+      if (target) return target;
     }
     const fallback = findClickableOwnerByLabel('Quote');
-    if (fallback && strongClick(fallback)) {
+    return fallback && isVisible(fallback) ? fallback : null;
+  }
+
+  function clickQuoteOnce() {
+    if (quoteRecentlyClicked()) return false;
+
+    const target = getClickableQuoteTarget();
+    if (target && strongClick(target)) {
       markQuoteClicked();
-      markActivity('Quote clicked via label fallback');
+      markActivity('Quote clicked');
       return true;
     }
-    log(candidates.length ? `Quote target found but not clickable (${candidates.length} candidates)` : 'Quote target not found or not clickable');
+    const candidates = findQuoteCandidates();
+    log(candidates.length ? 'Quote target found but not clickable yet' : 'Quote target not found');
     return false;
   }
 
-  async function clickQuoteUpTo3IfStuck() {
-    for (let attempt = 1; attempt <= MAX_QUOTE_ATTEMPTS; attempt++) {
+  async function clickQuoteUntilHeaderMoves(maxAttempts = MAX_QUOTE_ATTEMPTS, readyTimeoutMs = QUOTE_ACTION_READY_TIMEOUT_MS) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (!armed || isGloballyPaused()) return false;
+      const ready = await waitFor(
+        () => !!getClickableQuoteTarget(),
+        readyTimeoutMs
+      );
+      if (!ready) {
+        log(`Quote action never became clickable on attempt ${attempt}`);
+        if (attempt < maxAttempts) await sleep(BETWEEN_QUOTE_ATTEMPTS_MS);
+        continue;
+      }
       const clicked = clickQuoteOnce();
       if (!clicked) {
-        await sleep(500);
+        if (attempt < maxAttempts) await sleep(BETWEEN_QUOTE_ATTEMPTS_MS);
         continue;
       }
       await sleep(AFTER_QUOTE_WAIT_MS);
@@ -338,8 +360,39 @@
         return true;
       }
       log(`Still on Auto Data Prefill after Quote attempt ${attempt}`);
+      if (attempt < maxAttempts) await sleep(BETWEEN_QUOTE_ATTEMPTS_MS);
     }
     return false;
+  }
+
+  async function retryQuoteEveryFiveSecondsForOneMinute() {
+    const totalTicks = Math.max(1, Math.floor(QUOTE_RETRY_WINDOW_MS / QUOTE_RETRY_EVERY_MS));
+    for (let tick = 1; tick <= totalTicks; tick++) {
+      if (!armed || isGloballyPaused()) return false;
+      if (!headerStillAutoDataPrefill()) return true;
+
+      const tickStartedAt = Date.now();
+      log(`Quote retry tick ${tick}/${totalTicks}`);
+      const moved = await clickQuoteUntilHeaderMoves(1, 1500);
+      if (moved) return true;
+
+      const elapsed = Date.now() - tickStartedAt;
+      const remaining = QUOTE_RETRY_EVERY_MS - elapsed;
+      if (tick < totalTicks && remaining > 0) {
+        await sleep(remaining);
+      }
+    }
+    return !headerStillAutoDataPrefill();
+  }
+
+  async function clickQuoteWithRetryWindow() {
+    const moved = await clickQuoteUntilHeaderMoves();
+    if (moved) return true;
+
+    if (!headerStillAutoDataPrefill()) return true;
+
+    log('Initial Quote attempts failed. Retrying every 5 seconds for 1 minute.');
+    return retryQuoteEveryFiveSecondsForOneMinute();
   }
 
   async function maybeForceQuoteFromInactivity() {
@@ -352,7 +405,7 @@
     const suffix = missing.length ? ` (bypassing gate: missing ${missing.join(', ')})` : '';
     markActivity(`1 minute inactivity on Auto Data Prefill. Forcing Quote.${suffix}`);
     try {
-      const ok = await clickQuoteUpTo3IfStuck();
+      const ok = await clickQuoteWithRetryWindow();
       if (ok) {
         setDoneFlag();
         finished = true;
@@ -395,7 +448,7 @@
 
     if (isLVEmpty(root)) {
       log('Specialty Product empty, going straight to Quote');
-      const ok = await clickQuoteUpTo3IfStuck();
+      const ok = await clickQuoteWithRetryWindow();
       if (ok) {
         setDoneFlag();
         finished = true;
@@ -417,7 +470,7 @@
     await sleep(WAIT_AFTER_REMOVE_MS);
 
     log('Specialty rows handled, clicking Quote');
-    const ok = await clickQuoteUpTo3IfStuck();
+    const ok = await clickQuoteWithRetryWindow();
     if (ok) {
       setDoneFlag();
       finished = true;
