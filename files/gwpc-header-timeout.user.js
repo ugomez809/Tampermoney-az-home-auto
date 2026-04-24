@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.6
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC payload flow, and raises the shared webhook send signal without closing tabs.
+// @version      2.2.7
+// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC bundle flow, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.6';
+  const VERSION = '2.2.7';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -134,6 +134,7 @@
     state.timeoutEnabled = readTimeoutEnabled();
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
+    clearLegacyTimeoutProductPayloads();
     log(`Script started v${VERSION}`);
     log(`Origin: ${location.origin}`);
     log('Fresh timeout gatherer armed');
@@ -704,119 +705,12 @@
     return writeBundle(current);
   }
 
-  function emptyPayloadForJob(product, job) {
-    const payload = {
-      script: SCRIPT_NAME,
-      version: VERSION,
-      event: 'gwpc_timeout_gathered',
-      product,
-      ready: false,
-      'AZ ID': normalizeText(job?.['AZ ID']),
-      currentJob: normalizeCurrentJob(job),
-      savedAt: nowIso(),
-      page: {
-        url: location.href,
-        title: document.title
-      },
-      errors: [],
-      latestError: null
-    };
-
-    if (product === 'home') {
-      payload.row = {
-        'Done?': '',
-        'Result': ''
-      };
-      payload['Done?'] = '';
-      payload['Result'] = '';
-    } else {
-      payload.row = {
-        'Auto': ''
-      };
-      payload['Auto'] = '';
-    }
-
-    return payload;
-  }
-
-  function readProductPayload(product) {
-    const key = product === 'home' ? KEYS.homePayload : KEYS.autoPayload;
-    return {
-      key,
-      value: safeJsonParse(localStorage.getItem(key), null)
-    };
-  }
-
-  function ensurePayloadForJob(product, job) {
-    const { key, value } = readProductPayload(product);
-    const azId = normalizeText(job?.['AZ ID']);
-    const payload = isPlainObject(value) ? deepClone(value) : null;
-    if (!payload || normalizeText(payload['AZ ID'] || payload?.currentJob?.['AZ ID'] || '') !== azId) {
-      return { key, payload: emptyPayloadForJob(product, job) };
-    }
-    return { key, payload };
-  }
-
   function mergeEventList(list, event) {
     const next = Array.isArray(list) ? list.map((item) => deepClone(item)) : [];
     const idx = next.findIndex((item) => normalizeText(item?.eventId || item?.id) === normalizeText(event.eventId));
     if (idx >= 0) next[idx] = deepClone(event);
     else next.push(deepClone(event));
     return next;
-  }
-
-  function saveEventToPayload(product, job, event) {
-    const { key, payload } = ensurePayloadForJob(product, job);
-    const eventSubmission = normalizeText(event?.submissionNumber || '');
-    payload.script = SCRIPT_NAME;
-    payload.version = VERSION;
-    payload.event = 'gwpc_timeout_gathered';
-    payload.product = product;
-    payload['AZ ID'] = job['AZ ID'];
-    const nextCurrentJob = {
-      ...(isPlainObject(payload.currentJob) ? payload.currentJob : {}),
-      ...job
-    };
-    if (product === 'auto' && !eventSubmission) {
-      nextCurrentJob.SubmissionNumber = normalizeText(
-        (isPlainObject(payload.currentJob) ? payload.currentJob.SubmissionNumber : '') ||
-        payload.submissionNumberAuto ||
-        payload.autoSubmissionNumber ||
-        payload.submissionNumber ||
-        ''
-      );
-    } else if (eventSubmission) {
-      nextCurrentJob.SubmissionNumber = eventSubmission;
-    }
-    payload.currentJob = normalizeCurrentJob(nextCurrentJob);
-    payload.savedAt = nowIso();
-    payload.page = { url: location.href, title: document.title };
-    payload.errors = mergeEventList(payload.errors, event);
-    payload.latestError = deepClone(event);
-    payload.ready = payload.ready === true;
-
-    payload.row = isPlainObject(payload.row) ? payload.row : {};
-
-    if (product === 'home') {
-      payload.row['Done?'] = event.resultValue;
-      payload.row['Result'] = event.errorText;
-      if (eventSubmission) payload.row['Submission Number'] = eventSubmission;
-      payload['Done?'] = event.resultValue;
-      payload['Result'] = event.errorText;
-    } else {
-      payload.row['Auto'] = event.resultValue;
-      if (eventSubmission) {
-        payload.row['Submission Number (Auto)'] = eventSubmission;
-        payload.submissionNumberAuto = eventSubmission;
-        payload.autoSubmissionNumber = eventSubmission;
-        payload.submissionNumber = eventSubmission;
-        payload['Submission Number (Auto)'] = eventSubmission;
-      }
-      payload['Auto'] = event.resultValue;
-    }
-
-    localStorage.setItem(key, JSON.stringify(payload, null, 2));
-    return payload;
   }
 
   function saveEventToBundle(product, job, event) {
@@ -875,6 +769,26 @@
 
     localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2));
     return next;
+  }
+
+  function isLegacyTimeoutProductPayload(payload) {
+    if (!isPlainObject(payload)) return false;
+    if (normalizeText(payload.script || '') === SCRIPT_NAME) return true;
+    if (normalizeText(payload.event || '') === 'gwpc_timeout_gathered') return true;
+    const latestError = isPlainObject(payload.latestError) ? payload.latestError : {};
+    return normalizeText(latestError.source || '') === SCRIPT_NAME;
+  }
+
+  function clearLegacyTimeoutProductPayloads() {
+    for (const [label, key] of [
+      ['HOME', KEYS.homePayload],
+      ['AUTO', KEYS.autoPayload]
+    ]) {
+      const payload = safeJsonParse(localStorage.getItem(key), null);
+      if (!isLegacyTimeoutProductPayload(payload)) continue;
+      try { localStorage.removeItem(key); } catch {}
+      log(`Cleared legacy timeout-owned ${label} payload`);
+    }
   }
 
   function buildSignatureJobBundle(job, bundle) {
@@ -1306,10 +1220,9 @@
     }
 
     try {
-      saveEventToPayload(context.product, context.job, event);
       saveEventToBundle(context.product, context.job, event);
       rememberDispatchedEvent(event);
-      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to payload/bundle`);
+      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to bundle`);
       raiseWebhookSendSignal(event, context);
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();

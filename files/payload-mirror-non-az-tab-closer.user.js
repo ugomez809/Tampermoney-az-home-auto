@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.10
+// @version      1.0.11
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,8 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.10';
+  const VERSION = '1.0.11';
+  const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -304,8 +305,8 @@
     const localPayload = readLocalJson(key);
     const gmPayload = readGM(key, null);
     return pickPreferredPayload(
-      localPayload,
-      gmPayload,
+      isLegacyTimeoutOwnedProductPayload(localPayload) ? null : localPayload,
+      isLegacyTimeoutOwnedProductPayload(gmPayload) ? null : gmPayload,
       (value) => extractProductAzId(value),
       (value) => getProductSavedMs(value)
     );
@@ -398,6 +399,18 @@
   function unwrapProductPayload(raw) {
     if (!isPlainObject(raw)) return {};
     return isPlainObject(raw.data) ? raw.data : raw;
+  }
+
+  function isLegacyTimeoutOwnedProductPayload(raw) {
+    if (!isPlainObject(raw)) return false;
+    const data = unwrapProductPayload(raw);
+    const latestError = isPlainObject(raw?.latestError)
+      ? raw.latestError
+      : (isPlainObject(data?.latestError) ? data.latestError : {});
+
+    if (norm(raw?.script || data?.script || '') === LEGACY_TIMEOUT_SCRIPT_NAME) return true;
+    if (norm(raw?.event || data?.event || '') === 'gwpc_timeout_gathered') return true;
+    return norm(latestError?.source || '') === LEGACY_TIMEOUT_SCRIPT_NAME;
   }
 
   function extractProductAzId(raw) {
@@ -498,9 +511,27 @@
   function syncMirroredProductPayload(product, key) {
     if (!isGwpcHost()) return false;
     const localPayload = readLocalJson(key);
-    if (!isPlainObject(localPayload) || !extractProductAzId(localPayload)) return false;
-
     const existing = readGM(key, null);
+    if (isLegacyTimeoutOwnedProductPayload(localPayload)) {
+      try { localStorage.removeItem(key); } catch {}
+      if (isLegacyTimeoutOwnedProductPayload(existing)) writeGM(key, null);
+      log(`Purged legacy timeout-owned ${product === 'home' ? 'Home' : 'Auto'} payload`);
+      return true;
+    }
+
+    if (!isPlainObject(localPayload) || !extractProductAzId(localPayload)) {
+      if (isLegacyTimeoutOwnedProductPayload(existing)) {
+        writeGM(key, null);
+        log(`Cleared mirrored legacy timeout-owned ${product === 'home' ? 'Home' : 'Auto'} payload`);
+        return true;
+      }
+      return false;
+    }
+
+    if (isLegacyTimeoutOwnedProductPayload(existing)) {
+      writeGM(key, null);
+    }
+
     if (!shouldReplaceProductPayload(product, existing, localPayload)) return false;
 
     writeGM(key, localPayload);
@@ -520,8 +551,10 @@
   function scoreMirroredPayload(payload) {
     if (!isPlainObject(payload)) return -1;
     const bundle = isPlainObject(payload.bundle) ? payload.bundle : {};
-    const homePayload = isPlainObject(payload.homePayload) ? payload.homePayload : {};
-    const autoPayload = isPlainObject(payload.autoPayload) ? payload.autoPayload : {};
+    const homePayloadRaw = isPlainObject(payload.homePayload) ? payload.homePayload : {};
+    const autoPayloadRaw = isPlainObject(payload.autoPayload) ? payload.autoPayload : {};
+    const homePayload = isLegacyTimeoutOwnedProductPayload(homePayloadRaw) ? {} : homePayloadRaw;
+    const autoPayload = isLegacyTimeoutOwnedProductPayload(autoPayloadRaw) ? {} : autoPayloadRaw;
     const homeData = isPlainObject(bundle.home?.data) ? bundle.home.data : homePayload;
     const autoData = isPlainObject(bundle.auto?.data) ? bundle.auto.data : autoPayload;
     const homeRow = isPlainObject(homeData?.row) ? homeData.row : {};
@@ -564,8 +597,10 @@
     const rawKeysFound = [];
     const currentJob = readLocalKey('tm_pc_current_job_v1', rawKeysFound) || {};
     const bundle = readLocalKey('tm_pc_webhook_bundle_v1', rawKeysFound) || {};
-    const homePayload = readLocalKey('tm_pc_home_quote_grab_payload_v1', rawKeysFound) || {};
-    const autoPayload = readLocalKey('tm_pc_auto_quote_grab_payload_v1', rawKeysFound) || {};
+    const homePayloadRaw = readLocalKey('tm_pc_home_quote_grab_payload_v1', rawKeysFound) || {};
+    const autoPayloadRaw = readLocalKey('tm_pc_auto_quote_grab_payload_v1', rawKeysFound) || {};
+    const homePayload = isLegacyTimeoutOwnedProductPayload(homePayloadRaw) ? {} : homePayloadRaw;
+    const autoPayload = isLegacyTimeoutOwnedProductPayload(autoPayloadRaw) ? {} : autoPayloadRaw;
     const timeoutRuntime = readLocalKey('tm_pc_header_timeout_runtime_v2', rawKeysFound);
     const timeoutSentEvents = readLocalKey('tm_pc_header_timeout_sent_events_v2', rawKeysFound);
 
@@ -674,7 +709,19 @@
     if (!isAzHost()) return false;
     let bridged = false;
     for (const key of [GM_KEYS.homePayload, GM_KEYS.autoPayload]) {
+      const localPayload = readLocalJson(key);
       const payload = readGM(key, null);
+      if (isLegacyTimeoutOwnedProductPayload(payload)) {
+        try { localStorage.removeItem(key); } catch {}
+        writeGM(key, null);
+        bridged = true;
+        continue;
+      }
+      if ((!isPlainObject(payload) || !extractProductAzId(payload)) && isLegacyTimeoutOwnedProductPayload(localPayload)) {
+        try { localStorage.removeItem(key); } catch {}
+        bridged = true;
+        continue;
+      }
       if (!isPlainObject(payload) || !extractProductAzId(payload)) continue;
       try {
         localStorage.setItem(key, JSON.stringify(payload, null, 2));
