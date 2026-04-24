@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.22
+// @version      1.0.23
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.22';
+  const VERSION = '1.0.23';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -251,6 +251,18 @@
 
   function lower(value) {
     return norm(value).toLowerCase();
+  }
+
+  function cleanTagText(value) {
+    return String(value == null ? '' : value)
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s✓✔]+/g, '')
+      .trim();
+  }
+
+  function lowerTagText(value) {
+    return cleanTagText(value).toLowerCase();
   }
 
   function visible(el) {
@@ -495,7 +507,10 @@
 
   function hasAllTagTargets() {
     const targets = getTagTargets();
-    return ['successfulTag', 'failedTag'].every((key) => isPlainObject(targets[key]) && norm(targets[key].selector));
+    return ['successfulTag', 'failedTag'].every((key) => {
+      const record = targets[key];
+      return isPlainObject(record) && (norm(record.value) || cleanTagText(record.label));
+    });
   }
 
   function readRuns() {
@@ -1242,6 +1257,124 @@
     return null;
   }
 
+  function findTagSelect(form) {
+    if (!(form instanceof Element)) return null;
+    const selects = Array.from(form.querySelectorAll('select'));
+    if (!selects.length) return null;
+    selects.sort((a, b) => ((b.options?.length || 0) - (a.options?.length || 0)));
+    return selects[0] || null;
+  }
+
+  function getTagOptionLabel(option) {
+    if (!(option instanceof HTMLOptionElement)) return '';
+    return cleanTagText(option.textContent || option.label || '');
+  }
+
+  function valueForExactTagLabel(selectEl, label) {
+    if (!(selectEl instanceof HTMLSelectElement)) return '';
+    const wanted = lowerTagText(label);
+    if (!wanted) return '';
+    for (const option of Array.from(selectEl.options || [])) {
+      if (option.disabled) continue;
+      if (lowerTagText(getTagOptionLabel(option)) === wanted) {
+        return norm(option.value || '');
+      }
+    }
+    return '';
+  }
+
+  function optionLabelForValue(selectEl, value) {
+    if (!(selectEl instanceof HTMLSelectElement)) return '';
+    const wanted = norm(value);
+    if (!wanted) return '';
+    for (const option of Array.from(selectEl.options || [])) {
+      if (norm(option.value || '') === wanted) return getTagOptionLabel(option);
+    }
+    return '';
+  }
+
+  function selectHasOptionValue(selectEl, value) {
+    return !!optionLabelForValue(selectEl, value);
+  }
+
+  function getSelectedTagValues(selectEl) {
+    if (!(selectEl instanceof HTMLSelectElement)) return [];
+    const values = [];
+    for (const option of Array.from(selectEl.options || [])) {
+      if (!option.selected) continue;
+      const value = norm(option.value || '');
+      if (value) values.push(value);
+    }
+    return values;
+  }
+
+  function refreshTagSelectpicker(selectEl) {
+    try {
+      const $ = window.jQuery || window.$;
+      if ($ && typeof $.fn?.selectpicker === 'function') {
+        $(selectEl).selectpicker('refresh');
+      }
+    } catch {}
+  }
+
+  function mergeTagValues(selectEl, valuesToAdd) {
+    if (!(selectEl instanceof HTMLSelectElement)) return false;
+    const addSet = new Set((valuesToAdd || []).map((value) => norm(value)).filter(Boolean));
+    if (!addSet.size) return false;
+
+    const current = new Set(getSelectedTagValues(selectEl));
+    let changed = false;
+
+    for (const value of addSet) {
+      if (!current.has(value)) changed = true;
+      current.add(value);
+    }
+
+    for (const option of Array.from(selectEl.options || [])) {
+      const value = norm(option.value || '');
+      if (!value) continue;
+      option.selected = current.has(value);
+    }
+
+    selectEl.dispatchEvent(new Event('input', { bubbles: true }));
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    refreshTagSelectpicker(selectEl);
+    return changed;
+  }
+
+  function getTagMenuItems(root = null) {
+    const scope = root instanceof Element ? root : document;
+    return Array.from(scope.querySelectorAll('.dropdown-item, a[id^="bs-select-"], li[role="option"], a[role="option"], [role="option"]'))
+      .filter((el) => visible(el) && cleanTagText(el.textContent || ''));
+  }
+
+  function getTagPickerItemFromTarget(target) {
+    if (!(target instanceof Element)) return null;
+    return target.closest('.dropdown-item, a[id^="bs-select-"], li[role="option"], a[role="option"], [role="option"]');
+  }
+
+  function buildTagTargetRecord(target) {
+    const optionEl = getTagPickerItemFromTarget(target);
+    if (!optionEl) return null;
+
+    const labelNode = optionEl.querySelector('span.text, .text');
+    const clickedLabel = cleanTagText(labelNode?.textContent || optionEl.textContent || '');
+    if (!clickedLabel) return null;
+
+    const form = optionEl.closest(SEL.tagForm) || findVisibleElements(SEL.tagForm)[0] || document.querySelector(SEL.tagForm);
+    const selectEl = findTagSelect(form);
+    if (!(selectEl instanceof HTMLSelectElement)) return null;
+
+    const value = valueForExactTagLabel(selectEl, clickedLabel);
+    if (!value) return null;
+
+    return {
+      label: clickedLabel,
+      value,
+      savedAt: nowIso()
+    };
+  }
+
   function getTagDropdownMenu(dropdown) {
     if (!(dropdown instanceof Element)) return null;
 
@@ -1376,19 +1509,14 @@
     return false;
   }
 
-  function findVisibleSavedTagTarget(kind) {
-    const targets = getTagTargets();
-    const record = targets[kind];
-    if (!isPlainObject(record)) return null;
-    const found = findSavedElement(record);
-    return visible(found) ? found : null;
-  }
+  async function openTagPanel() {
+    const existingForm = findVisibleElements(SEL.tagForm)[0];
+    if (existingForm) return existingForm;
 
-  async function openTagPicker() {
     const opener = findTagOpener();
     if (!opener) {
       log('Tag opener not found');
-      return false;
+      return null;
     }
 
     strongClick(opener);
@@ -1398,53 +1526,50 @@
     const tagForm = await waitFor(() => findVisibleElements(SEL.tagForm)[0], 3000);
     if (!tagForm) {
       log('Tag form not visible after opening tag panel');
-      return false;
+      return null;
     }
 
-    const dropdown = await waitFor(() => findTagDropdown(), 3000);
-    if (!dropdown) {
-      log('Tag dropdown not found');
-      return false;
-    }
-
-    log(`Using tag dropdown: ${norm(dropdown.getAttribute('title') || dropdown.textContent || '') || '(no label)'}`);
-
-    const openedNow = await tryOpenTagDropdown(dropdown);
-    if (!openedNow) {
-      log('Tag dropdown did not open');
-      return false;
-    }
-    log('Opened: Tag dropdown');
-    await sleep(CFG.bigActionDelayMs);
-
-    const opened = await waitFor(() =>
-      isTagDropdownOpen(dropdown) && (findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag')),
-    3000);
-    if (!opened) {
-      await sleep(CFG.bigActionDelayMs);
-      const reopened = await tryOpenTagDropdown(dropdown);
-      log(reopened ? 'Retried: Tag dropdown' : 'Retried tag dropdown but still closed');
-      await sleep(CFG.bigActionDelayMs);
-      const choicesVisible = await waitFor(() =>
-        isTagDropdownOpen(dropdown) && (findVisibleSavedTagTarget('successfulTag') || findVisibleSavedTagTarget('failedTag')),
-      3000);
-      if (!choicesVisible) {
-        log('Tag choices not visible after opening tag dropdown');
-        return false;
-      }
-    }
-
-    await sleep(CFG.bigActionDelayMs);
-    return true;
+    return tagForm;
   }
 
   function maybeTagAlreadyPresent(targetRecord) {
-    const label = lower(targetRecord?.label || targetRecord?.fingerprint?.textFingerprint || '');
+    const label = lowerTagText(targetRecord?.label || '');
     if (!label) return false;
     return getOpenTicketInfo().tags.some((tag) => lower(tag).includes(label) || label.includes(lower(tag)));
   }
 
-  async function clickSavedTagTarget(kind) {
+  function resolveStoredTagValue(selectEl, kind, record) {
+    if (!(selectEl instanceof HTMLSelectElement) || !isPlainObject(record)) {
+      return { value: '', label: cleanTagText(record?.label || '') };
+    }
+
+    const directValue = norm(record.value || '');
+    if (directValue && selectHasOptionValue(selectEl, directValue)) {
+      return {
+        value: directValue,
+        label: cleanTagText(record.label || optionLabelForValue(selectEl, directValue))
+      };
+    }
+
+    const label = cleanTagText(record.label || '');
+    if (!label) return { value: '', label: '' };
+
+    const resolvedValue = valueForExactTagLabel(selectEl, label);
+    if (!resolvedValue) return { value: '', label };
+
+    const targets = getTagTargets();
+    targets[kind] = {
+      ...record,
+      label,
+      value: resolvedValue,
+      savedAt: record.savedAt || nowIso()
+    };
+    saveTargets(GM_KEYS.tagTargets, targets);
+
+    return { value: resolvedValue, label };
+  }
+
+  async function applyStoredTagTarget(kind, tagForm = null) {
     const targets = getTagTargets();
     const record = targets[kind];
     if (!isPlainObject(record)) {
@@ -1457,17 +1582,26 @@
       return true;
     }
 
-    const target = await waitFor(() => {
-      const found = findSavedElement(record);
-      return visible(found) ? found : null;
-    }, 4000);
-    if (!target) {
-      log(`Tag target not found: ${record.label || kind}`);
+    const form = (tagForm instanceof Element ? tagForm : findVisibleElements(SEL.tagForm)[0]) || await waitFor(() => findVisibleElements(SEL.tagForm)[0], 3000);
+    if (!(form instanceof Element)) {
+      log('Tag form not available for tag selection');
       return false;
     }
 
-    strongClick(target);
-    log(`Clicked tag target: ${record.label || kind}`);
+    const selectEl = findTagSelect(form);
+    if (!(selectEl instanceof HTMLSelectElement)) {
+      log('Tag select not found in tag form');
+      return false;
+    }
+
+    const resolved = resolveStoredTagValue(selectEl, kind, record);
+    if (!resolved.value) {
+      log(`Stored tag value missing for ${record.label || kind}`);
+      return false;
+    }
+
+    mergeTagValues(selectEl, [resolved.value]);
+    log(`Applied tag selection: ${resolved.label || kind}`);
     await sleep(CFG.bigActionDelayMs);
     return true;
   }
@@ -1612,10 +1746,10 @@
       }
 
       if (forceRun || !runRecord.tagAppliedAt) {
-        const tagOpened = await openTagPicker();
-        if (tagOpened) {
+        const tagForm = await openTagPanel();
+        if (tagForm) {
           const targetKey = data.chooseSuccessfulTag ? 'successfulTag' : 'failedTag';
-          const tagOk = await clickSavedTagTarget(targetKey);
+          const tagOk = await applyStoredTagTarget(targetKey, tagForm);
           if (tagOk) {
             await maybeClickTagApplyButton();
             runRecord.tagAppliedAt = nowIso();
@@ -1784,7 +1918,7 @@
         renderAll();
         return;
       }
-      if (state.picker?.type !== 'tags' || !state.picker?.primerPending) {
+      if (state.picker?.type !== 'tags') {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
@@ -1813,7 +1947,7 @@
     const current = state.picker.items[state.picker.index];
     if (type === 'tags') {
       setStatus(`Picker: click ${current.label}`);
-      log(`Tag picker started: first click ignored without blocking, then click ${current.label}`);
+      log(`Tag picker started: first click ignored without blocking. Use it to open tags, then click ${current.label}`);
     } else {
       setStatus(`Picker: click ${current.label}`);
       log(`Picker started: click ${current.label}`);
@@ -1844,30 +1978,37 @@
   function handlePickerSelection(target) {
     if (!state.picker) return;
     const item = state.picker.items[state.picker.index];
-    const selector = buildStableSelector(target);
-    if (!selector) {
-      log('Picker failed: could not build stable selector');
-      return;
-    }
-
-    const record = {
-      selector,
-      fingerprint: buildFingerprint(target),
-      label: norm(target.innerText || target.textContent || '') || item.label,
-      savedAt: nowIso()
-    };
-
     if (state.picker.type === 'fields') {
+      const selector = buildStableSelector(target);
+      if (!selector) {
+        log('Picker failed: could not build stable selector');
+        return;
+      }
+
+      const record = {
+        selector,
+        fingerprint: buildFingerprint(target),
+        label: norm(target.innerText || target.textContent || '') || item.label,
+        savedAt: nowIso()
+      };
+
       const targets = getFieldTargets();
       targets[item.key] = record;
       saveTargets(GM_KEYS.fieldTargets, targets);
     } else {
+      const record = buildTagTargetRecord(target);
+      if (!record) {
+        log('Picker failed: click the real tag option in the open dropdown');
+        return;
+      }
       const targets = getTagTargets();
       targets[item.key] = record;
       saveTargets(GM_KEYS.tagTargets, targets);
     }
 
-    log(`Saved target: ${item.label}`);
+    const currentTargets = state.picker.type === 'tags' ? getTagTargets() : null;
+    const extra = state.picker.type === 'tags' ? ` = ${currentTargets?.[item.key]?.label || ''}` : '';
+    log(`Saved target: ${item.label}${extra}`);
 
     state.picker.index += 1;
     if (state.picker.index >= state.picker.items.length) {
