@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.8
-// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, and keeps retrying Quote every 5 seconds for 1 minute before giving up. Sets aqb_step_specialty_done=1 when header changes.
+// @version      1.8.9
+// @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same Quote target resolution pattern as the working Home quote extractor across accessible Guidewire docs, retries if the header stays on Auto Data Prefill, force-clicks Quote after 1 minute of inactivity even if the normal page labels drift, keeps retrying Quote every 5 seconds for 1 minute before giving up, and now shows a live debug panel with detailed logs. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -40,6 +40,8 @@
   const WAIT_AFTER_REMOVE_MS = 2000;
 
   const HEADER_STUCK_STARTS_WITH = 'Auto Data Prefill';
+  const UI_ATTR = 'data-tm-aqb-specialty-ui';
+  const MAX_LOG_LINES = 140;
 
   const BTN_TEXT_ON  = 'AQB: STOP';
   const BTN_TEXT_OFF = 'AQB: START';
@@ -51,28 +53,114 @@
   let finished = false;
   let running = false;
   let lastActivityAt = Date.now();
+  let lastWaitKey = '';
+  let logs = [];
+  let ui = {};
 
   // track "flag became 1" moment
   let sawFlagAt = 0;
 
-  // ---------- Minimal START/STOP ----------
-  function mountToggle() {
-    const btn = document.createElement('button');
-    btn.textContent = BTN_TEXT_ON;
-    btn.style.cssText =
-      'position:fixed;right:12px;bottom:12px;z-index:999999;' +
-      'border:0;border-radius:10px;padding:8px 12px;' +
-      'background:#2f80ed;color:#fff;font:12px/1 system-ui,Segoe UI,Arial;font-weight:700;' +
-      'cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.25);';
-    btn.addEventListener('click', () => {
+  // ---------- UI ----------
+  function mountPanel() {
+    const existing = document.getElementById('tm-aqb-specialty-panel');
+    if (existing) existing.remove();
+
+    const panel = document.createElement('div');
+    panel.id = 'tm-aqb-specialty-panel';
+    panel.setAttribute(UI_ATTR, '1');
+    panel.style.cssText =
+      'position:fixed;right:12px;bottom:12px;z-index:2147483647;width:360px;' +
+      'background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:12px;' +
+      'box-shadow:0 14px 40px rgba(0,0,0,.35);font:12px/1.4 system-ui,Segoe UI,Arial;';
+
+    panel.innerHTML = `
+      <div ${UI_ATTR}="1" style="padding:10px 12px;border-bottom:1px solid #334155;background:linear-gradient(90deg,#0f172a,#1e293b);border-radius:12px 12px 0 0;">
+        <div ${UI_ATTR}="1" style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <div ${UI_ATTR}="1">
+            <div ${UI_ATTR}="1" style="font-weight:800;">GWPC Auto Specialty Quote</div>
+            <div ${UI_ATTR}="1" style="font-size:11px;opacity:.72;">Live specialty Quote debug</div>
+          </div>
+          <div ${UI_ATTR}="1" style="display:flex;gap:8px;">
+            <button ${UI_ATTR}="1" id="tm-aqb-specialty-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">${BTN_TEXT_ON}</button>
+            <button ${UI_ATTR}="1" id="tm-aqb-specialty-copy" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
+          </div>
+        </div>
+      </div>
+      <div ${UI_ATTR}="1" style="padding:10px 12px;">
+        <div ${UI_ATTR}="1" style="margin-bottom:8px;padding:7px 9px;border-radius:10px;background:#111827;border:1px solid #1f2937;">
+          <strong ${UI_ATTR}="1">Status:</strong>
+          <span ${UI_ATTR}="1" id="tm-aqb-specialty-status" style="margin-left:6px;">Starting...</span>
+        </div>
+        <textarea ${UI_ATTR}="1" id="tm-aqb-specialty-logs" readonly style="width:100%;min-height:210px;max-height:260px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:10px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    ui.panel = panel;
+    ui.toggle = panel.querySelector('#tm-aqb-specialty-toggle');
+    ui.copy = panel.querySelector('#tm-aqb-specialty-copy');
+    ui.status = panel.querySelector('#tm-aqb-specialty-status');
+    ui.logs = panel.querySelector('#tm-aqb-specialty-logs');
+
+    ui.toggle?.addEventListener('click', () => {
       armed = !armed;
-      btn.textContent = armed ? BTN_TEXT_ON : BTN_TEXT_OFF;
+      ui.toggle.textContent = armed ? BTN_TEXT_ON : BTN_TEXT_OFF;
+      ui.toggle.style.background = armed ? '#2563eb' : '#475569';
+      log(armed ? 'Script armed from panel' : 'Script stopped from panel');
+      if (!armed) {
+        setStatus('Stopped');
+      }
     });
-    document.body.appendChild(btn);
+
+    ui.copy?.addEventListener('click', async () => {
+      const text = logs.join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        log('Logs copied to clipboard');
+      } catch (err) {
+        log(`Copy logs failed: ${err?.message || err}`);
+      }
+    });
+
+    renderLogs();
   }
 
   // ---------- Helpers ----------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function timeNow() {
+    try { return new Date().toLocaleTimeString(); }
+    catch { return new Date().toISOString(); }
+  }
+
+  function renderLogs() {
+    if (!ui.logs) return;
+    ui.logs.value = logs.join('\n');
+    ui.logs.scrollTop = 0;
+  }
+
+  function setStatus(text) {
+    if (ui.status) ui.status.textContent = text;
+  }
+
+  function log(message) {
+    const line = `[${timeNow()}] ${message}`;
+    logs.unshift(line);
+    logs = logs.slice(0, MAX_LOG_LINES);
+    renderLogs();
+    try { console.log(`[AQB Specialty] ${message}`); } catch {}
+  }
+
+  function logWait(key, message, statusText = message) {
+    setStatus(statusText);
+    if (lastWaitKey === key) return;
+    lastWaitKey = key;
+    log(message);
+  }
+
+  function clearWaitLog() {
+    lastWaitKey = '';
+  }
 
   async function waitFor(fn, timeoutMs, stepMs = 250) {
     const start = Date.now();
@@ -213,13 +301,20 @@
     return null;
   }
 
-  function log(message) {
-    try { console.log(`[AQB Specialty] ${message}`); } catch {}
-  }
-
   function markActivity(message = '') {
     lastActivityAt = Date.now();
     if (message) log(message);
+  }
+
+  function describeElement(el) {
+    if (!el || !(el instanceof Element)) return '(none)';
+    const tag = String(el.tagName || '').toLowerCase();
+    const id = el.id ? `#${el.id}` : '';
+    const classes = Array.from(el.classList || []).slice(0, 4).join('.');
+    const classText = classes ? `.${classes}` : '';
+    const aria = String(el.getAttribute?.('aria-label') || '').trim();
+    const text = String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return [tag + id + classText, aria ? `aria="${aria}"` : '', text ? `text="${text}"` : ''].filter(Boolean).join(' | ');
   }
 
   function waitKeyReady() {
@@ -281,6 +376,7 @@
   // ---- Bypass browser confirm() ----
   function clickRemoveBypassConfirm(removeEl) {
     if (!removeEl) return false;
+    log(`Trying Remove Specialty product target: ${describeElement(removeEl)}`);
 
     try {
       let p = removeEl;
@@ -375,6 +471,7 @@
     if (quoteRecentlyClicked()) return false;
 
     const target = getClickableQuoteTarget();
+    log(`Quote target selected: ${describeElement(target)}`);
     if (target && strongClick(target)) {
       markQuoteClicked();
       markActivity('Quote clicked');
@@ -388,6 +485,7 @@
   async function clickQuoteUntilHeaderMoves(maxAttempts = MAX_QUOTE_ATTEMPTS, readyTimeoutMs = QUOTE_ACTION_READY_TIMEOUT_MS) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (!armed || isGloballyPaused()) return false;
+      log(`Quote attempt ${attempt}/${maxAttempts}: waiting for clickable Quote target`);
       const ready = await waitFor(
         () => !!getClickableQuoteTarget(),
         readyTimeoutMs
@@ -467,14 +565,36 @@
 
   // ---------- Main ----------
   async function runOnce() {
-    if (!armed || finished || running || isGloballyPaused()) return;
+    if (!armed) {
+      logWait('stopped', 'Script stopped. Waiting for START.', 'Stopped');
+      return;
+    }
+    if (finished) {
+      logWait('finished', 'Script already finished for this page load.', 'Finished');
+      return;
+    }
+    if (running) {
+      logWait('running', 'Already working. Waiting for current step to finish.', 'Working');
+      return;
+    }
+    if (isGloballyPaused()) {
+      logWait('paused', 'Paused by shared global pause.', 'Paused');
+      return;
+    }
 
     const forced = await maybeForceQuoteFromInactivity();
     if (forced) return;
 
-    if (!gateOK()) return;
+    const missingGate = getMissingGateLabels();
+    if (missingGate.length) {
+      logWait(`gate:${missingGate.join('|')}`, `Waiting for specialty gate: missing ${missingGate.join(', ')}`, 'Waiting for page gate');
+      return;
+    }
+
+    clearWaitLog();
 
     if (!waitKeyReady()) {
+      logWait('wait-flag', 'Waiting for aqb_step_specialty_start=1', 'Waiting for specialty trigger');
       sawFlagAt = 0;
       return;
     }
@@ -482,18 +602,27 @@
     if (!sawFlagAt) {
       sawFlagAt = Date.now();
       markActivity('Specialty start flag detected');
+      setStatus('Waiting 3s after trigger');
       return;
     }
 
-    if (Date.now() - sawFlagAt < AFTER_FLAG_WAIT_MS) return;
+    const waitRemaining = AFTER_FLAG_WAIT_MS - (Date.now() - sawFlagAt);
+    if (waitRemaining > 0) {
+      logWait(`after-flag:${Math.ceil(waitRemaining / 1000)}`, `Waiting ${Math.max(0, Math.ceil(waitRemaining / 1000))}s after specialty trigger`, 'Waiting after trigger');
+      return;
+    }
+
+    clearWaitLog();
 
     const root = findLVRoot();
     if (!root) {
-      log('Specialty Product list not ready yet');
+      logWait('wait-root', 'Specialty Product list not ready yet', 'Waiting for specialty list');
       return;
     }
 
     running = true;
+    setStatus('Running specialty flow');
+    log(`Run started | headerStuck=${headerStillAutoDataPrefill() ? 'yes' : 'no'} | root=${describeElement(root)}`);
 
     if (isLVEmpty(root)) {
       log('Specialty Product empty, going straight to Quote');
@@ -507,13 +636,21 @@
     }
 
     const cb = findSelectRowsCheckbox(root);
-    if (cb && !cb.checked) strongClick(cb);
+    if (cb && !cb.checked) {
+      log(`Selecting specialty rows checkbox: ${describeElement(cb)}`);
+      strongClick(cb);
+    } else if (cb) {
+      log('Specialty rows checkbox already selected');
+    } else {
+      log('Specialty rows checkbox not found');
+    }
 
     await sleep(WAIT_AFTER_CB_MS);
 
     const removeBtn = findRemoveSpecialtyButton();
     let didRemove = false;
     if (removeBtn) didRemove = clickRemoveBypassConfirm(removeBtn);
+    else log('Remove Specialty product button not found');
 
     if (didRemove) await sleep(AFTER_REMOVE_WAIT_MS);
     await sleep(WAIT_AFTER_REMOVE_MS);
@@ -523,17 +660,28 @@
     if (ok) {
       setDoneFlag();
       finished = true;
+      log('Specialty flow finished successfully');
+      setStatus('Finished');
     }
 
     running = false;
+    if (!finished) {
+      log('Specialty flow ended without moving off Auto Data Prefill');
+      setStatus('Still stuck on Auto Data Prefill');
+    }
   }
 
   function init() {
     clearDoneFlag();
-    mountToggle();
+    mountPanel();
+    log('Script started');
+    setStatus('Watching specialty flow');
     setInterval(() => {
-      if (isGloballyPaused()) return;
-      runOnce().catch(() => { running = false; });
+      runOnce().catch((err) => {
+        running = false;
+        log(`Run failed: ${err?.message || err}`);
+        setStatus('Run failed');
+      });
     }, POLL_MS);
   }
 
