@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ TO GWPC Home Bot: Webhook Submission
+// @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18
+// @version      1.18.1
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*

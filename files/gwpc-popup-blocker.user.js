@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Popup Blocker
 // @namespace    homebot.gwpc-popup-blocker
-// @version      1.1
+// @version      1.1.1
 // @description  Blocks GWPC alert/confirm/prompt and beforeunload leave-reload prompts across all 3 PolicyCenter hosts.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*

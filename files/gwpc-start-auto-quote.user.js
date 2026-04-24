@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         01 GWPC Start Auto Quote
+// @name         GWPC Auto Quote Starter
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.10
+// @version      1.10.1
 // @description  Waits for Current Activities, clicks the Auto entry first, reloads once only after Current Activities is visible, waits 2 seconds after reload, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

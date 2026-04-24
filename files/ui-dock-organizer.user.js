@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Home Bot: UI Dock Organizer
+// @name         Cross-Origin UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.7
+// @version      1.7.1
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ TO GWPC 99 Payload Mirror + Non-AZ Tab Closer
+// @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0
+// @version      1.0.1
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs while leaving AgencyZoom available.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*

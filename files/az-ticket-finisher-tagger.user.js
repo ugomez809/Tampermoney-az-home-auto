@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ TO GWPC 100 AgencyZoom Ticket Finisher + Tagger
+// @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0
+// @version      1.0.1
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         1) AQB - Auto Data Prefill → Drivers Only (Go-Ahead Flag)
+// @name         GWPC Auto Drivers Prefill
 // @namespace    homebot.aqb-drivers
-// @version      1.8.7
+// @version      1.8.8
 // @description  Gate: header "Auto Data Prefill" + Submission (Draft) + Personal Auto. Drivers only: set dropdowns, Accept/Reject Reason to Excluded Driver, Gender->Non-Binary (if selectable), DOB random 26-50 if empty/invalid/under 26, Age Lic min 16 and random 16-22 if too high. Waits 2s before starting, runs 3 driver passes, then waits 5s before handing off to Vehicles.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

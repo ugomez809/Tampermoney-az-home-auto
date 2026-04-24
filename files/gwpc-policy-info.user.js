@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Home Bot: Guidewire Policy Info
+// @name         GWPC Policy Info Prefill
 // @namespace    homebot.gwpc-policy-info
-// @version      2.3
+// @version      2.3.1
 // @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

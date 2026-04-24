@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Home Bot: GWPC Discard Unsaved Change Clicker
+// @name         GWPC Unsaved Change Discard Clicker
 // @namespace    homebot.gwpc-discard-unsaved-change
-// @version      1.0
+// @version      1.0.1
 // @description  When the GWPC "Discard Unsaved Change" action becomes visible, clicks it automatically.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

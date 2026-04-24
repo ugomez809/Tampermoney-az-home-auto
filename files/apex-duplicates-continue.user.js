@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Home Bot: APEX Duplicates Continue
+// @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8
+// @version      1.8.1
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*

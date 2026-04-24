@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         03 AQB - Specialty Product → Remove if needed, then Quote
+// @name         GWPC Auto Specialty Quote
 // @namespace    homebot.aqb-specialty-product
-// @version      1.8.3
+// @version      1.8.4
 // @description  Waits for aqb_step_specialty_start=1 (then waits 3s). Gate: Submission (Draft)+Personal Auto. If Specialty Product empty → Quote. Else select rows → Remove Specialty product (bypass confirm; then wait 3s) → Quote. Uses the same stronger Quote target resolution pattern as the working quote scripts, retries if the header stays on Auto Data Prefill, and force-clicks Quote after 1 minute of inactivity while still on Auto Data Prefill. Sets aqb_step_specialty_done=1 when header changes.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Home Bot: Guidewire Disclosure Qualification
+// @name         GWPC Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.3
+// @version      2.3.1
 // @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

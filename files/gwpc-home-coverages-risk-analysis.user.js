@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         04 GWPC Home Coverages Quote + Risk Analysis
+// @name         GWPC Home Coverages + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      2.0
+// @version      2.0.1
 // @description  DEPRECATED. Merged into "Home Bot: Home Quote Grabber" v3.0+. This script is now a silent no-op stub kept only so Tampermonkey can deliver the deprecation update via the existing @updateURL. Safe to disable in Tampermonkey.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

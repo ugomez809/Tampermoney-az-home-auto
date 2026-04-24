@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         2) AQB - Auto Data Prefill → Vehicles Only (listens to drivers flag)
+// @name         GWPC Auto Vehicles Prefill
 // @namespace    homebot.aqb-vehicles
-// @version      1.5.4
+// @version      1.5.5
 // @description  Waits for Submission (Draft) + Personal Auto + header "Auto Data Prefill" + aqb_step_drivers_done=1. Then runs only the Vehicles logic: remove rows if Model Year/Make/Model/Body Type has any empty cell, waits 3s before setting Primary Driver to the first non-<none> option, then waits another 3s before handing off to Specialty. If a Primary Driver required-field error appears later, it re-arms and runs again.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*

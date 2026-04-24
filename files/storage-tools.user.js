@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close)
+// @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.4.0
+// @version      1.4.1
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*

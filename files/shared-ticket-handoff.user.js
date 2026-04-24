@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ TO GWPC Shared Ticket Handoff
+// @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.1
+// @version      1.9.2
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*

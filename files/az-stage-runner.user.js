@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         AZ TO GWPC 01 AZ Stage Runner + AZ Payload Grabber
+// @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.4
+// @version      2.4.1
 // @description  Manual-start AZ stage runner. Pick Auto/Home, then Start. Saves ON/OFF + Auto/Home across reloads. Uses visible AZ dock side-actions as the open signal, forces Main first, requires all AZ payload fields before continuing, then clicks Quotes exactly, clicks Auto/Home, pauses in background, resumes after 3s in front, and only moves on when Bot Quoted appears on that same ticket. FIX: also mirrors tm_az_current_job_v1 + tm_pc_current_job_v1 into localStorage.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
