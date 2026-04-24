@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.2
+// @version      1.0.3
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,8 +20,9 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC 100 AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const UI_ATTR = 'data-tm-az-finisher-ui';
+  const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
   const GM_KEYS = {
     finalPayload: 'tm_az_gwpc_final_payload_v1',
@@ -170,6 +171,19 @@
       const local = readJson(localStorage.getItem(key), fallback);
       return local == null ? fallback : local;
     }
+  }
+
+  function requestWorkflowCleanup(azId) {
+    const cleanAzId = norm(azId || '');
+    if (!cleanAzId) return;
+    writeGM(CLEANUP_REQUEST_KEY, {
+      ready: true,
+      azId: cleanAzId,
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    });
+    log(`Requested workflow cleanup for AZ ${cleanAzId}`);
   }
 
   function deepClone(value) {
@@ -1035,6 +1049,7 @@
         runRecord.completedAt = nowIso();
         runRecord.payloadSavedAt = data.payloadSavedAt;
         saveRunRecord(runs, data.azId, runRecord);
+        requestWorkflowCleanup(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
       } else {

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.4.1
-// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
+// @version      1.5.0
+// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked data without closing the tab.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -13,6 +13,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @grant        GM_addValueChangeListener
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
 // ==/UserScript==
@@ -20,8 +21,10 @@
 (function () {
   'use strict';
 
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v14';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v14';
+  const VERSION = '1.5.0';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v15';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v15';
+  const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
   const TRACKED_PREFIXES = [
     'tm_',
@@ -66,13 +69,45 @@
 
   const CFG = {
     syncMs: 1500,
-    closeDelayMs: 450
+    maxCleanupRequestAgeMs: 120000
   };
 
   const state = {
     lastSeen: Object.create(null),
-    closeStarted: false
+    lastCleanupRequestKey: '',
+    cleanupListenerAttached: false
   };
+
+  const AUTO_CLEAR_EXACT_KEYS = new Set([
+    'tm_az_home_auto_payload_v1',
+    'tm_az_stage_runner_payload_v1',
+    'tm_az_payload_v1',
+    'tm_az_current_job_v1',
+    'tm_pc_current_job_v1',
+    'tm_apex_home_bot_payload_v1',
+    'tm_apex_home_bot_ready_v1',
+    'tm_apex_home_bot_active_row_v1',
+    'tm_pc_home_quote_grab_payload_v1',
+    'tm_pc_auto_quote_grab_payload_v1',
+    'tm_pc_webhook_bundle_v1',
+    'tm_pc_webhook_submit_sent_meta_v17',
+    'tm_pc_webhook_submit_url_v17',
+    'tm_pc_webhook_submit_stopped_v17',
+    'tm_pc_webhook_post_success_v1',
+    'tm_pc_payload_mirror_close_signal_v1',
+    'tm_pc_payload_mirror_last_handled_signal_v1',
+    'tm_pc_payload_mirror_close_attempted_v1',
+    'tm_az_gwpc_final_payload_v1',
+    'tm_az_gwpc_final_payload_ready_v1',
+    'tm_pc_header_timeout_runtime_v2',
+    'tm_pc_header_timeout_sent_events_v2',
+    'tm_pc_flow_stage_v1'
+  ]);
+
+  const AUTO_CLEAR_PREFIXES = [
+    'aqb_',
+    'tm_pc_payload_mirror_'
+  ];
 
   if (document.getElementById(UI_ID)) return;
 
@@ -489,73 +524,7 @@
     }
   }
 
-  function closeCurrentTabSoon() {
-    if (state.closeStarted) return;
-    state.closeStarted = true;
-
-    setTimeout(() => {
-      try { window.open('', '_self'); } catch {}
-      try { window.close(); } catch {}
-
-      setTimeout(() => {
-        if (document.visibilityState === 'hidden' || window.closed) return;
-
-        try { window.opener = null; } catch {}
-        try { window.open('', '_self'); } catch {}
-        try { window.close(); } catch {}
-      }, 80);
-
-      setTimeout(() => {
-        if (document.visibilityState === 'hidden' || window.closed) return;
-
-        try { location.replace('about:blank'); } catch {}
-        setTimeout(() => {
-          try { window.open('', '_self'); } catch {}
-          try { window.close(); } catch {}
-        }, 60);
-      }, 220);
-    }, CFG.closeDelayMs);
-  }
-
-  function clearTrackedKeysAndCaches() {
-    const localKeys = getAllTrackedKeys(localStorage);
-    const sessionKeys = getAllTrackedKeys(sessionStorage);
-    const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
-
-    const ok = window.confirm(
-      `Clear tracked AZ / APEX / GWPC data on this site, clear mirrored caches, then close this tab?\n\nCurrent origin:\n${location.origin}`
-    );
-    if (!ok) return;
-
-    let cleared = 0;
-
-    for (const key of localKeys) {
-      try {
-        localStorage.removeItem(key);
-        cleared++;
-      } catch (err) {
-        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing localStorage key:', key, err);
-      }
-    }
-
-    for (const key of sessionKeys) {
-      try {
-        sessionStorage.removeItem(key);
-        cleared++;
-      } catch (err) {
-        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing sessionStorage key:', key, err);
-      }
-    }
-
-    for (const key of gmTrackedKeys) {
-      try {
-        GM_deleteValue(key);
-        cleared++;
-      } catch (err) {
-        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing GM key:', key, err);
-      }
-    }
-
+  function clearCachedRecords() {
     clearCachedRecord(CACHE_KEYS.azPayload);
     clearCachedRecord(CACHE_KEYS.apexPayload);
     clearCachedRecord(CACHE_KEYS.apexReady);
@@ -570,9 +539,122 @@
     delete state.lastSeen[`${CACHE_KEYS.apexActiveRow}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcHomePayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcAutoPayload}__lastRaw`];
+  }
 
-    toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches. Closing tab...`, 1800);
-    closeCurrentTabSoon();
+  function shouldAutoClearKey(key) {
+    if (!key) return false;
+    if (AUTO_CLEAR_EXACT_KEYS.has(key)) return true;
+    return AUTO_CLEAR_PREFIXES.some(prefix => key.startsWith(prefix));
+  }
+
+  function clearTrackedKeysAndCaches(options = {}) {
+    const {
+      confirmFirst = true,
+      autoMode = false,
+      request = null
+    } = options;
+
+    const localKeys = getAllTrackedKeys(localStorage);
+    const sessionKeys = getAllTrackedKeys(sessionStorage);
+    const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
+
+    const localTargets = autoMode ? localKeys.filter(shouldAutoClearKey) : localKeys;
+    const sessionTargets = autoMode ? sessionKeys.filter(shouldAutoClearKey) : sessionKeys;
+    const gmTargets = autoMode ? gmTrackedKeys.filter(shouldAutoClearKey) : gmTrackedKeys;
+
+    if (confirmFirst) {
+      const ok = window.confirm(
+        autoMode
+          ? `Clear tracked AZ / APEX / GWPC workflow data on this site now?\n\nCurrent origin:\n${location.origin}`
+          : `Clear tracked AZ / APEX / GWPC data on this site and clear mirrored caches?\n\nCurrent origin:\n${location.origin}`
+      );
+      if (!ok) return 0;
+    }
+
+    let cleared = 0;
+
+    for (const key of localTargets) {
+      try {
+        localStorage.removeItem(key);
+        cleared++;
+      } catch (err) {
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing localStorage key:', key, err);
+      }
+    }
+
+    for (const key of sessionTargets) {
+      try {
+        sessionStorage.removeItem(key);
+        cleared++;
+      } catch (err) {
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing sessionStorage key:', key, err);
+      }
+    }
+
+    for (const key of gmTargets) {
+      try {
+        GM_deleteValue(key);
+        cleared++;
+      } catch (err) {
+        console.error('[AZ+APEX+GWPC Storage Tools] Failed clearing GM key:', key, err);
+      }
+    }
+
+    clearCachedRecords();
+
+    if (autoMode) {
+      toast(`Auto-cleared ${cleared} workflow key${cleared === 1 ? '' : 's'} on ${location.hostname}.`, 1800);
+      console.log('[AZ+APEX+GWPC Storage Tools] Auto cleanup completed:', {
+        origin: location.origin,
+        azId: request && request.azId || '',
+        cleared
+      });
+    } else {
+      toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches.`, 1800);
+    }
+
+    return cleared;
+  }
+
+  function buildCleanupRequestKey(request) {
+    return JSON.stringify([
+      request && request.azId || '',
+      request && request.requestedAt || ''
+    ]);
+  }
+
+  function readCleanupRequest() {
+    try {
+      return GM_getValue(CLEANUP_REQUEST_KEY, null);
+    } catch {
+      return null;
+    }
+  }
+
+  function handleCleanupRequest(request, reason = 'poll') {
+    if (!request || request.ready !== true) return;
+    const requestedMs = Date.parse(request.requestedAt || '');
+    if (!Number.isFinite(requestedMs)) return;
+    if ((Date.now() - requestedMs) > CFG.maxCleanupRequestAgeMs) return;
+    const key = buildCleanupRequestKey(request);
+    if (!key || state.lastCleanupRequestKey === key) return;
+    state.lastCleanupRequestKey = key;
+    clearTrackedKeysAndCaches({
+      confirmFirst: false,
+      autoMode: true,
+      request
+    });
+  }
+
+  function attachCleanupListener() {
+    if (state.cleanupListenerAttached) return;
+    state.cleanupListenerAttached = true;
+    if (typeof GM_addValueChangeListener !== 'function') return;
+    try {
+      GM_addValueChangeListener(CLEANUP_REQUEST_KEY, (_name, _oldValue, newValue) => {
+        handleCleanupRequest(newValue, 'listener');
+      });
+    } catch {}
   }
 
   function makeButton(label, titleText, bg, onClick) {
@@ -639,10 +721,10 @@
     );
 
     const clearBtn = makeButton(
-      'CLR+CLOSE',
-      'Clear tracked current-origin data and mirrored caches, then close this tab',
+      'CLEAR',
+      'Clear tracked current-origin data and mirrored caches without closing this tab',
       '#b33a3a',
-      clearTrackedKeysAndCaches
+      () => clearTrackedKeysAndCaches({ confirmFirst: true, autoMode: false })
     );
 
     wrap.appendChild(exportBtn);
@@ -663,7 +745,10 @@
     }
 
     syncSharedCaches();
+    attachCleanupListener();
+    handleCleanupRequest(readCleanupRequest(), 'boot');
     setInterval(syncSharedCaches, CFG.syncMs);
+    setInterval(() => handleCleanupRequest(readCleanupRequest(), 'poll'), CFG.syncMs);
   }
 
   boot();
