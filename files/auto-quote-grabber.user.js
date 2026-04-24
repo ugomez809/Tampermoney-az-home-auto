@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.2
+// @version      2.9.3
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,8 +18,8 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: Auto Quote Grabber';
-  const VERSION = '2.9';
+  const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
+  const VERSION = '2.9.3';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 

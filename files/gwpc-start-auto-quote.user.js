@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Starter
 // @namespace    homebot.gwpc-start-auto-quote
-// @version      1.10.1
+// @version      1.10.2
 // @description  Waits for Current Activities, clicks the Auto entry first, reloads once only after Current Activities is visible, waits 2 seconds after reload, clicks Start New Submission, then clicks Select only on the Personal Auto row in New Submission.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -16,8 +16,8 @@
 (function () {
   'use strict';
 
-  const SCRIPT_NAME = '01 GWPC Start Auto Quote';
-  const VERSION = '1.10';
+  const SCRIPT_NAME = 'GWPC Auto Quote Starter';
+  const VERSION = '1.10.2';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';

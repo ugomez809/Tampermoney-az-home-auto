@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Global Clear Launcher
 // @namespace    homebot.global-clear-launcher
-// @version      1.0.1
+// @version      1.0.2
 // @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -23,8 +23,8 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: Global Clear Launcher';
-  const VERSION = '1.0';
+  const SCRIPT_NAME = 'Cross-Origin Global Clear Launcher';
+  const VERSION = '1.0.2';
 
   const GM_KEYS = {
     RESET_PACKET: 'hb_global_clear_packet_v1',

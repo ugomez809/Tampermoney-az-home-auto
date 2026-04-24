@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.1
+// @version      1.8.2
 // @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -16,8 +16,8 @@
 
   if (window.top !== window.self) return;
 
-  const SCRIPT_NAME = 'Home Bot: APEX Continue New Quote';
-  const VERSION = '1.8';
+  const SCRIPT_NAME = 'APEX Home Quote Continue';
+  const VERSION = '1.8.2';
 
   const CFG = {
     tickMs: 700,

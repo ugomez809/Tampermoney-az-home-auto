@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.1
+// @version      3.9.2
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -17,8 +17,8 @@
 
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: Dwelling Water Rule';
-  const VERSION = '3.9';
+  const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
+  const VERSION = '3.9.2';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const PANEL_POS_KEY = 'tm_pc_dwelling_water_rule_panel_pos_v1';

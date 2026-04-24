@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.3
+// @version      1.0.4
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -19,8 +19,8 @@
   if (window.top !== window.self) return;
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'AZ TO GWPC 100 AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.3';
+  const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
+  const VERSION = '1.0.4';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 

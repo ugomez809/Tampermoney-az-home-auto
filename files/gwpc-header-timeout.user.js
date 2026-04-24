@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.1
+// @version      2.2.2
 // @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, and saves timeout or selected errors into the shared GWPC payload flow without posting or closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -19,8 +19,8 @@
   if (window.top !== window.self) return;
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
-  const SCRIPT_NAME = 'Home Bot: Guidewire Header Timeout';
-  const VERSION = '2.2';
+  const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
+  const VERSION = '2.2.2';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
