@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.4
+// @version      2.3.5
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js
 // ==/UserScript==
@@ -20,7 +22,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.4';
+  const VERSION = '2.3.5';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -49,7 +51,9 @@
     selectorPauseState: 'tm_pc_header_timeout_selector_pause_state_v1',
     timeoutEnabled: 'tm_pc_header_timeout_enabled_v1',
     watchModeEnabled: 'tm_pc_header_timeout_watch_mode_v1',
-    watchPending: 'tm_pc_header_timeout_watch_pending_v1'
+    watchPending: 'tm_pc_header_timeout_watch_pending_v1',
+    selectorRuleTombstones: 'tm_pc_header_timeout_selector_rule_tombstones_v1',
+    sharedRulesClientId: 'tm_pc_header_timeout_shared_rules_client_id_v1'
   };
 
   const CFG = {
@@ -60,6 +64,11 @@
     maxLogLines: 140,
     maxSentEvents: 300,
     maxRuleText: 280,
+    sharedRulesRefreshMs: 60 * 60 * 1000,
+    sharedRulesRequestTimeoutMs: 20000,
+    sharedRulesEnabled: true,
+    sharedRulesEndpoint: 'https://script.google.com/macros/s/AKfycbxBYCjRnS9aRQoWqlE_fiTOnUGIVyrgU1mabIVCk4YtYThbRd4nSKIDf4gqnRXm-m3TGw/exec',
+    sharedRulesKey: 'gwpc-timeout-rules-24apr2026-jkira-91x7p',
     zIndex: 2147483647,
     panelWidth: 320,
     selectorRulesEnabled: true,
@@ -81,6 +90,7 @@
     tickTimer: null,
     uiTimer: null,
     logsIntervalTimer: null,
+    sharedRulesSyncTimer: null,
     mutationObserver: null,
     scanQueued: false,
     observeScheduled: false,
@@ -106,6 +116,10 @@
     lastStageLogKey: '',
     lastWaitLogKey: '',
     lastUnknownStageKey: '',
+    lastSharedRulesSyncAt: 0,
+    sharedRulesSyncing: false,
+    sharedRulesSyncQueued: false,
+    lastSharedRulesSyncError: '',
     lastScanAt: 0,
     lastRuntimePersistKey: '',
     pausedAtMs: 0,
@@ -184,6 +198,12 @@
     if (state.logsIntervalTimer) clearInterval(state.logsIntervalTimer);
     state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
 
+    ensureSharedRulesClientId();
+    if (state.sharedRulesSyncTimer) clearInterval(state.sharedRulesSyncTimer);
+    state.sharedRulesSyncTimer = setInterval(() => {
+      scheduleSharedRulesSync('interval');
+    }, CFG.sharedRulesRefreshMs);
+
     window.addEventListener('beforeunload', handleBeforeUnload, true);
     window.addEventListener('pagehide', handleBeforeUnload, true);
     window.addEventListener('resize', keepPanelInView, true);
@@ -192,6 +212,7 @@
     persistLogsThrottled();
 
     window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__ = cleanup;
+    scheduleSharedRulesSync('boot', { force: true });
     setStatus('Watching header');
     syncWatchAlertFromStorage();
     renderAll();
@@ -205,6 +226,7 @@
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.uiTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
+    try { clearInterval(state.sharedRulesSyncTimer); } catch {}
     try { state.mutationObserver?.disconnect(); } catch {}
 
     try { window.removeEventListener('beforeunload', handleBeforeUnload, true); } catch {}
@@ -256,6 +278,14 @@
       .replace(/\u00A0/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function toBoolean(value, fallback = false) {
+    const text = String(value == null ? '' : value).toLowerCase().trim();
+    if (!text) return !!fallback;
+    if (text === 'true' || text === '1' || text === 'yes') return true;
+    if (text === 'false' || text === '0' || text === 'no') return false;
+    return !!fallback;
   }
 
   function normalizeCompare(value) {
@@ -1190,6 +1220,9 @@
     if (document.visibilityState === 'visible') {
       scheduleObserve();
       scheduleScan('visible');
+      if ((Date.now() - Number(state.lastSharedRulesSyncAt || 0)) >= CFG.sharedRulesRefreshMs) {
+        scheduleSharedRulesSync('visible');
+      }
     }
   }
 
@@ -1689,6 +1722,407 @@
     dispatchEvent(event);
   }
 
+  function sharedRulesSyncEnabled() {
+    return CFG.sharedRulesEnabled === true
+      && savedSelectorRulesEnabled()
+      && !!normalizeText(CFG.sharedRulesEndpoint)
+      && !!normalizeText(CFG.sharedRulesKey)
+      && typeof GM_xmlhttpRequest === 'function';
+  }
+
+  function createSharedRulesClientId() {
+    return `timeout_${Math.random().toString(36).slice(2, 8)}_${Date.now().toString(36)}`;
+  }
+
+  function ensureSharedRulesClientId() {
+    try {
+      const current = normalizeText(localStorage.getItem(KEYS.sharedRulesClientId) || '');
+      if (current) return current;
+      const created = createSharedRulesClientId();
+      localStorage.setItem(KEYS.sharedRulesClientId, created);
+      return created;
+    } catch {
+      return createSharedRulesClientId();
+    }
+  }
+
+  function readSelectorRuleTombstones() {
+    const raw = safeJsonParse(localStorage.getItem(KEYS.selectorRuleTombstones), {});
+    const source = isPlainObject(raw) ? raw : {};
+    const out = {};
+    Object.entries(source).forEach(([ruleId, value]) => {
+      const id = normalizeText(ruleId || value?.ruleId || '');
+      if (!id) return;
+      out[id] = {
+        ruleId: id,
+        disabledAt: normalizeText(value?.disabledAt || value?.updatedAt || ''),
+        updatedBy: normalizeText(value?.updatedBy || ''),
+        clientId: normalizeText(value?.clientId || '')
+      };
+    });
+    return out;
+  }
+
+  function writeSelectorRuleTombstones(tombstones) {
+    const next = {};
+    Object.values(isPlainObject(tombstones) ? tombstones : {}).forEach((value) => {
+      const id = normalizeText(value?.ruleId || '');
+      if (!id) return;
+      next[id] = {
+        ruleId: id,
+        disabledAt: normalizeText(value?.disabledAt || nowIso()),
+        updatedBy: normalizeText(value?.updatedBy || ''),
+        clientId: normalizeText(value?.clientId || '')
+      };
+    });
+    localStorage.setItem(KEYS.selectorRuleTombstones, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  function clearSelectorRuleTombstonesForIds(ruleIds) {
+    const ids = Array.isArray(ruleIds) ? ruleIds.map((value) => normalizeText(value)).filter(Boolean) : [];
+    if (!ids.length) return;
+    const tombstones = readSelectorRuleTombstones();
+    let changed = false;
+    ids.forEach((id) => {
+      if (!tombstones[id]) return;
+      delete tombstones[id];
+      changed = true;
+    });
+    if (changed) writeSelectorRuleTombstones(tombstones);
+  }
+
+  function addSelectorRuleTombstones(ruleIds) {
+    const ids = Array.isArray(ruleIds) ? ruleIds.map((value) => normalizeText(value)).filter(Boolean) : [];
+    if (!ids.length) return;
+    const tombstones = readSelectorRuleTombstones();
+    const clientId = ensureSharedRulesClientId();
+    ids.forEach((id) => {
+      tombstones[id] = {
+        ruleId: id,
+        disabledAt: nowIso(),
+        updatedBy: clientId,
+        clientId
+      };
+    });
+    writeSelectorRuleTombstones(tombstones);
+  }
+
+  function ruleTimestampMs(rule) {
+    if (!isPlainObject(rule)) return 0;
+    const updatedMs = Date.parse(normalizeText(rule.updatedAt || ''));
+    if (Number.isFinite(updatedMs) && updatedMs > 0) return updatedMs;
+    const createdMs = Date.parse(normalizeText(rule.createdAt || ''));
+    return Number.isFinite(createdMs) && createdMs > 0 ? createdMs : 0;
+  }
+
+  function tombstoneTimestampMs(tombstone) {
+    if (!isPlainObject(tombstone)) return 0;
+    const ms = Date.parse(normalizeText(tombstone.disabledAt || ''));
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
+  }
+
+  function buildRulesSignature(rules) {
+    const normalized = (Array.isArray(rules) ? rules : [])
+      .map((rule) => ({
+        ruleId: normalizeText(rule?.ruleId || ''),
+        selector: normalizeText(rule?.selector || ''),
+        label: normalizeText(rule?.label || ''),
+        savedErrorText: normalizeText(rule?.savedErrorText || ''),
+        enabled: rule?.enabled === false ? false : true,
+        updatedAt: normalizeText(rule?.updatedAt || ''),
+        createdAt: normalizeText(rule?.createdAt || ''),
+        fingerprint: isPlainObject(rule?.fingerprint) ? {
+          tag: normalizeText(rule.fingerprint.tag || ''),
+          id: normalizeText(rule.fingerprint.id || ''),
+          name: normalizeText(rule.fingerprint.name || ''),
+          role: normalizeText(rule.fingerprint.role || ''),
+          ariaLabel: normalizeText(rule.fingerprint.ariaLabel || ''),
+          classTokens: Array.isArray(rule.fingerprint.classTokens) ? rule.fingerprint.classTokens.map((value) => normalizeText(value)).filter(Boolean) : [],
+          textFingerprint: normalizeText(rule.fingerprint.textFingerprint || '')
+        } : {}
+      }))
+      .filter((rule) => rule.ruleId)
+      .sort((a, b) => a.ruleId.localeCompare(b.ruleId));
+    return JSON.stringify(normalized);
+  }
+
+  function buildTombstonesSignature(tombstones) {
+    const normalized = Object.values(isPlainObject(tombstones) ? tombstones : {})
+      .map((value) => ({
+        ruleId: normalizeText(value?.ruleId || ''),
+        disabledAt: normalizeText(value?.disabledAt || ''),
+        updatedBy: normalizeText(value?.updatedBy || ''),
+        clientId: normalizeText(value?.clientId || '')
+      }))
+      .filter((value) => value.ruleId)
+      .sort((a, b) => a.ruleId.localeCompare(b.ruleId));
+    return JSON.stringify(normalized);
+  }
+
+  function writeSelectorRulesLocal(rules) {
+    if (!savedSelectorRulesEnabled()) {
+      try { localStorage.removeItem(KEYS.selectorRules); } catch {}
+      renderManageRulesModal();
+      renderAll();
+      return;
+    }
+    localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
+    renderManageRulesModal();
+    renderAll();
+  }
+
+  function buildSharedRulesUrl(params = {}) {
+    const url = new URL(CFG.sharedRulesEndpoint);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '') return;
+      url.searchParams.set(key, String(value));
+    });
+    return url.toString();
+  }
+
+  function requestSharedRules(method, url, payload = null) {
+    return new Promise((resolve, reject) => {
+      try {
+        GM_xmlhttpRequest({
+          method,
+          url,
+          headers: payload ? { 'Content-Type': 'application/json' } : {},
+          data: payload ? JSON.stringify(payload) : undefined,
+          timeout: CFG.sharedRulesRequestTimeoutMs,
+          onload: (response) => {
+            const status = Number(response?.status || 0);
+            if (status < 200 || status >= 300) {
+              reject(new Error(`HTTP ${status || 'request failed'}`));
+              return;
+            }
+            const parsed = safeJsonParse(response?.responseText || '', null);
+            if (!isPlainObject(parsed)) {
+              reject(new Error('Invalid JSON response'));
+              return;
+            }
+            if (parsed.ok === false) {
+              reject(new Error(normalizeText(parsed.error || 'Remote request failed') || 'Remote request failed'));
+              return;
+            }
+            resolve(parsed);
+          },
+          onerror: () => reject(new Error('Network error')),
+          ontimeout: () => reject(new Error('Request timeout'))
+        });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  async function fetchSharedSelectorRules() {
+    const response = await requestSharedRules('GET', buildSharedRulesUrl({
+      action: 'listRules',
+      key: CFG.sharedRulesKey,
+      includeDisabled: 'true'
+    }));
+    const rules = Array.isArray(response.rules) ? response.rules : [];
+    return rules.map(normalizeRule).filter(Boolean);
+  }
+
+  async function upsertSharedSelectorRule(rule) {
+    const clientId = ensureSharedRulesClientId();
+    const normalizedRule = normalizeRule({
+      ...rule,
+      enabled: true,
+      sourceScript: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      updatedBy: clientId,
+      clientId
+    });
+    if (!normalizedRule || !normalizedRule.ruleId) return;
+    await requestSharedRules('POST', CFG.sharedRulesEndpoint, {
+      action: 'upsertRule',
+      key: CFG.sharedRulesKey,
+      rule: {
+        ruleId: normalizedRule.ruleId,
+        enabled: true,
+        label: normalizedRule.label,
+        savedErrorText: normalizedRule.savedErrorText,
+        selector: normalizedRule.selector,
+        fingerprint: normalizedRule.fingerprint,
+        createdAt: normalizedRule.createdAt,
+        sourceScript: SCRIPT_NAME,
+        sourceVersion: VERSION,
+        updatedBy: clientId,
+        clientId
+      }
+    });
+  }
+
+  async function disableSharedSelectorRule(ruleId) {
+    const id = normalizeText(ruleId || '');
+    if (!id) return;
+    const clientId = ensureSharedRulesClientId();
+    await requestSharedRules('POST', CFG.sharedRulesEndpoint, {
+      action: 'disableRule',
+      key: CFG.sharedRulesKey,
+      ruleId: id,
+      updatedBy: clientId,
+      clientId
+    });
+  }
+
+  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones) {
+    const localMap = new Map((Array.isArray(localRules) ? localRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
+    const remoteMap = new Map((Array.isArray(remoteRules) ? remoteRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
+    const tombstoneMap = new Map(Object.entries(isPlainObject(tombstones) ? tombstones : {}).map(([id, value]) => [normalizeText(id), value]).filter(([id]) => id));
+
+    const nextRules = [];
+    const nextTombstones = {};
+    const upserts = [];
+    const disables = new Set();
+
+    const allRuleIds = new Set([
+      ...localMap.keys(),
+      ...remoteMap.keys(),
+      ...tombstoneMap.keys()
+    ]);
+
+    for (const ruleId of allRuleIds) {
+      const localRule = localMap.get(ruleId) || null;
+      const remoteRule = remoteMap.get(ruleId) || null;
+      const tombstone = tombstoneMap.get(ruleId) || null;
+
+      const localMs = ruleTimestampMs(localRule);
+      const remoteMs = ruleTimestampMs(remoteRule);
+      const tombstoneMs = tombstoneTimestampMs(tombstone);
+      const remoteEnabled = remoteRule ? remoteRule.enabled !== false : false;
+
+      if (remoteRule && remoteEnabled === false) {
+        if (localRule && localMs > Math.max(remoteMs, tombstoneMs)) {
+          nextRules.push(localRule);
+          upserts.push(localRule);
+        } else {
+          nextTombstones[ruleId] = {
+            ruleId,
+            disabledAt: normalizeText(remoteRule.updatedAt || tombstone?.disabledAt || nowIso()),
+            updatedBy: normalizeText(remoteRule.updatedBy || tombstone?.updatedBy || ''),
+            clientId: normalizeText(remoteRule.clientId || tombstone?.clientId || '')
+          };
+        }
+        continue;
+      }
+
+      if (tombstone && tombstoneMs >= Math.max(localMs, remoteMs)) {
+        if (remoteRule && remoteEnabled) disables.add(ruleId);
+        nextTombstones[ruleId] = tombstone;
+        continue;
+      }
+
+      if (localRule && remoteRule && remoteEnabled) {
+        if (remoteMs > localMs) nextRules.push(remoteRule);
+        else {
+          nextRules.push(localRule);
+          if (localMs > remoteMs) upserts.push(localRule);
+        }
+        continue;
+      }
+
+      if (localRule) {
+        nextRules.push(localRule);
+        upserts.push(localRule);
+        continue;
+      }
+
+      if (remoteRule && remoteEnabled) {
+        nextRules.push(remoteRule);
+      }
+    }
+
+    nextRules.sort((a, b) => ruleTimestampMs(b) - ruleTimestampMs(a));
+
+    return {
+      rules: nextRules,
+      tombstones: nextTombstones,
+      upserts,
+      disables: Array.from(disables)
+    };
+  }
+
+  async function syncSharedRules(options = {}) {
+    if (!sharedRulesSyncEnabled()) return false;
+    const force = options.force === true;
+    if (!force && state.lastSharedRulesSyncAt && (Date.now() - state.lastSharedRulesSyncAt) < CFG.sharedRulesRefreshMs) {
+      return false;
+    }
+
+    state.sharedRulesSyncing = true;
+    renderButtons();
+
+    try {
+      const localRules = getSelectorRules();
+      const tombstones = readSelectorRuleTombstones();
+      const remoteRules = await fetchSharedSelectorRules();
+      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones);
+
+      const localSignature = buildRulesSignature(localRules);
+      const nextSignature = buildRulesSignature(reconciled.rules);
+      if (localSignature !== nextSignature) {
+        writeSelectorRulesLocal(reconciled.rules);
+      }
+
+      const tombstoneSignature = buildTombstonesSignature(tombstones);
+      const nextTombstoneSignature = buildTombstonesSignature(reconciled.tombstones);
+      if (tombstoneSignature !== nextTombstoneSignature) {
+        writeSelectorRuleTombstones(reconciled.tombstones);
+      }
+
+      for (const rule of reconciled.upserts) {
+        await upsertSharedSelectorRule(rule);
+      }
+
+      for (const ruleId of reconciled.disables) {
+        await disableSharedSelectorRule(ruleId);
+      }
+
+      state.lastSharedRulesSyncAt = Date.now();
+      state.lastSharedRulesSyncError = '';
+
+      const pulledCount = localSignature !== nextSignature ? reconciled.rules.length : 0;
+      const changedCount = reconciled.upserts.length + reconciled.disables.length;
+      if (options.manual === true || options.reason === 'boot' || pulledCount || changedCount) {
+        log(`Shared rules sync complete | local=${reconciled.rules.length} | pushed=${reconciled.upserts.length} | disabled=${reconciled.disables.length}`);
+      }
+      return true;
+    } catch (err) {
+      const message = normalizeText(err?.message || err || 'Shared rules sync failed') || 'Shared rules sync failed';
+      if (state.lastSharedRulesSyncError !== message) {
+        state.lastSharedRulesSyncError = message;
+        log(`Shared rules sync failed: ${message}`);
+      }
+      return false;
+    } finally {
+      state.sharedRulesSyncing = false;
+      renderButtons();
+      if (state.sharedRulesSyncQueued) {
+        state.sharedRulesSyncQueued = false;
+        setTimeout(() => {
+          syncSharedRules({ force: true, reason: 'queued' }).catch(() => {});
+        }, 0);
+      }
+    }
+  }
+
+  function scheduleSharedRulesSync(reason, options = {}) {
+    if (!sharedRulesSyncEnabled()) return;
+    if (state.sharedRulesSyncing) {
+      state.sharedRulesSyncQueued = true;
+      return;
+    }
+    syncSharedRules({
+      force: options.force === true,
+      manual: options.manual === true,
+      reason: normalizeText(reason || '')
+    }).catch(() => {});
+  }
+
   function buildRuleId(selector, textFingerprint) {
     return `rule_${hashString([normalizeText(selector), normalizeText(textFingerprint)].join('|'))}`;
   }
@@ -1776,9 +2210,8 @@
 
   function normalizeRule(raw) {
     if (!isPlainObject(raw)) return null;
+    const enabled = raw.enabled === false ? false : toBoolean(raw.enabled, true);
     const selector = normalizeText(raw.selector || raw.cssSelector || '');
-    if (!selector) return null;
-
     const savedErrorText = normalizeText(
       raw.savedErrorText ||
       raw.errorText ||
@@ -1788,7 +2221,6 @@
       raw.errorName ||
       ''
     );
-    if (!savedErrorText) return null;
 
     const textFingerprint = truncateText(
       raw.fingerprint?.textFingerprint ||
@@ -1820,14 +2252,24 @@
           textFingerprint
         };
 
+    const ruleId = normalizeText(raw.ruleId || raw.id || buildRuleId(selector, textFingerprint));
+    if (!ruleId) return null;
+    if (enabled && !selector) return null;
+    if (enabled && !savedErrorText) return null;
+
     return {
-      ruleId: normalizeText(raw.ruleId || raw.id || buildRuleId(selector, textFingerprint)),
+      ruleId,
+      enabled,
       selector,
       label: normalizeText(raw.label || raw.errorName || 'Saved selector error'),
       savedErrorText,
       fingerprint,
       createdAt: normalizeText(raw.createdAt || nowIso()),
-      updatedAt: normalizeText(raw.updatedAt || raw.createdAt || nowIso())
+      updatedAt: normalizeText(raw.updatedAt || raw.createdAt || nowIso()),
+      sourceScript: normalizeText(raw.sourceScript || ''),
+      sourceVersion: normalizeText(raw.sourceVersion || ''),
+      updatedBy: normalizeText(raw.updatedBy || ''),
+      clientId: normalizeText(raw.clientId || '')
     };
   }
 
@@ -1835,20 +2277,23 @@
     if (!savedSelectorRulesEnabled()) return [];
     const parsed = safeJsonParse(localStorage.getItem(KEYS.selectorRules), []);
     const list = Array.isArray(parsed) ? parsed : [];
-    const normalized = list.map(normalizeRule).filter(Boolean);
+    const normalized = list.map(normalizeRule).filter((rule) => !!rule && rule.enabled !== false);
     return normalized;
   }
 
-  function saveSelectorRules(rules) {
+  function saveSelectorRules(rules, options = {}) {
     if (!savedSelectorRulesEnabled()) {
       try { localStorage.removeItem(KEYS.selectorRules); } catch {}
       renderManageRulesModal();
       renderAll();
       return;
     }
-    localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
-    renderManageRulesModal();
-    renderAll();
+    const normalizedRules = (Array.isArray(rules) ? rules : []).map(normalizeRule).filter((rule) => !!rule && rule.enabled !== false);
+    writeSelectorRulesLocal(normalizedRules);
+    clearSelectorRuleTombstonesForIds(normalizedRules.map((rule) => rule.ruleId));
+    if (options.sync !== false) {
+      scheduleSharedRulesSync(options.reason || 'local-rules-changed', { force: true, manual: options.manual === true });
+    }
   }
 
   function isScriptUiElement(el) {
@@ -2141,7 +2586,7 @@
         rules.push(nextRule);
       }
 
-      saveSelectorRules(rules);
+      saveSelectorRules(rules, { reason: 'rule-saved' });
       closeSelectorSession('Selector rule saved');
       scheduleScan('rule-saved');
     });
@@ -2167,12 +2612,14 @@
     const currentRules = getSelectorRules();
     const nextRules = currentRules.filter((rule) => normalizeText(rule.ruleId) !== id);
     if (nextRules.length === currentRules.length) return false;
-    saveSelectorRules(nextRules);
+    addSelectorRuleTombstones([id]);
+    saveSelectorRules(nextRules, { reason: 'rule-deleted' });
     return true;
   }
 
   function clearSelectorRules() {
-    saveSelectorRules([]);
+    addSelectorRuleTombstones(getSelectorRules().map((rule) => rule.ruleId));
+    saveSelectorRules([], { reason: 'rules-cleared' });
   }
 
   function renderManageRulesModal() {
@@ -2423,6 +2870,7 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-push" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#991b1b;color:#fff;font-weight:800;cursor:pointer;">PUSH WATCH PAYLOAD</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">MANAGE RULES</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-sync-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SYNC NOW</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
@@ -2452,6 +2900,7 @@
     state.els.watchPush = $('#tm-timeout-watch-push', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
     state.els.manageRules = $('#tm-timeout-manage-rules', panel);
+    state.els.syncRules = $('#tm-timeout-sync-rules', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
     state.els.status = $('#tm-timeout-status', panel);
     state.els.header = $('#tm-timeout-header', panel);
@@ -2545,6 +2994,11 @@
       }
     };
 
+    state.els.syncRules.onclick = () => {
+      log('Shared rules sync requested');
+      scheduleSharedRulesSync('manual-button', { force: true, manual: true });
+    };
+
     state.els.copyLogs.onclick = () => copyLogsToClipboard();
 
     renderButtons();
@@ -2612,6 +3066,16 @@
         state.els.manageRules.style.opacity = '1';
         state.els.manageRules.style.cursor = 'pointer';
       }
+    }
+
+    if (state.els.syncRules) {
+      const enabled = sharedRulesSyncEnabled() && !state.sharedRulesSyncing;
+      state.els.syncRules.textContent = state.sharedRulesSyncing ? 'SYNCING...' : 'SYNC NOW';
+      state.els.syncRules.disabled = !enabled;
+      state.els.syncRules.style.background = state.sharedRulesSyncing ? '#0f766e' : (sharedRulesSyncEnabled() ? '#0f766e' : '#334155');
+      state.els.syncRules.style.color = sharedRulesSyncEnabled() ? '#fff' : '#cbd5e1';
+      state.els.syncRules.style.opacity = enabled || state.sharedRulesSyncing ? '1' : '.75';
+      state.els.syncRules.style.cursor = enabled ? 'pointer' : 'not-allowed';
     }
 
   }
