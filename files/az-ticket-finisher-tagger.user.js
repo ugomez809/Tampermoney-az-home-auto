@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.25
+// @version      1.0.26
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.25';
+  const VERSION = '1.0.26';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -92,6 +92,7 @@
     tickMs: 800,
     stepPollMs: 150,
     mainReadyMs: 10000,
+    waitingForTicketFallbackMs: 20000,
     bigActionDelayMs: 500,
     actionSettleMs: 900,
     noteSettleMs: 1200,
@@ -121,7 +122,10 @@
     activeAzId: '',
     lastPayloadSeenKey: '',
     lastPayloadSourceSignature: '',
-    lastStatus: ''
+    lastStatus: '',
+    waitingTicketMismatchKey: '',
+    waitingTicketMismatchSince: 0,
+    waitingTicketMismatchTriggeredKey: ''
   };
 
   init();
@@ -289,6 +293,57 @@
   function setStatus(text) {
     state.lastStatus = text;
     if (state.ui.status) state.ui.status.textContent = text;
+  }
+
+  function isFrontActive() {
+    try {
+      return document.visibilityState === 'visible' && document.hasFocus();
+    } catch {
+      return document.visibilityState !== 'hidden';
+    }
+  }
+
+  function resetWaitingTicketMismatch() {
+    state.waitingTicketMismatchKey = '';
+    state.waitingTicketMismatchSince = 0;
+    state.waitingTicketMismatchTriggeredKey = '';
+  }
+
+  function getWaitingTicketMismatchState(openTicketId, targetTicketId) {
+    const openId = norm(openTicketId || '');
+    const targetId = norm(targetTicketId || '');
+
+    if (!openId || !targetId || openId === targetId) {
+      resetWaitingTicketMismatch();
+      return { active: false, ready: false };
+    }
+
+    if (!isFrontActive()) {
+      resetWaitingTicketMismatch();
+      return { active: false, ready: false };
+    }
+
+    const key = `${openId}|${targetId}`;
+    const now = Date.now();
+    if (state.waitingTicketMismatchKey !== key) {
+      state.waitingTicketMismatchKey = key;
+      state.waitingTicketMismatchSince = now;
+      state.waitingTicketMismatchTriggeredKey = '';
+      log(`Open ticket ${openId} is waiting for ticket ${targetId}; fallback to missing payload in 20s if it stays open`);
+    }
+
+    const elapsedMs = Math.max(0, now - state.waitingTicketMismatchSince);
+    const remainingMs = Math.max(0, CFG.waitingForTicketFallbackMs - elapsedMs);
+
+    return {
+      active: true,
+      ready: elapsedMs >= CFG.waitingForTicketFallbackMs,
+      key,
+      openTicketId: openId,
+      targetTicketId: targetId,
+      elapsedMs,
+      remainingMs
+    };
   }
 
   function sleep(ms) {
@@ -1766,7 +1821,7 @@
       log(`Payload sources | Home=${data.sources.home} | Auto=${data.sources.auto}`);
     }
 
-    if (!hasAllFieldTargets()) {
+    if (!data.missingPayloadFallback && !hasAllFieldTargets()) {
       setStatus('Field setup required');
       return;
     }
@@ -1887,12 +1942,35 @@
 
     const openTicket = getOpenTicketInfo();
     const finalPayload = getFinalPayload();
-    const fallbackMissingPayload = !finalPayload && !!openTicket.ticketId;
-    const effectiveAzId = norm(finalPayload?.azId || openTicket.ticketId || '');
+    const mismatchWait = getWaitingTicketMismatchState(openTicket.ticketId, finalPayload?.azId || '');
+    let workflowPayload = finalPayload;
+    let fallbackTicketId = !finalPayload && !!openTicket.ticketId ? openTicket.ticketId : '';
+
+    if (mismatchWait.active && !mismatchWait.ready) {
+      const remainingSeconds = Math.max(1, Math.ceil(mismatchWait.remainingMs / 1000));
+      setStatus(`Waiting for ticket ${mismatchWait.targetTicketId} (${remainingSeconds}s to missing payload)`);
+      renderAll();
+      return;
+    }
+
+    if (mismatchWait.ready) {
+      workflowPayload = null;
+      fallbackTicketId = mismatchWait.openTicketId;
+      if (state.waitingTicketMismatchTriggeredKey !== mismatchWait.key) {
+        state.waitingTicketMismatchTriggeredKey = mismatchWait.key;
+        log(`Ticket ${mismatchWait.openTicketId} stayed open for 20s while waiting for ${mismatchWait.targetTicketId}; starting missing payload fallback`);
+      }
+    } else if (!finalPayload || !openTicket.ticketId || openTicket.ticketId === norm(finalPayload?.azId || '')) {
+      resetWaitingTicketMismatch();
+    }
+
+    const fallbackMissingPayload = !workflowPayload && !!fallbackTicketId;
+    const effectiveAzId = norm(workflowPayload?.azId || fallbackTicketId || openTicket.ticketId || '');
 
     state.activeAzId = effectiveAzId;
 
     if (!openTicket.ticketId && !finalPayload) {
+      resetWaitingTicketMismatch();
       setStatus('Waiting for open ticket');
       renderAll();
       return;
@@ -1911,13 +1989,8 @@
     }
 
     if (!openTicket.ticketId) {
+      resetWaitingTicketMismatch();
       setStatus('Waiting for open ticket');
-      renderAll();
-      return;
-    }
-
-    if (finalPayload?.azId && openTicket.ticketId !== finalPayload.azId) {
-      setStatus(`Waiting for ticket ${finalPayload.azId}`);
       renderAll();
       return;
     }
@@ -1930,14 +2003,14 @@
       return;
     }
 
-    const payloadKey = finalPayload?.payloadKey || `missing-payload|${openTicket.ticketId}`;
+    const payloadKey = workflowPayload?.payloadKey || `missing-payload|${fallbackTicketId || openTicket.ticketId}`;
     const shouldRun = state.forceRunRequested || state.lastPayloadSeenKey !== payloadKey || !record.completedAt;
     if (shouldRun) {
       state.lastPayloadSeenKey = payloadKey;
       runWorkflow({
         forceRun: state.forceRunRequested,
-        finalPayload,
-        fallbackTicketId: fallbackMissingPayload ? openTicket.ticketId : ''
+        finalPayload: workflowPayload,
+        fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : ''
       }).catch((err) => {
         log(`Workflow failed: ${err?.message || err}`);
         setStatus('Workflow failed');
