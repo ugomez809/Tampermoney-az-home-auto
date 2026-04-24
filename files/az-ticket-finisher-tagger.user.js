@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.26
+// @version      1.0.27
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.26';
+  const VERSION = '1.0.27';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -29,6 +29,8 @@
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
+    azCurrentJob: 'tm_az_current_job_v1',
+    currentJob: 'tm_pc_current_job_v1',
     fieldTargets: 'tm_az_ticket_finisher_field_targets_v1',
     tagTargets: 'tm_az_ticket_finisher_tag_targets_v1',
     runs: 'tm_az_ticket_finisher_runs_v1'
@@ -97,6 +99,7 @@
     actionSettleMs: 900,
     noteSettleMs: 1200,
     updateSettleMs: 1200,
+    stalePayloadSlackMs: 1500,
     maxLogLines: 90,
     zIndex: 2147483647,
     panelWidth: 360,
@@ -609,6 +612,46 @@
     return best;
   }
 
+  function getCurrentJobUpdatedMs(job) {
+    const ms = Date.parse(norm(job?.updatedAt || ''));
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  function getBestCurrentJobForAz(azId) {
+    const wantedAzId = norm(azId || '');
+    if (!wantedAzId) return null;
+
+    const candidates = [
+      readLocalOnly(GM_KEYS.azCurrentJob, null),
+      readLocalOnly(GM_KEYS.currentJob, null),
+      readGmOnly(GM_KEYS.azCurrentJob, null),
+      readGmOnly(GM_KEYS.currentJob, null)
+    ].filter(isPlainObject);
+
+    let best = null;
+    let bestMs = 0;
+
+    for (const candidate of candidates) {
+      const candidateAzId = norm(candidate?.['AZ ID'] || candidate?.azId || candidate?.ticketId || '');
+      if (candidateAzId !== wantedAzId) continue;
+      const candidateMs = getCurrentJobUpdatedMs(candidate);
+      if (!best || candidateMs > bestMs) {
+        best = candidate;
+        bestMs = candidateMs;
+      }
+    }
+
+    return best;
+  }
+
+  function isPayloadStaleForCurrentJob(azId, payloadSavedMs) {
+    const currentJob = getBestCurrentJobForAz(azId);
+    const currentJobMs = getCurrentJobUpdatedMs(currentJob);
+    if (!currentJobMs) return false;
+    if (!payloadSavedMs) return true;
+    return (payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs;
+  }
+
   function countFilledKeys(value, keys) {
     if (!isPlainObject(value)) return 0;
     let count = 0;
@@ -699,7 +742,9 @@
     const readyOk = readyLike.ready === true;
     const azId = norm(payload.azId || readyLike.azId || '');
     const savedAt = norm(payload.savedAt || readyLike.savedAt || '');
+    const payloadSavedMs = getPayloadSavedMs(payload);
     if (!azId) return null;
+    if (isPayloadStaleForCurrentJob(azId, payloadSavedMs)) return null;
     return {
       ready: readyOk ? readyLike : {
         ready: true,
@@ -717,17 +762,19 @@
     return isPlainObject(raw.data) ? raw.data : raw;
   }
 
-  function choosePreferredProductPayload(product, expectedAzId, candidates) {
+  function choosePreferredProductPayload(product, expectedAzId, candidates, minSavedMs = 0) {
     const ranked = candidates
       .map((candidate) => {
         const raw = candidate?.raw;
         if (!isPlainObject(raw)) return null;
         const azId = extractPayloadAzId(raw);
         if (expectedAzId && azId && azId !== expectedAzId) return null;
+        const savedMs = getPayloadSavedMs(raw);
+        if (minSavedMs && (!savedMs || (savedMs + CFG.stalePayloadSlackMs) < minSavedMs)) return null;
         return {
           raw,
           source: norm(candidate?.source || `${product}`) || `${product}`,
-          savedMs: getPayloadSavedMs(raw),
+          savedMs,
           score: scoreProductPayload(product, raw),
           sourceRank: Number(candidate?.sourceRank || 0)
         };
@@ -759,16 +806,18 @@
 
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
+    const currentJob = getBestCurrentJobForAz(finalPayload.azId);
+    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
     const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
       { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
       { source: 'final-home-bundle', raw: payload.bundle?.home?.data, sourceRank: 1 }
-    ]);
+    ], minSavedMs);
     const autoChoice = choosePreferredProductPayload('auto', finalPayload.azId, [
       { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 3 },
       { source: 'final-auto-payload', raw: isPlainObject(payload.autoPayload) ? payload.autoPayload : null, sourceRank: 2 },
       { source: 'final-auto-bundle', raw: payload.bundle?.auto?.data, sourceRank: 1 }
-    ]);
+    ], minSavedMs);
 
     const homeRaw = homeChoice.raw;
     const autoRaw = autoChoice.raw;
@@ -824,6 +873,19 @@
       `Done?: ${doneValue}`,
       `Auto: ${autoValue}`
     ].join('\n');
+
+    const hasSubstantiveProductData = (
+      homeChoice.score > 0 ||
+      autoChoice.score > 0 ||
+      !!norm(homeSubmission) ||
+      !!norm(autoSubmission) ||
+      !!norm(doneValue) ||
+      !!norm(autoValue)
+    );
+
+    if (!hasSubstantiveProductData) {
+      return buildMissingPayloadWorkflowData(finalPayload.azId);
+    }
 
     return {
       azId: finalPayload.azId,
