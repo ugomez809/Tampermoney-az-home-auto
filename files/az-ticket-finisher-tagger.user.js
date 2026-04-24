@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.12
+// @version      1.0.13
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.12';
+  const VERSION = '1.0.13';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -51,9 +51,21 @@
   ];
 
   const TAG_ORDER = [
+    { key: 'tagDropdown', label: 'Tag dropdown' },
     { key: 'successfulTag', label: 'Success tag' },
     { key: 'failedTag', label: 'Failed tag' }
   ];
+
+  const NUMERIC_ONLY_FIELDS = new Set([
+    'Reconstruction Cost',
+    'Year Built',
+    'Square FT',
+    '# of Story',
+    'Standard Pricing No Auto Discount',
+    'Enhance Pricing No Auto Discount',
+    'Standard Pricing Auto Discount',
+    'Enhance Pricing Auto Discount'
+  ]);
 
   const SEL = {
     dockRoot: '.az-dock, #serviceDetailDock, #notePanelContainer, .az-dock__top',
@@ -276,6 +288,32 @@
     return '';
   }
 
+  function cleanNumericValue(value, { integerOnly = false } = {}) {
+    const raw = norm(value);
+    if (!raw) return '';
+    let cleaned = raw.replace(/[^0-9.\-]/g, '');
+    const minus = cleaned.startsWith('-') ? '-' : '';
+    cleaned = minus + cleaned.replace(/-/g, '');
+    const firstDot = cleaned.indexOf('.');
+    if (firstDot >= 0) {
+      cleaned = cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, '');
+    }
+    if (integerOnly) {
+      cleaned = cleaned.split('.')[0];
+    } else if (cleaned.includes('.')) {
+      cleaned = cleaned.replace(/\.0+$/, '').replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.$/, '');
+    }
+    return cleaned;
+  }
+
+  function formatFieldValue(label, value) {
+    const text = norm(value);
+    if (!text) return '';
+    if (!NUMERIC_ONLY_FIELDS.has(label)) return text;
+    const integerOnly = label === 'Year Built' || label === 'Square FT' || label === '# of Story' || label === 'Reconstruction Cost';
+    return cleanNumericValue(text, { integerOnly }) || text;
+  }
+
   function normalizeYes(value) {
     const text = lower(value);
     return text === 'yes' || text === 'true' || text === 'completed' || text === 'done' || text === 'y';
@@ -455,7 +493,7 @@
 
   function hasAllTagTargets() {
     const targets = getTagTargets();
-    return TAG_ORDER.every((item) => isPlainObject(targets[item.key]) && norm(targets[item.key].selector));
+    return ['successfulTag', 'failedTag'].every((key) => isPlainObject(targets[key]) && norm(targets[key].selector));
   }
 
   function readRuns() {
@@ -705,7 +743,16 @@
       'textarea:not([disabled])',
       'select:not([disabled])',
       '[contenteditable="true"]',
-      '[role="textbox"]'
+      '[role="textbox"]',
+      '.editable-container input:not([type="hidden"]):not([disabled])',
+      '.editable-container textarea:not([disabled])',
+      '.editable-container select:not([disabled])',
+      '.editableform input:not([type="hidden"]):not([disabled])',
+      '.editableform textarea:not([disabled])',
+      '.editableform select:not([disabled])',
+      '.popover input:not([type="hidden"]):not([disabled])',
+      '.popover textarea:not([disabled])',
+      '.popover select:not([disabled])'
     ].join(', ');
 
     const candidates = [];
@@ -720,6 +767,7 @@
     try { group?.querySelectorAll(selectors).forEach(add); } catch {}
     try { baseEl.parentElement?.querySelectorAll(selectors).forEach(add); } catch {}
     try { bootstrapSelect?.parentElement?.querySelectorAll('select:not([disabled])').forEach(add); } catch {}
+    try { document.querySelectorAll('.editable-container input:not([type="hidden"]):not([disabled]), .editable-container textarea:not([disabled]), .editable-container select:not([disabled]), .editableform input:not([type="hidden"]):not([disabled]), .editableform textarea:not([disabled]), .editableform select:not([disabled]), .popover input:not([type="hidden"]):not([disabled]), .popover textarea:not([disabled]), .popover select:not([disabled])').forEach(add); } catch {}
     try {
       const active = document.activeElement;
       if (active instanceof Element && (active === baseEl || baseEl.contains(active) || active.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control') === group)) {
@@ -738,6 +786,7 @@
       if (el === document.activeElement) points += 5;
       if (el !== baseEl) points += 2;
       if (bootstrapSelect && (bootstrapSelect.contains(el) || el.closest('.bootstrap-select') === bootstrapSelect)) points += 2;
+      if (el.closest('.editable-container, .editableform, .popover')) points += 4;
       return points;
     };
 
@@ -780,6 +829,19 @@
     return norm(target.textContent || '') === want;
   }
 
+  async function waitForEditableTarget(base) {
+    const started = Date.now();
+    let chosen = null;
+    while ((Date.now() - started) < 2200) {
+      chosen = resolveEditableTarget(base) || base;
+      if (chosen instanceof HTMLInputElement || chosen instanceof HTMLTextAreaElement || chosen instanceof HTMLSelectElement || chosen.getAttribute?.('contenteditable') === 'true' || chosen.getAttribute?.('role') === 'textbox') {
+        return chosen;
+      }
+      await sleep(120);
+    }
+    return chosen || base;
+  }
+
   async function setFieldValue(record, value) {
     const base = findSavedElement(record);
     if (!base) return { ok: false, reason: 'saved field target not found' };
@@ -788,8 +850,18 @@
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try { strongClick(base); } catch {}
-      await sleep(140);
-      const target = resolveEditableTarget(base) || base;
+      await sleep(180);
+      const target = await waitForEditableTarget(base);
+      const editableTarget = target instanceof HTMLSelectElement
+        || target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target.getAttribute?.('contenteditable') === 'true'
+        || target.getAttribute?.('role') === 'textbox';
+
+      if (!editableTarget) {
+        await sleep(220);
+        continue;
+      }
 
       if (target instanceof HTMLSelectElement) {
         const options = Array.from(target.options || []);
@@ -812,16 +884,13 @@
       } else if (target.getAttribute('contenteditable') === 'true' || target.getAttribute('role') === 'textbox') {
         target.innerHTML = nextValue ? `<p>${escapeHtml(nextValue)}</p>` : '<p><br></p>';
         dispatchFieldEvents(target);
-      } else {
-        target.textContent = nextValue;
-        dispatchFieldEvents(target);
       }
 
       await sleep(220);
       if (verifyFieldValue(target, nextValue)) return { ok: true };
     }
 
-    return { ok: false, reason: 'value did not stick' };
+    return { ok: false, reason: 'editable target not found or value did not stick' };
   }
 
   async function ensureMainTab() {
@@ -977,7 +1046,15 @@
     log('Clicked: Tag opener');
     await sleep(CFG.bigActionDelayMs);
 
-    const dropdown = await waitFor(() => findVisibleElements(SEL.tagDropdown)[0], 5000);
+    const dropdownTargetRecord = getTagTargets().tagDropdown;
+    let dropdown = null;
+    if (isPlainObject(dropdownTargetRecord)) {
+      dropdown = await waitFor(() => findSavedElement(dropdownTargetRecord), 5000);
+      if (dropdown) log(`Using saved tag dropdown target: ${dropdownTargetRecord.label || 'Tag dropdown'}`);
+    }
+    if (!dropdown) {
+      dropdown = await waitFor(() => findVisibleElements(SEL.tagDropdown)[0], 5000);
+    }
     if (!dropdown) {
       log('Tag dropdown not found');
       return false;
@@ -1072,13 +1149,14 @@
     let changed = false;
 
     for (const label of FIELD_ORDER) {
-      const value = norm(data.fields[label] || '');
+      const rawValue = norm(data.fields[label] || '');
+      const value = formatFieldValue(label, rawValue);
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
-        log(`Filled field: ${label} = ${value || '(blank)'}`);
+        log(`Filled field: ${label} = ${value || '(blank)'}${rawValue && rawValue !== value ? ` (from ${rawValue})` : ''}`);
         changed = true;
       } else {
-        log(`Field failed: ${label} | ${result.reason}`);
+        log(`Field failed: ${label} | ${result.reason} | wanted ${value || '(blank)'}`);
       }
       await sleep(CFG.bigActionDelayMs);
     }
