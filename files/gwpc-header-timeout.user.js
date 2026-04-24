@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.0
-// @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves real timeout errors into the shared GWPC bundle flow, purges legacy selector rules/artifacts, and raises the shared webhook send signal without closing tabs.
+// @version      2.3.1
+// @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.0';
+  const VERSION = '2.3.1';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -52,7 +52,7 @@
     maxRuleText: 280,
     zIndex: 2147483647,
     panelWidth: 320,
-    selectorRulesEnabled: false,
+    selectorRulesEnabled: true,
     selectorOutlineColor: '#fca5a5',
     selectorFillColor: 'rgba(252,165,165,0.14)',
     observerThrottleMs: 60
@@ -132,15 +132,20 @@
     }
 
     state.runtimeStarted = true;
-    state.timeoutEnabled = readTimeoutEnabled();
+    const timeoutWasEnabled = readTimeoutEnabled();
+    state.timeoutEnabled = true;
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
     clearLegacyTimeoutProductPayloads();
     clearLegacySelectorRules();
     clearLegacySelectorSentEvents();
     clearLegacySelectorBundleArtifacts();
+    writeTimeoutEnabled(true);
     log(`Script started v${VERSION}`);
     log(`Origin: ${location.origin}`);
+    if (!timeoutWasEnabled) {
+      log('Timeout actions reset to ON at page load');
+    }
     log('Fresh timeout gatherer armed');
 
     scheduleObserve();
