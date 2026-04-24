@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AZ + APEX + GWPC Storage Tools (Export Payloads + Clear + Close) V1.4
 // @namespace    homebot.az.apex.gwpc.storage.tools
-// @version      1.4.0
-// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, clears tracked data, then closes the tab.
+// @version      1.4.1
+// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked data. Does not close the tab.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -65,13 +65,11 @@
   ]);
 
   const CFG = {
-    syncMs: 1500,
-    closeDelayMs: 450
+    syncMs: 1500
   };
 
   const state = {
-    lastSeen: Object.create(null),
-    closeStarted: false
+    lastSeen: Object.create(null)
   };
 
   if (document.getElementById(UI_ID)) return;
@@ -489,33 +487,6 @@
     }
   }
 
-  function closeCurrentTabSoon() {
-    if (state.closeStarted) return;
-    state.closeStarted = true;
-
-    setTimeout(() => {
-      try { window.open('', '_self'); } catch {}
-      try { window.close(); } catch {}
-
-      setTimeout(() => {
-        if (document.visibilityState === 'hidden' || window.closed) return;
-
-        try { window.opener = null; } catch {}
-        try { window.open('', '_self'); } catch {}
-        try { window.close(); } catch {}
-      }, 80);
-
-      setTimeout(() => {
-        if (document.visibilityState === 'hidden' || window.closed) return;
-
-        try { location.replace('about:blank'); } catch {}
-        setTimeout(() => {
-          try { window.open('', '_self'); } catch {}
-          try { window.close(); } catch {}
-        }, 60);
-      }, 220);
-    }, CFG.closeDelayMs);
-  }
 
   function clearTrackedKeysAndCaches() {
     const localKeys = getAllTrackedKeys(localStorage);
@@ -523,7 +494,7 @@
     const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
 
     const ok = window.confirm(
-      `Clear tracked AZ / APEX / GWPC data on this site, clear mirrored caches, then close this tab?\n\nCurrent origin:\n${location.origin}`
+      `Clear tracked AZ / APEX / GWPC data on this site and clear mirrored caches?\n\nCurrent origin:\n${location.origin}`
     );
     if (!ok) return;
 
@@ -571,8 +542,7 @@
     delete state.lastSeen[`${CACHE_KEYS.gwpcHomePayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcAutoPayload}__lastRaw`];
 
-    toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches. Closing tab...`, 1800);
-    closeCurrentTabSoon();
+    toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches.`, 1800);
   }
 
   function makeButton(label, titleText, bg, onClick) {
@@ -639,8 +609,8 @@
     );
 
     const clearBtn = makeButton(
-      'CLR+CLOSE',
-      'Clear tracked current-origin data and mirrored caches, then close this tab',
+      'CLEAR',
+      'Clear tracked current-origin data and mirrored caches',
       '#b33a3a',
       clearTrackedKeysAndCaches
     );

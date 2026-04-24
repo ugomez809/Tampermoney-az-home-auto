@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AZ TO GWPC Home Bot: Webhook Submission V1.9
 // @namespace    az.to.gwpc.webhook.submission
-// @version      1.13
+// @version      1.14
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, accepts home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AZ TO GWPC Home Bot: Webhook Submission';
-  const VERSION = '1.13';
+  const VERSION = '1.14';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
 
@@ -443,6 +443,21 @@
     if (!namesLikelySame(job['Name'], name)) return null;
     if (!addressesLikelySame(job['Mailing Address'], address)) return null;
 
+    const payloadSub = normalizeText(row['Submission Number'] || row.submissionNumber || '');
+    const jobSub = normalizeText(job['SubmissionNumber'] || '');
+    if (payloadSub && jobSub && payloadSub !== jobSub) return null;
+
+    const payloadSavedAt = Date.parse(normalizeText(homePayload?.savedAt || ''));
+    const jobUpdatedAt = Date.parse(normalizeText(job['updatedAt'] || ''));
+    if (
+      Number.isFinite(payloadSavedAt) &&
+      Number.isFinite(jobUpdatedAt) &&
+      payloadSavedAt < jobUpdatedAt &&
+      !(payloadSub && jobSub && payloadSub === jobSub)
+    ) {
+      return null;
+    }
+
     return {
       'AZ ID': job['AZ ID'],
       home: {
@@ -546,6 +561,7 @@
 
   function clearForceSendRequest() {
     try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
+    try { localStorage.removeItem(GLOBAL_PAUSE_KEY); } catch {}
   }
 
   function isSameBundleAlreadySent(job, bundle) {

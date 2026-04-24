@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Home Bot: Guidewire Header Timeout V1.11
 // @namespace    home.bot.guidewire.header.timeout
-// @version      1.22
+// @version      1.23
 // @description  Home/Auto header timeout + AUTO no-table/no-vehicles gatherer. Watches Guidewire header state, captures detected errors into the shared GWPC payload flow, supports selector-based error capture, and never sends directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -81,6 +81,7 @@
   }
 
   function onReady() {
+    publishGlobalPause(false);
     buildUi();
     log('Script started');
     log('Shared-payload error gatherer armed');
@@ -1487,6 +1488,27 @@
     if (raw.top) panel.style.top = raw.top;
     if (raw.right) panel.style.right = raw.right;
     if (raw.bottom) panel.style.bottom = raw.bottom;
+    requestAnimationFrame(() => clampPanelToViewport(panel));
+  }
+
+  function clampPanelToViewport(panel) {
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const winW = window.innerWidth || document.documentElement.clientWidth || 0;
+    const winH = window.innerHeight || document.documentElement.clientHeight || 0;
+    const margin = 8;
+    let offscreen = false;
+
+    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.right > winW || rect.left < 0 || rect.bottom > winH || rect.top < 0) offscreen = true;
+
+    if (!offscreen) return;
+
+    panel.style.left = 'auto';
+    panel.style.top = 'auto';
+    panel.style.right = `${margin}px`;
+    panel.style.bottom = `${margin}px`;
+    savePanelPos();
   }
 
   function makeDraggable(panel, handle) {
