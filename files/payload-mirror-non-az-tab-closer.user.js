@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.7
+// @version      1.0.8
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,13 +24,15 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.8';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
-    closeSignal: 'tm_pc_payload_mirror_close_signal_v1'
+    closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
+    homePayload: 'tm_pc_home_quote_grab_payload_v1',
+    autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
 
   const LS_KEYS = {
@@ -285,6 +287,119 @@
     return buildSignalKey(ready) === buildSignalKey(signal);
   }
 
+  function unwrapProductPayload(raw) {
+    if (!isPlainObject(raw)) return {};
+    return isPlainObject(raw.data) ? raw.data : raw;
+  }
+
+  function extractProductAzId(raw) {
+    const data = unwrapProductPayload(raw);
+    return norm(
+      raw?.['AZ ID']
+      || data?.['AZ ID']
+      || raw?.currentJob?.['AZ ID']
+      || data?.currentJob?.['AZ ID']
+      || ''
+    );
+  }
+
+  function getProductSavedMs(raw) {
+    const data = unwrapProductPayload(raw);
+    const candidates = [
+      raw?.savedAt,
+      data?.savedAt,
+      raw?.meta?.updatedAt,
+      data?.meta?.updatedAt,
+      raw?.currentJob?.updatedAt,
+      data?.currentJob?.updatedAt
+    ];
+    let best = 0;
+    for (const value of candidates) {
+      const ms = Date.parse(norm(value || ''));
+      if (Number.isFinite(ms) && ms > best) best = ms;
+    }
+    return best;
+  }
+
+  function getProductRow(raw) {
+    const data = unwrapProductPayload(raw);
+    if (isPlainObject(raw?.row)) return raw.row;
+    if (isPlainObject(data?.row)) return data.row;
+    return {};
+  }
+
+  function scoreProductPayload(product, raw) {
+    if (!isPlainObject(raw)) return -1;
+    const data = unwrapProductPayload(raw);
+    const row = getProductRow(raw);
+    let score = 0;
+
+    if (raw.ready === true || data.ready === true) score += 20;
+    if (norm(raw?.currentJob?.SubmissionNumber || data?.currentJob?.SubmissionNumber || '')) score += 4;
+
+    if (product === 'home') {
+      score += countFilledKeys(row, [
+        'CFP?',
+        'Reconstruction Cost',
+        'Year Built',
+        'Square FT',
+        '# of Story',
+        'Water Device?',
+        'Standard Pricing No Auto Discount',
+        'Enhance Pricing No Auto Discount',
+        'Standard Pricing Auto Discount',
+        'Enhance Pricing Auto Discount',
+        'Submission Number',
+        'Done?'
+      ]) * 3;
+    } else {
+      score += countFilledKeys(row, [
+        'Auto',
+        'Submission Number (Auto)',
+        'Total Policy Premium',
+        'PrimaryInsuredName',
+        'PA_All_Coverages'
+      ]) * 4;
+      if (Array.isArray(raw?.drivers) && raw.drivers.length) score += 4;
+      if (Array.isArray(raw?.vehicles) && raw.vehicles.length) score += 4;
+      if (Array.isArray(data?.drivers) && data.drivers.length) score += 4;
+      if (Array.isArray(data?.vehicles) && data.vehicles.length) score += 4;
+    }
+
+    return score;
+  }
+
+  function shouldReplaceProductPayload(product, existing, next) {
+    if (!isPlainObject(next) || !extractProductAzId(next)) return false;
+    if (!isPlainObject(existing) || !extractProductAzId(existing)) return true;
+
+    const existingMs = getProductSavedMs(existing);
+    const nextMs = getProductSavedMs(next);
+    if (existingMs && nextMs && existingMs !== nextMs) return nextMs > existingMs;
+    if (!existingMs && nextMs) return true;
+
+    const existingScore = scoreProductPayload(product, existing);
+    const nextScore = scoreProductPayload(product, next);
+    if (existingScore !== nextScore) return nextScore > existingScore;
+
+    const existingKey = `${extractProductAzId(existing)}|${existingMs}|${existingScore}`;
+    const nextKey = `${extractProductAzId(next)}|${nextMs}|${nextScore}`;
+    return existingKey !== nextKey;
+  }
+
+  function syncMirroredProductPayload(product, key) {
+    if (!isGwpcHost()) return false;
+    const localPayload = readLocalJson(key);
+    if (!isPlainObject(localPayload) || !extractProductAzId(localPayload)) return false;
+
+    const existing = readGM(key, null);
+    if (!shouldReplaceProductPayload(product, existing, localPayload)) return false;
+
+    writeGM(key, localPayload);
+    log(`${product === 'home' ? 'Home' : 'Auto'} payload mirrored for AZ ${extractProductAzId(localPayload)}`);
+    return true;
+  }
+
   function countFilledKeys(value, keys) {
     if (!isPlainObject(value)) return 0;
     let count = 0;
@@ -427,6 +542,13 @@
     return true;
   }
 
+  function syncMirroredProductPayloadsFromGwpc() {
+    if (!isGwpcHost()) return false;
+    const homeChanged = syncMirroredProductPayload('home', GM_KEYS.homePayload);
+    const autoChanged = syncMirroredProductPayload('auto', GM_KEYS.autoPayload);
+    return homeChanged || autoChanged;
+  }
+
   function bridgePayloadToAzLocal() {
     if (!isAzHost()) return false;
     const payload = readGM(GM_KEYS.finalPayload, null);
@@ -438,6 +560,20 @@
     }
     state.mirrored = true;
     return true;
+  }
+
+  function bridgeProductPayloadsToAzLocal() {
+    if (!isAzHost()) return false;
+    let bridged = false;
+    for (const key of [GM_KEYS.homePayload, GM_KEYS.autoPayload]) {
+      const payload = readGM(key, null);
+      if (!isPlainObject(payload) || !extractProductAzId(payload)) continue;
+      try {
+        localStorage.setItem(key, JSON.stringify(payload, null, 2));
+        bridged = true;
+      } catch {}
+    }
+    return bridged;
   }
 
   function scheduleImmediateCheck(reason) {
@@ -567,11 +703,14 @@
       return;
     }
 
+    if (isGwpcHost()) syncMirroredProductPayloadsFromGwpc();
+
     const signal = readSuccessSignal();
     const closeSignal = readCloseSignal();
     const mirroredMeta = readMirroredPayloadMeta();
     if (isAzHost()) {
       const bridged = bridgePayloadToAzLocal();
+      bridgeProductPayloadsToAzLocal();
       if (mirroredMeta?.azId && (!state.activeSignal || !norm(state.activeSignal.azId))) {
         state.activeSignal = {
           azId: mirroredMeta.azId,

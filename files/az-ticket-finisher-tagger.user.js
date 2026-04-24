@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.14
+// @version      1.0.15
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,13 +20,15 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.14';
+  const VERSION = '1.0.15';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
   const GM_KEYS = {
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
+    homePayload: 'tm_pc_home_quote_grab_payload_v1',
+    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     fieldTargets: 'tm_az_ticket_finisher_field_targets_v1',
     tagTargets: 'tm_az_ticket_finisher_tag_targets_v1',
     runs: 'tm_az_ticket_finisher_runs_v1'
@@ -505,10 +507,119 @@
     writeGM(GM_KEYS.runs, runs);
   }
 
+  function extractPayloadAzId(raw) {
+    const data = unwrapProductPayload(raw);
+    return norm(
+      raw?.azId
+      || raw?.['AZ ID']
+      || data?.azId
+      || data?.['AZ ID']
+      || raw?.currentJob?.['AZ ID']
+      || data?.currentJob?.['AZ ID']
+      || ''
+    );
+  }
+
+  function getPayloadSavedMs(raw) {
+    const data = unwrapProductPayload(raw);
+    const candidates = [
+      raw?.savedAt,
+      data?.savedAt,
+      raw?.meta?.updatedAt,
+      data?.meta?.updatedAt,
+      raw?.currentJob?.updatedAt,
+      data?.currentJob?.updatedAt
+    ];
+    let best = 0;
+    for (const value of candidates) {
+      const ms = Date.parse(norm(value || ''));
+      if (Number.isFinite(ms) && ms > best) best = ms;
+    }
+    return best;
+  }
+
+  function countFilledKeys(value, keys) {
+    if (!isPlainObject(value)) return 0;
+    let count = 0;
+    for (const key of keys) {
+      if (norm(value[key] || '')) count += 1;
+    }
+    return count;
+  }
+
+  function getProductRow(raw) {
+    const data = unwrapProductPayload(raw);
+    if (isPlainObject(raw?.row)) return raw.row;
+    if (isPlainObject(data?.row)) return data.row;
+    return {};
+  }
+
+  function scoreProductPayload(product, raw) {
+    if (!isPlainObject(raw)) return -1;
+    const data = unwrapProductPayload(raw);
+    const row = getProductRow(raw);
+    let score = 0;
+
+    if (raw.ready === true || data.ready === true) score += 20;
+    if (norm(raw?.currentJob?.SubmissionNumber || data?.currentJob?.SubmissionNumber || '')) score += 4;
+
+    if (product === 'home') {
+      score += countFilledKeys(row, [
+        'CFP?',
+        'Reconstruction Cost',
+        'Year Built',
+        'Square FT',
+        '# of Story',
+        'Water Device?',
+        'Standard Pricing No Auto Discount',
+        'Enhance Pricing No Auto Discount',
+        'Standard Pricing Auto Discount',
+        'Enhance Pricing Auto Discount',
+        'Submission Number',
+        'Done?'
+      ]) * 3;
+    } else {
+      score += countFilledKeys(row, [
+        'Auto',
+        'Submission Number (Auto)',
+        'Total Policy Premium',
+        'PrimaryInsuredName',
+        'PA_All_Coverages'
+      ]) * 4;
+      if (Array.isArray(raw?.drivers) && raw.drivers.length) score += 4;
+      if (Array.isArray(raw?.vehicles) && raw.vehicles.length) score += 4;
+      if (Array.isArray(data?.drivers) && data.drivers.length) score += 4;
+      if (Array.isArray(data?.vehicles) && data.vehicles.length) score += 4;
+    }
+
+    return score;
+  }
+
+  function readDirectProductPayload(key) {
+    const local = readLocalOnly(key, null);
+    if (isPlainObject(local) && extractPayloadAzId(local)) return local;
+    const gm = readGmOnly(key, null);
+    if (isPlainObject(gm) && extractPayloadAzId(gm)) return gm;
+    return null;
+  }
+
+  function chooseBetterFinalPayload(localPayload, gmPayload) {
+    const localOk = isPlainObject(localPayload) && norm(localPayload.azId || '');
+    const gmOk = isPlainObject(gmPayload) && norm(gmPayload.azId || '');
+    if (localOk && !gmOk) return localPayload;
+    if (!localOk && gmOk) return gmPayload;
+    if (!localOk && !gmOk) return null;
+
+    const localMs = getPayloadSavedMs(localPayload);
+    const gmMs = getPayloadSavedMs(gmPayload);
+    if (localMs && gmMs && localMs !== gmMs) return localMs > gmMs ? localPayload : gmPayload;
+    return localPayload;
+  }
+
   function getFinalPayload() {
     const localPayload = readLocalOnly(GM_KEYS.finalPayload, null);
     const gmPayload = readGmOnly(GM_KEYS.finalPayload, null);
-    const payload = isPlainObject(localPayload) && norm(localPayload.azId || '') ? localPayload : gmPayload;
+    const payload = chooseBetterFinalPayload(localPayload, gmPayload);
     if (!isPlainObject(payload)) return null;
     const localReady = readLocalOnly(GM_KEYS.finalReady, null);
     const gmReady = readGmOnly(GM_KEYS.finalReady, null);
@@ -535,14 +646,65 @@
     return isPlainObject(raw.data) ? raw.data : raw;
   }
 
+  function choosePreferredProductPayload(product, expectedAzId, candidates) {
+    const ranked = candidates
+      .map((candidate) => {
+        const raw = candidate?.raw;
+        if (!isPlainObject(raw)) return null;
+        const azId = extractPayloadAzId(raw);
+        if (expectedAzId && azId && azId !== expectedAzId) return null;
+        return {
+          raw,
+          source: norm(candidate?.source || `${product}`) || `${product}`,
+          savedMs: getPayloadSavedMs(raw),
+          score: scoreProductPayload(product, raw),
+          sourceRank: Number(candidate?.sourceRank || 0)
+        };
+      })
+      .filter(Boolean);
+
+    if (!ranked.length) {
+      return {
+        raw: {},
+        source: `${product}:none`,
+        savedAt: '',
+        score: -1
+      };
+    }
+
+    ranked.sort((a, b) => {
+      if (a.savedMs !== b.savedMs) return b.savedMs - a.savedMs;
+      if (a.score !== b.score) return b.score - a.score;
+      return b.sourceRank - a.sourceRank;
+    });
+
+    return {
+      raw: ranked[0].raw,
+      source: ranked[0].source,
+      savedAt: ranked[0].savedMs ? new Date(ranked[0].savedMs).toISOString() : '',
+      score: ranked[0].score
+    };
+  }
+
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
-    const homeRaw = isPlainObject(payload.homePayload) ? payload.homePayload : (payload.bundle?.home?.data || {});
-    const autoRaw = isPlainObject(payload.autoPayload) ? payload.autoPayload : (payload.bundle?.auto?.data || {});
+    const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
+      { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
+      { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
+      { source: 'final-home-bundle', raw: payload.bundle?.home?.data, sourceRank: 1 }
+    ]);
+    const autoChoice = choosePreferredProductPayload('auto', finalPayload.azId, [
+      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 3 },
+      { source: 'final-auto-payload', raw: isPlainObject(payload.autoPayload) ? payload.autoPayload : null, sourceRank: 2 },
+      { source: 'final-auto-bundle', raw: payload.bundle?.auto?.data, sourceRank: 1 }
+    ]);
+
+    const homeRaw = homeChoice.raw;
+    const autoRaw = autoChoice.raw;
     const home = unwrapProductPayload(homeRaw);
     const auto = unwrapProductPayload(autoRaw);
-    const homeRow = isPlainObject(homeRaw.row) ? homeRaw.row : (isPlainObject(home.row) ? home.row : {});
-    const autoRow = isPlainObject(autoRaw.row) ? autoRaw.row : (isPlainObject(auto.row) ? auto.row : {});
+    const homeRow = getProductRow(homeRaw);
+    const autoRow = getProductRow(autoRaw);
 
     const doneValue = pickFirst(
       homeRaw['Done?'],
@@ -613,6 +775,10 @@
         doneValue,
         autoValue,
         text: noteText
+      },
+      sources: {
+        home: `${homeChoice.source}${homeChoice.savedAt ? ` @ ${homeChoice.savedAt}` : ''}`,
+        auto: `${autoChoice.source}${autoChoice.savedAt ? ` @ ${autoChoice.savedAt}` : ''}`
       },
       chooseSuccessfulTag: normalizeYes(doneValue) && normalizeYes(autoValue)
     };
@@ -1186,6 +1352,7 @@
 
     const data = extractWorkflowData(finalPayload);
     state.activeAzId = data.azId;
+    log(`Payload sources | Home=${data.sources.home} | Auto=${data.sources.auto}`);
 
     if (!hasAllFieldTargets()) {
       setStatus('Field setup required');
