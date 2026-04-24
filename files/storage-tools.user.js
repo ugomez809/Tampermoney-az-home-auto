@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.0
-// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked data without closing the tab.
+// @version      1.5.1
+// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,9 +21,9 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.0';
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v15';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v15';
+  const VERSION = '1.5.1';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v151';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v151';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
   const TRACKED_PREFIXES = [
@@ -107,6 +107,22 @@
   const AUTO_CLEAR_PREFIXES = [
     'aqb_',
     'tm_pc_payload_mirror_'
+  ];
+
+  const MANUAL_PRESERVE_EXACT_KEYS = new Set([
+    'tm_pc_header_timeout_selector_rules_v1',
+    'tm_pc_header_timeout_enabled_v1',
+    'tm_az_ticket_finisher_field_targets_v1',
+    'tm_az_ticket_finisher_tag_targets_v1'
+  ]);
+
+  const MANUAL_PRESERVE_PATTERNS = [
+    /_panel_pos_/i,
+    /_field_targets_/i,
+    /_tag_targets_/i,
+    /_selector_rules_/i,
+    /_logs_open_/i,
+    /_hidden_/i
   ];
 
   if (document.getElementById(UI_ID)) return;
@@ -547,6 +563,18 @@
     return AUTO_CLEAR_PREFIXES.some(prefix => key.startsWith(prefix));
   }
 
+  function shouldPreserveManualClearKey(key) {
+    if (!key) return false;
+    if (MANUAL_PRESERVE_EXACT_KEYS.has(key)) return true;
+    return MANUAL_PRESERVE_PATTERNS.some((pattern) => pattern.test(key));
+  }
+
+  function shouldManualClearKey(key) {
+    if (!key) return false;
+    if (!isTrackedKey(key)) return false;
+    return !shouldPreserveManualClearKey(key);
+  }
+
   function clearTrackedKeysAndCaches(options = {}) {
     const {
       confirmFirst = true,
@@ -558,15 +586,15 @@
     const sessionKeys = getAllTrackedKeys(sessionStorage);
     const gmTrackedKeys = listAllGmKeysSafe().filter(isTrackedKey);
 
-    const localTargets = autoMode ? localKeys.filter(shouldAutoClearKey) : localKeys;
-    const sessionTargets = autoMode ? sessionKeys.filter(shouldAutoClearKey) : sessionKeys;
-    const gmTargets = autoMode ? gmTrackedKeys.filter(shouldAutoClearKey) : gmTrackedKeys;
+    const localTargets = autoMode ? localKeys.filter(shouldAutoClearKey) : localKeys.filter(shouldManualClearKey);
+    const sessionTargets = autoMode ? sessionKeys.filter(shouldAutoClearKey) : sessionKeys.filter(shouldManualClearKey);
+    const gmTargets = autoMode ? gmTrackedKeys.filter(shouldAutoClearKey) : gmTrackedKeys.filter(shouldManualClearKey);
 
     if (confirmFirst) {
       const ok = window.confirm(
         autoMode
           ? `Clear tracked AZ / APEX / GWPC workflow data on this site now?\n\nCurrent origin:\n${location.origin}`
-          : `Clear tracked AZ / APEX / GWPC data on this site and clear mirrored caches?\n\nCurrent origin:\n${location.origin}`
+          : `Clear tracked AZ / APEX / GWPC workflow data on this site and clear mirrored caches?\n\nSaved setup like selector rules and finisher targets will be kept.\n\nCurrent origin:\n${location.origin}`
       );
       if (!ok) return 0;
     }
@@ -610,7 +638,7 @@
         cleared
       });
     } else {
-      toast(`Cleared ${cleared} tracked key${cleared === 1 ? '' : 's'} (local/session/GM) + mirrored caches.`, 1800);
+      toast(`Cleared ${cleared} workflow key${cleared === 1 ? '' : 's'} + mirrored caches. Saved setup was kept.`, 1800);
     }
 
     return cleared;
@@ -722,7 +750,7 @@
 
     const clearBtn = makeButton(
       'CLEAR',
-      'Clear tracked current-origin data and mirrored caches without closing this tab',
+      'Clear tracked current-origin workflow data and mirrored caches without deleting saved setup',
       '#b33a3a',
       () => clearTrackedKeysAndCaches({ confirmFirst: true, autoMode: false })
     );
