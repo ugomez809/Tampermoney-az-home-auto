@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.5
+// @version      4.1.6
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.5';
+  const VERSION = '4.1.6';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -104,6 +104,7 @@
     name: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
     mailingAddress: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-PolicyAddressDisplayInputSet-PolicyAddress_Ext_Input',
     riskAddressPolicyInfo: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-HODwellingLocationHOEInputSet-HODwellingLocationInput_Input',
+    accountNumberInfoBar: 'SubmissionWizard-JobWizardInfoBar-AccountNumber',
 
     fireCode: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-HOFirelineCode_Input',
     fireBlock: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingSingleHOEPanelSet-HODwellingDetailsHOEDV-7',
@@ -155,6 +156,16 @@
   };
 
   const SNAPSHOT_EVERY_TICKS = 10;
+  const OPTIONAL_FINAL_HOME_ROW_KEYS = new Set([
+    'Risk Address',
+    'Account Number',
+    'Home Roof Type',
+    'Bedrooms',
+    'Bathrooms',
+    'Home Type',
+    'Done?',
+    'Result'
+  ]);
 
   init();
 
@@ -404,6 +415,7 @@
       'Name': '',
       'Mailing Address': '',
       'Risk Address': '',
+      'Account Number': '',
       'Fire Code': '',
       'Protection Class': '',
       'CFP?': '',
@@ -411,6 +423,10 @@
       'Year Built': '',
       'Square FT': '',
       '# of Story': '',
+      'Home Roof Type': '',
+      'Bedrooms': '',
+      'Bathrooms': '',
+      'Home Type': '',
       'Water Device?': '',
       'Standard Pricing No Auto Discount': '',
       'Enhance Pricing No Auto Discount': '',
@@ -657,7 +673,7 @@
   function buildFinalRowResult(row) {
     const nextRow = mergeHomeRow(emptyHomeRow(), row || {});
     const missing = Object.entries(nextRow)
-      .filter(([key, value]) => !normalizeText(value) && key !== 'Done?' && key !== 'Result' && key !== 'Risk Address')
+      .filter(([key, value]) => !normalizeText(value) && !OPTIONAL_FINAL_HOME_ROW_KEYS.has(key))
       .map(([key]) => key);
 
     if (missing.length) {
@@ -848,6 +864,7 @@
       return;
     }
 
+    maybeCaptureVisibleAccountInfo(currentJob);
     maybeCaptureVisiblePolicyInfo(currentJob);
     maybeCaptureVisibleDwelling(currentJob);
 
@@ -1374,6 +1391,32 @@
     return true;
   }
 
+  function maybeCaptureVisibleAccountInfo(job) {
+    const accountInfoData = extractAccountInfoFields();
+    if (!hasAnyNonEmptyHomeValues(accountInfoData)) return false;
+
+    const homeState = normalizeHomeState(job);
+    if (homeState.ready === true) return false;
+
+    const shouldSave = isPayloadRowChanged(homeState.row, accountInfoData);
+    if (!shouldSave) return false;
+
+    const targetJob = mergeJobForHomeUpdates(job, accountInfoData);
+    const save = saveHomeState(targetJob, {
+      rowUpdates: accountInfoData,
+      phase: normalizeText(homeState.payload?.meta?.phase || '') || 'observing-account',
+      ready: false
+    });
+
+    if (!save.ok) {
+      log(`Account info save failed: ${save.reason || 'unknown error'}`);
+      return false;
+    }
+
+    log(`Account info saved: ${JSON.stringify(accountInfoData)}`);
+    return true;
+  }
+
   function maybeCaptureVisibleDwelling(job) {
     if (!findByIdInDocs(IDS.fireCode) && !findByIdInDocs(IDS.reconstruction) && !findByIdInDocs(IDS.yearBuilt)) return false;
 
@@ -1548,6 +1591,7 @@
       'Name': policyInfoData['Name'] || '',
       'Mailing Address': policyInfoData['Mailing Address'] || '',
       'Risk Address': dwellingData['Risk Address'] || '',
+      'Account Number': policyInfoData['Account Number'] || finalBaseState.row['Account Number'] || '',
       'Fire Code': dwellingData['Fire Code'] || '',
       'Protection Class': dwellingData['Protection Class'] || '',
       'CFP?': cfpValue || '',
@@ -1555,6 +1599,10 @@
       'Year Built': dwellingData['Year Built'] || '',
       'Square FT': dwellingData['Square FT'] || '',
       '# of Story': dwellingData['# of Story'] || '',
+      'Home Roof Type': dwellingData['Home Roof Type'] || '',
+      'Bedrooms': dwellingData['Bedrooms'] || '',
+      'Bathrooms': dwellingData['Bathrooms'] || '',
+      'Home Type': dwellingData['Home Type'] || '',
       'Water Device?': dwellingData['Water Device?'] || '',
       'Standard Pricing Auto Discount': pricingAutoData['Standard Pricing'] || '',
       'Enhance Pricing Auto Discount': pricingAutoData['Enhance Pricing'] || '',
@@ -1786,9 +1834,12 @@
       getDisplayValueById(IDS.mailingAddress) ||
       extractWithRegex(getTextById(IDS.mailingAddress), /^Mailing\s*Address\s+(.+)$/i);
 
+    const accountNumberRaw = extractAccountNumberFromPage();
+
     return {
       'Name': normalizeSimpleValue(nameRaw),
-      'Mailing Address': normalizeSimpleValue(mailingAddressRaw)
+      'Mailing Address': normalizeSimpleValue(mailingAddressRaw),
+      'Account Number': normalizeSimpleValue(accountNumberRaw)
     };
   }
 
@@ -1825,6 +1876,11 @@
       getDisplayValueById(IDS.riskAddressPolicyInfo) ||
       extractWithRegex(getTextById(IDS.riskAddressPolicyInfo), /^Risk\s*Address\s+(.+)$/i);
 
+    const roofTypeRaw = extractLabeledFieldValue(['Roof Type', 'Home Roof Type']);
+    const bedroomsRaw = extractLabeledFieldValue(['Bedrooms', 'Bedroom']);
+    const bathroomsRaw = extractLabeledFieldValue(['Bathrooms', 'Bathroom']);
+    const homeTypeRaw = extractLabeledFieldValue(['Home Type', 'Dwelling Type', 'Residence Type']);
+
     return {
       'Risk Address': normalizeSimpleValue(riskAddressRaw),
       'Fire Code': normalizeFireCode(fireRaw),
@@ -1833,6 +1889,10 @@
       'Year Built': normalizeSimpleValue(yearBuiltRaw),
       'Square FT': normalizeSimpleValue(squareFeetRaw),
       '# of Story': normalizeSimpleValue(storiesRaw),
+      'Home Roof Type': normalizeSimpleValue(roofTypeRaw),
+      'Bedrooms': normalizeRoomValue(bedroomsRaw),
+      'Bathrooms': normalizeRoomValue(bathroomsRaw),
+      'Home Type': normalizeSimpleValue(homeTypeRaw),
       'Water Device?': normalizeWaterDevice(waterRaw)
     };
   }
@@ -1852,6 +1912,106 @@
       }
       return '';
     }) || '';
+  }
+
+  function extractAccountInfoFields() {
+    const accountNumber = extractAccountNumberFromPage();
+    return {
+      'Account Number': normalizeSimpleValue(accountNumber)
+    };
+  }
+
+  function extractAccountNumberFromPage() {
+    const exact = findInDocs((doc) => {
+      const wrap = doc.getElementById(IDS.accountNumberInfoBar);
+      if (!wrap || !isVisibleEl(wrap)) return '';
+
+      const values = Array.from(wrap.querySelectorAll('.gw-infoValue, .gw-label.gw-infoValue'))
+        .map((node) => normalizeText(node.textContent || ''))
+        .filter(Boolean);
+
+      if (values.length > 1) return values[1];
+      if (values[0] && values[0] !== 'Account:') return values[0];
+      const text = normalizeText(wrap.textContent || '');
+      const match = text.match(/Account:\s*(.+)$/i);
+      return match ? normalizeText(match[1]) : '';
+    });
+
+    if (exact) return normalizeSimpleValue(exact);
+    return normalizeSimpleValue(extractLabeledFieldValue(['Account Number']));
+  }
+
+  function extractLabeledFieldValue(labelTexts) {
+    const wanted = (Array.isArray(labelTexts) ? labelTexts : [labelTexts])
+      .map((value) => normalizeText(value))
+      .filter(Boolean);
+
+    if (!wanted.length) return '';
+
+    for (const doc of getAccessibleDocs()) {
+      let labels = [];
+      try {
+        labels = Array.from(doc.querySelectorAll('.gw-label, .gw-boldLabel, .gw-LabelWidget, .gw-vw--label, label'));
+      } catch {}
+
+      for (const label of labels) {
+        if (!isVisibleEl(label)) continue;
+        const text = normalizeText(label.textContent || '');
+        if (!wanted.includes(text)) continue;
+
+        const containers = [
+          label.closest('.gw-InputWidget, .gw-ValueWidget, .gw-ValueWidget--inner, .gw-InfoBarElementWidget, .gw-RowWidget, td, tr, [role="group"]'),
+          label.parentElement,
+          label.parentElement?.parentElement
+        ].filter(Boolean);
+
+        for (const container of containers) {
+          const value = extractValueFromLabeledContainer(container, wanted);
+          if (value) return value;
+        }
+      }
+    }
+
+    return '';
+  }
+
+  function extractValueFromLabeledContainer(container, labelTexts) {
+    if (!(container instanceof Element)) return '';
+    const wanted = new Set((labelTexts || []).map((value) => normalizeText(value)).filter(Boolean));
+
+    let nodes = [];
+    try {
+      nodes = Array.from(container.querySelectorAll('.gw-value-readonly-wrapper, .gw-vw--value, .gw-value, .gw-infoValue, [data-gw-getset="text"], input:not([type="hidden"]), select, textarea'));
+    } catch {}
+
+    for (const node of nodes) {
+      if (node instanceof Element && !isVisibleEl(node)) continue;
+      const value = readFieldNodeValue(node);
+      if (!value || wanted.has(value)) continue;
+      return value;
+    }
+
+    const text = normalizeText(container.innerText || container.textContent || '');
+    if (!text) return '';
+
+    for (const labelText of wanted) {
+      if (!text.startsWith(labelText)) continue;
+      const stripped = normalizeText(text.slice(labelText.length));
+      if (stripped && !wanted.has(stripped)) return stripped;
+    }
+
+    return '';
+  }
+
+  function readFieldNodeValue(node) {
+    if (!(node instanceof Element)) return '';
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+      return normalizeText(node.value || node.getAttribute('value') || '');
+    }
+    if (node instanceof HTMLSelectElement) {
+      return normalizeText(node.selectedOptions?.[0]?.textContent || node.value || '');
+    }
+    return normalizeText(node.innerText || node.textContent || '');
   }
 
   function extractPricingFields() {
@@ -2028,6 +2188,7 @@
       el.querySelector('.gw-value-readonly-wrapper'),
       el.querySelector('.gw-vw--value'),
       el.querySelector('.gw-value'),
+      el.querySelector('.gw-infoValue'),
       el.querySelector('[data-gw-getset="text"]')
     ];
 
@@ -2064,6 +2225,13 @@
     const text = normalizeText(value);
     const money = extractFirstMoney(text);
     return money || text;
+  }
+
+  function normalizeRoomValue(value) {
+    const text = normalizeText(value);
+    if (!text) return '';
+    const match = text.match(/\d+(?:\.\d+)?/);
+    return match ? match[0] : text;
   }
 
   function normalizeFireCode(value) {

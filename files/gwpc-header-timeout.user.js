@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.3
+// @version      2.3.4
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.3';
+  const VERSION = '2.3.4';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -47,7 +47,9 @@
     pendingPost: 'tm_pc_header_timeout_pending_post_v2',
     sentEvents: 'tm_pc_header_timeout_sent_events_v2',
     selectorPauseState: 'tm_pc_header_timeout_selector_pause_state_v1',
-    timeoutEnabled: 'tm_pc_header_timeout_enabled_v1'
+    timeoutEnabled: 'tm_pc_header_timeout_enabled_v1',
+    watchModeEnabled: 'tm_pc_header_timeout_watch_mode_v1',
+    watchPending: 'tm_pc_header_timeout_watch_pending_v1'
   };
 
   const CFG = {
@@ -71,6 +73,7 @@
     destroyed: false,
     running: true,
     timeoutEnabled: true,
+    watchModeEnabled: false,
     logs: [],
     els: {},
     panel: null,
@@ -84,6 +87,7 @@
     selectorMode: false,
     modalOpen: false,
     manageRulesOpen: false,
+    watchAlertOpen: false,
     selectorListeners: [],
     hoverBoxEl: null,
     hoveredEl: null,
@@ -143,6 +147,7 @@
     state.runtimeStarted = true;
     const timeoutWasEnabled = readTimeoutEnabled();
     state.timeoutEnabled = true;
+    state.watchModeEnabled = readWatchModeEnabled();
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
     clearLegacyTimeoutProductPayloads();
@@ -156,6 +161,9 @@
       log('Timeout actions reset to ON at page load');
     }
     log('Fresh timeout gatherer armed');
+    if (state.watchModeEnabled) {
+      log('Watch mode restored: ON');
+    }
 
     scheduleObserve();
     scheduleScan('start');
@@ -185,6 +193,7 @@
 
     window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__ = cleanup;
     setStatus('Watching header');
+    syncWatchAlertFromStorage();
     renderAll();
   }
 
@@ -206,6 +215,7 @@
 
     closeSelectorSession('', { logIt: false, restorePause: true });
     closeManageRulesModal('', { logIt: false });
+    closeWatchAlert('', { logIt: false, preservePending: true });
 
     try { state.hoverBoxEl?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
@@ -417,6 +427,58 @@
     renderButtons();
     renderAll();
     return state.timeoutEnabled;
+  }
+
+  function readWatchModeEnabled() {
+    try {
+      const raw = localStorage.getItem(KEYS.watchModeEnabled);
+      if (raw == null || raw === '') return false;
+      return raw === '1' || raw === 'true';
+    } catch {
+      return false;
+    }
+  }
+
+  function writeWatchModeEnabled(enabled) {
+    state.watchModeEnabled = !!enabled;
+    try { localStorage.setItem(KEYS.watchModeEnabled, state.watchModeEnabled ? '1' : '0'); } catch {}
+    renderButtons();
+    renderAll();
+    return state.watchModeEnabled;
+  }
+
+  function readPendingWatchPost() {
+    const raw = safeJsonParse(localStorage.getItem(KEYS.watchPending), null);
+    if (!isPlainObject(raw)) return null;
+    if (!isPlainObject(raw.event) || !normalizeText(raw.dedupeKey || raw.event?.dedupeKey || '')) return null;
+    return raw;
+  }
+
+  function writePendingWatchPost(record) {
+    if (!isPlainObject(record)) return null;
+    localStorage.setItem(KEYS.watchPending, JSON.stringify(record, null, 2));
+    return record;
+  }
+
+  function clearPendingWatchPost() {
+    try { localStorage.removeItem(KEYS.watchPending); } catch {}
+    renderButtons();
+    renderAll();
+  }
+
+  function hasPendingWatchPost() {
+    return !!readPendingWatchPost();
+  }
+
+  function buildTimeoutContextKey(context) {
+    if (!context?.job?.['AZ ID'] || !context?.product || !context?.header) return '';
+    return [
+      'timeout',
+      context.job['AZ ID'],
+      context.product,
+      context.header,
+      String(context.headerSinceMs || '')
+    ].join('|');
   }
 
   function timeoutActionsEnabled() {
@@ -1298,6 +1360,8 @@
       pageName,
       pageAddress
     };
+
+    maybeClearStalePendingWatchPost();
   }
 
   function buildEventContext() {
@@ -1343,13 +1407,7 @@
   function buildTimeoutEvent(context) {
     const resultValue = `Header "${context.header}" did not change for 120 seconds`;
     const eventId = createEventId();
-    const dedupeKey = [
-      'timeout',
-      context.job['AZ ID'],
-      context.product,
-      context.header,
-      String(context.headerSinceMs)
-    ].join('|');
+    const dedupeKey = buildTimeoutContextKey(context);
 
     return {
       eventId,
@@ -1430,14 +1488,14 @@
     };
   }
 
-  function dispatchEvent(event) {
-    if (!timeoutActionsEnabled()) {
+  function dispatchEvent(event, contextOverride = null, options = {}) {
+    if (!options.manual && !timeoutActionsEnabled()) {
       log('Timeout actions are OFF. Event skipped.');
       setStatus(state.running ? 'Watching header' : 'Stopped');
       return false;
     }
 
-    const context = buildEventContext();
+    const context = isPlainObject(contextOverride) ? contextOverride : buildEventContext();
     if (!context.ok) {
       log(context.reason);
       return false;
@@ -1463,6 +1521,143 @@
     }
   }
 
+  function buildPendingWatchRecord(event, context) {
+    return {
+      mode: 'watch-timeout',
+      status: 'pending',
+      savedAt: nowIso(),
+      dedupeKey: normalizeText(event?.dedupeKey || ''),
+      event: deepClone(event),
+      context: {
+        ok: true,
+        job: deepClone(context?.job || {}),
+        identity: deepClone(context?.identity || {}),
+        product: normalizeText(context?.product || ''),
+        productLabel: normalizeText(context?.productLabel || ''),
+        header: normalizeText(context?.header || ''),
+        headerSinceMs: Number(context?.headerSinceMs || 0),
+        submission: normalizeText(context?.submission || '')
+      }
+    };
+  }
+
+  function closeWatchAlert(message = '', options = {}) {
+    state.watchAlertOpen = false;
+    const overlay = $('#tm-timeout-watch-alert-overlay');
+    if (overlay) overlay.remove();
+
+    if (options.preservePending !== false) {
+      const pending = readPendingWatchPost();
+      if (pending && pending.status === 'pending' && options.dismissPending === true) {
+        writePendingWatchPost({
+          ...pending,
+          status: 'dismissed',
+          dismissedAt: nowIso()
+        });
+      }
+    } else {
+      clearPendingWatchPost();
+    }
+
+    if (options.logIt !== false && normalizeText(message)) log(message);
+    if (!state.destroyed) {
+      setStatus(options.dismissPending === true ? 'Idle' : (state.running ? 'Watching header' : 'Stopped'));
+      renderButtons();
+      renderAll();
+    }
+  }
+
+  function openWatchAlert(record) {
+    if (!isPlainObject(record?.event)) return;
+    if (state.watchAlertOpen && $('#tm-timeout-watch-alert-overlay')) return;
+
+    const existing = $('#tm-timeout-watch-alert-overlay');
+    if (existing) existing.remove();
+
+    state.watchAlertOpen = true;
+    const overlay = document.createElement('div');
+    overlay.id = 'tm-timeout-watch-alert-overlay';
+    overlay.setAttribute(UI_MARKER_ATTR, '1');
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: String(CFG.zIndex),
+      background: 'rgba(15, 23, 42, 0.35)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px'
+    });
+
+    overlay.innerHTML = `
+      <div ${UI_MARKER_ATTR}="1" style="position:relative;width:min(360px,90vw);min-height:220px;border:3px solid rgba(248,113,113,0.95);background:#7f1d1d;color:#fee2e2;border-radius:18px;box-shadow:0 22px 60px rgba(0,0,0,.45);padding:20px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:12px;">
+        <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-close" type="button" style="position:absolute;top:10px;right:10px;border:0;background:transparent;color:#fff;font-size:24px;line-height:1;cursor:pointer;">X</button>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:20px;font-weight:900;">TIMEOUT CAPTURED</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:14px;font-weight:700;">${escapeHtml(String(record.context?.productLabel || record.event?.product || '').toUpperCase() || 'TIMEOUT')}</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:13px;line-height:1.5;max-width:280px;">${escapeHtml(record.event?.errorText || 'Header timeout captured in watch mode.')}</div>
+        <div ${UI_MARKER_ATTR}="1" style="font-size:12px;opacity:.92;">Manual push is available in the panel while watch mode stays ON.</div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
+    $('#tm-timeout-watch-alert-close', overlay)?.addEventListener('click', () => {
+      closeWatchAlert('Watch alert dismissed', { dismissPending: true });
+    });
+
+    setStatus('Watch mode timeout');
+    renderButtons();
+    renderAll();
+  }
+
+  function syncWatchAlertFromStorage() {
+    const pending = readPendingWatchPost();
+    if (!state.watchModeEnabled || !pending) {
+      closeWatchAlert('', { logIt: false, preservePending: true });
+      return;
+    }
+    if (pending.status === 'pending') {
+      openWatchAlert(pending);
+      return;
+    }
+    state.watchAlertOpen = false;
+    const overlay = $('#tm-timeout-watch-alert-overlay');
+    if (overlay) overlay.remove();
+    renderButtons();
+    renderAll();
+  }
+
+  function maybeClearStalePendingWatchPost() {
+    const pending = readPendingWatchPost();
+    if (!pending) return;
+    const currentKey = buildTimeoutContextKey({
+      job: { 'AZ ID': state.current.azId || '' },
+      product: state.current.product || '',
+      header: state.current.header || '',
+      headerSinceMs: state.current.headerSinceMs || 0
+    });
+    const pendingKey = normalizeText(pending.dedupeKey || '');
+    if (!currentKey || !pendingKey || currentKey === pendingKey) return;
+    closeWatchAlert('', { logIt: false, preservePending: false });
+    log('Cleared stale watch-mode timeout payload');
+  }
+
+  function dispatchPendingWatchPost() {
+    const pending = readPendingWatchPost();
+    if (!state.watchModeEnabled || !pending?.event) return false;
+
+    const ok = dispatchEvent(pending.event, pending.context, { manual: true });
+    if (ok) {
+      closeWatchAlert('Watch payload pushed manually', { logIt: false, preservePending: false });
+      log('Watch payload pushed manually');
+      return true;
+    }
+
+    setStatus('Manual push blocked');
+    renderButtons();
+    renderAll();
+    return false;
+  }
+
   function processHeaderTimeout() {
     if (!timeoutActionsEnabled()) return;
     const context = buildEventContext();
@@ -1478,6 +1673,19 @@
 
     const event = buildTimeoutEvent(context);
     if (hasSentOrPendingDedupe(event.dedupeKey)) return;
+
+    if (state.watchModeEnabled) {
+      const pending = readPendingWatchPost();
+      if (!pending || normalizeText(pending.dedupeKey || '') !== normalizeText(event.dedupeKey)) {
+        writePendingWatchPost(buildPendingWatchRecord(event, context));
+        log(`Watch mode captured ${context.product.toUpperCase()} timeout; waiting for manual push or dismiss`);
+        openWatchAlert(readPendingWatchPost());
+      } else if (pending.status === 'pending') {
+        openWatchAlert(pending);
+      }
+      return;
+    }
+
     dispatchEvent(event);
   }
 
@@ -2211,6 +2419,8 @@
         <div ${UI_MARKER_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">STOP</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-enable-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">TIMEOUT ON</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">WATCH MODE OFF</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-push" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#991b1b;color:#fff;font-weight:800;cursor:pointer;">PUSH WATCH PAYLOAD</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">MANAGE RULES</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-copy-logs" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">COPY LOGS</button>
@@ -2238,6 +2448,8 @@
     state.panel = panel;
     state.els.toggle = $('#tm-timeout-toggle', panel);
     state.els.timeoutEnableToggle = $('#tm-timeout-enable-toggle', panel);
+    state.els.watchModeToggle = $('#tm-timeout-watch-toggle', panel);
+    state.els.watchPush = $('#tm-timeout-watch-push', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
     state.els.manageRules = $('#tm-timeout-manage-rules', panel);
     state.els.copyLogs = $('#tm-timeout-copy-logs', panel);
@@ -2282,6 +2494,24 @@
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderButtons();
       renderAll();
+    };
+
+    state.els.watchModeToggle.onclick = () => {
+      const enabled = writeWatchModeEnabled(!state.watchModeEnabled);
+      if (!enabled) {
+        closeWatchAlert('Watch mode OFF', { logIt: false, preservePending: false });
+        log('Watch mode OFF');
+      } else {
+        log('Watch mode ON');
+        syncWatchAlertFromStorage();
+      }
+      setStatus(state.running ? 'Watching header' : 'Stopped');
+      renderButtons();
+      renderAll();
+    };
+
+    state.els.watchPush.onclick = () => {
+      dispatchPendingWatchPost();
     };
 
     state.els.selector.onclick = () => {
@@ -2330,6 +2560,21 @@
       state.els.timeoutEnableToggle.textContent = state.timeoutEnabled ? 'TIMEOUT ON' : 'TIMEOUT OFF';
       state.els.timeoutEnableToggle.style.background = state.timeoutEnabled ? '#16a34a' : '#475569';
       state.els.timeoutEnableToggle.style.color = '#fff';
+    }
+
+    if (state.els.watchModeToggle) {
+      state.els.watchModeToggle.textContent = state.watchModeEnabled ? 'WATCH MODE ON' : 'WATCH MODE OFF';
+      state.els.watchModeToggle.style.background = state.watchModeEnabled ? '#b91c1c' : '#475569';
+      state.els.watchModeToggle.style.color = '#fff';
+    }
+
+    if (state.els.watchPush) {
+      const enabled = state.watchModeEnabled && hasPendingWatchPost() && !state.busy;
+      state.els.watchPush.disabled = !enabled;
+      state.els.watchPush.style.background = enabled ? '#991b1b' : '#334155';
+      state.els.watchPush.style.color = enabled ? '#fff' : '#cbd5e1';
+      state.els.watchPush.style.opacity = enabled ? '1' : '.7';
+      state.els.watchPush.style.cursor = enabled ? 'pointer' : 'not-allowed';
     }
 
     if (state.els.selector) {
@@ -2382,6 +2627,7 @@
 
     if (state.els.status) {
       const statusText =
+        state.watchAlertOpen ? 'Watch mode timeout' :
         state.manageRulesOpen ? 'Rule manager' :
         state.modalOpen ? 'Selector config' :
         state.selectorMode ? 'Selector mode' :
@@ -2390,6 +2636,7 @@
 
       state.els.status.textContent = statusText;
       state.els.status.style.color =
+        state.watchAlertOpen ? '#fca5a5' :
         state.manageRulesOpen ? '#c4b5fd' :
         state.selectorMode || state.modalOpen ? '#67e8f9' :
         state.running ? '#86efac' : '#fca5a5';

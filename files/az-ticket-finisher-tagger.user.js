@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.33
+// @version      1.0.34
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.33';
+  const VERSION = '1.0.34';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -57,13 +57,20 @@
     'CFP?',
     'Reconstruction Cost',
     'Year Built',
-    'Square FT',
+    'Home Sqft',
     '# of Story',
+    'Home Roof Type',
+    'Bedrooms',
+    'Bathrooms',
+    'Home Type',
     'Water Device?',
     'Standard Pricing No Auto Discount',
     'Enhance Pricing No Auto Discount',
     'Standard Pricing Auto Discount',
-    'Enhance Pricing Auto Discount'
+    'Enhance Pricing Auto Discount',
+    'Home Submission Number',
+    'Auto Submission Number',
+    'Account Number'
   ];
 
   const TAG_ORDER = [
@@ -74,7 +81,7 @@
   const NUMERIC_ONLY_FIELDS = new Set([
     'Reconstruction Cost',
     'Year Built',
-    'Square FT',
+    'Home Sqft',
     '# of Story',
     'Standard Pricing No Auto Discount',
     'Enhance Pricing No Auto Discount',
@@ -581,8 +588,17 @@
     const text = norm(value);
     if (!text) return '';
     if (!NUMERIC_ONLY_FIELDS.has(label)) return text;
-    const integerOnly = label === 'Year Built' || label === 'Square FT' || label === '# of Story' || label === 'Reconstruction Cost';
+    const integerOnly = label === 'Year Built' || label === 'Home Sqft' || label === '# of Story' || label === 'Reconstruction Cost';
     return cleanNumericValue(text, { integerOnly }) || text;
+  }
+
+  function getNormalizedWorkflowFields(fields) {
+    const normalized = {};
+    for (const label of FIELD_ORDER) {
+      const value = formatFieldValue(label, fields?.[label] || '');
+      if (value) normalized[label] = value;
+    }
+    return normalized;
   }
 
   function normalizeYes(value) {
@@ -750,7 +766,21 @@
   }
 
   function getFieldTargets() {
-    return readTargets(GM_KEYS.fieldTargets);
+    const targets = readTargets(GM_KEYS.fieldTargets);
+    let changed = false;
+
+    if (!isPlainObject(targets['Home Sqft']) && isPlainObject(targets['Square FT'])) {
+      targets['Home Sqft'] = deepClone(targets['Square FT']);
+      changed = true;
+    }
+
+    if (!isPlainObject(targets['Account Number']) && isPlainObject(targets['Account number'])) {
+      targets['Account Number'] = deepClone(targets['Account number']);
+      changed = true;
+    }
+
+    if (changed) saveTargets(GM_KEYS.fieldTargets, targets);
+    return targets;
   }
 
   function getTagTargets() {
@@ -882,6 +912,11 @@
         'Year Built',
         'Square FT',
         '# of Story',
+        'Home Roof Type',
+        'Bedrooms',
+        'Bathrooms',
+        'Home Type',
+        'Account Number',
         'Water Device?',
         'Standard Pricing No Auto Discount',
         'Enhance Pricing No Auto Discount',
@@ -1002,23 +1037,21 @@
     };
   }
 
-  function extractWorkflowData(finalPayload) {
-    const payload = finalPayload.payload;
-    const currentJob = getBestCurrentJobForAz(finalPayload.azId);
-    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
-    const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
-      { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
-      { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
-      { source: 'final-home-bundle', raw: payload.bundle?.home?.data, sourceRank: 1 }
-    ], minSavedMs);
-    const autoChoice = choosePreferredProductPayload('auto', finalPayload.azId, [
-      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 3 },
-      { source: 'final-auto-payload', raw: isPlainObject(payload.autoPayload) ? payload.autoPayload : null, sourceRank: 2 },
-      { source: 'final-auto-bundle', raw: payload.bundle?.auto?.data, sourceRank: 1 }
-    ], minSavedMs);
+  function formatProductChoiceSource(choice, fallback) {
+    const source = norm(choice?.source || fallback || '') || fallback || '';
+    const savedAt = norm(choice?.savedAt || '');
+    return savedAt ? `${source} @ ${savedAt}` : source;
+  }
 
-    const homeRaw = homeChoice.raw;
-    const autoRaw = autoChoice.raw;
+  function buildWorkflowDataFromProductChoices(options = {}) {
+    const azId = norm(options.azId || '');
+    if (!azId) return null;
+
+    const payload = isPlainObject(options.payload) ? options.payload : {};
+    const homeChoice = options.homeChoice || {};
+    const autoChoice = options.autoChoice || {};
+    const homeRaw = isPlainObject(homeChoice.raw) ? homeChoice.raw : {};
+    const autoRaw = isPlainObject(autoChoice.raw) ? autoChoice.raw : {};
     const home = unwrapProductPayload(homeRaw);
     const auto = unwrapProductPayload(autoRaw);
     const homeRow = getProductRow(homeRaw);
@@ -1065,57 +1098,74 @@
       payload.bundle?.auto?.submissionNumber
     );
 
-    const noteText = [
+    const accountNumber = pickFirst(
+      homeRaw['Account Number'],
+      home['Account Number'],
+      homeRow['Account Number'],
+      home.currentJob?.['Account Number'],
+      payload.bundle?.home?.data?.row?.['Account Number']
+    );
+
+    const fields = {
+      'CFP?': pickFirst(homeRow['CFP?']),
+      'Reconstruction Cost': pickFirst(homeRow['Reconstruction Cost']),
+      'Year Built': pickFirst(homeRow['Year Built']),
+      'Home Sqft': pickFirst(homeRow['Home Sqft'], homeRow['Square FT']),
+      '# of Story': pickFirst(homeRow['# of Story']),
+      'Home Roof Type': pickFirst(homeRow['Home Roof Type']),
+      'Bedrooms': pickFirst(homeRow['Bedrooms']),
+      'Bathrooms': pickFirst(homeRow['Bathrooms']),
+      'Home Type': pickFirst(homeRow['Home Type']),
+      'Water Device?': pickFirst(homeRow['Water Device?']),
+      'Standard Pricing No Auto Discount': pickFirst(homeRow['Standard Pricing No Auto Discount']),
+      'Enhance Pricing No Auto Discount': pickFirst(homeRow['Enhance Pricing No Auto Discount']),
+      'Standard Pricing Auto Discount': pickFirst(homeRow['Standard Pricing Auto Discount']),
+      'Enhance Pricing Auto Discount': pickFirst(homeRow['Enhance Pricing Auto Discount']),
+      'Home Submission Number': homeSubmission,
+      'Auto Submission Number': autoSubmission,
+      'Account Number': accountNumber
+    };
+
+    const noteLines = [
       `Home Submission Number: ${homeSubmission}`,
       `Auto Submission Number: ${autoSubmission}`,
+      `Account Number: ${accountNumber}`,
       `Done?: ${doneValue}`,
       `Auto: ${autoValue}`
-    ].join('\n');
+    ];
 
     const hasSubstantiveProductData = (
-      homeChoice.score > 0 ||
-      autoChoice.score > 0 ||
-      !!norm(homeSubmission) ||
-      !!norm(autoSubmission) ||
+      Number(homeChoice.score || 0) > 0 ||
+      Number(autoChoice.score || 0) > 0 ||
+      Object.keys(getNormalizedWorkflowFields(fields)).length > 0 ||
       !!norm(doneValue) ||
       !!norm(autoValue)
     );
 
-    if (!hasSubstantiveProductData) {
-      return buildMissingPayloadWorkflowData(finalPayload.azId);
-    }
+    if (!hasSubstantiveProductData) return null;
 
     return {
-      azId: finalPayload.azId,
-      payloadSavedAt: norm(payload.savedAt || finalPayload.ready.savedAt || ''),
-      fields: {
-        'CFP?': pickFirst(homeRow['CFP?']),
-        'Reconstruction Cost': pickFirst(homeRow['Reconstruction Cost']),
-        'Year Built': pickFirst(homeRow['Year Built']),
-        'Square FT': pickFirst(homeRow['Square FT']),
-        '# of Story': pickFirst(homeRow['# of Story']),
-        'Water Device?': pickFirst(homeRow['Water Device?']),
-        'Standard Pricing No Auto Discount': pickFirst(homeRow['Standard Pricing No Auto Discount']),
-        'Enhance Pricing No Auto Discount': pickFirst(homeRow['Enhance Pricing No Auto Discount']),
-        'Standard Pricing Auto Discount': pickFirst(homeRow['Standard Pricing Auto Discount']),
-        'Enhance Pricing Auto Discount': pickFirst(homeRow['Enhance Pricing Auto Discount'])
-      },
+      azId,
+      payloadSavedAt: norm(options.payloadSavedAt || ''),
+      fields,
       note: {
         homeSubmission,
         autoSubmission,
+        accountNumber,
         doneValue,
         autoValue,
-        text: noteText
+        text: noteLines.join('\n')
       },
       sources: {
-        home: `${homeChoice.source}${homeChoice.savedAt ? ` @ ${homeChoice.savedAt}` : ''}`,
-        auto: `${autoChoice.source}${autoChoice.savedAt ? ` @ ${autoChoice.savedAt}` : ''}`
+        home: formatProductChoiceSource(homeChoice, options.homeSourceFallback || 'missing-payload'),
+        auto: formatProductChoiceSource(autoChoice, options.autoSourceFallback || 'missing-payload')
       },
-      chooseSuccessfulTag: normalizeYes(doneValue) && normalizeYes(autoValue)
+      chooseSuccessfulTag: options.forceFailedTag ? false : (normalizeYes(doneValue) && normalizeYes(autoValue)),
+      missingPayloadFallback: options.missingPayloadFallback === true
     };
   }
 
-  function buildMissingPayloadWorkflowData(ticketId) {
+  function buildBlankMissingWorkflowData(ticketId) {
     const azId = norm(ticketId || '');
     return {
       azId,
@@ -1124,17 +1174,25 @@
         'CFP?': '',
         'Reconstruction Cost': '',
         'Year Built': '',
-        'Square FT': '',
+        'Home Sqft': '',
         '# of Story': '',
+        'Home Roof Type': '',
+        'Bedrooms': '',
+        'Bathrooms': '',
+        'Home Type': '',
         'Water Device?': '',
         'Standard Pricing No Auto Discount': '',
         'Enhance Pricing No Auto Discount': '',
         'Standard Pricing Auto Discount': '',
-        'Enhance Pricing Auto Discount': ''
+        'Enhance Pricing Auto Discount': '',
+        'Home Submission Number': '',
+        'Auto Submission Number': '',
+        'Account Number': ''
       },
       note: {
         homeSubmission: '',
         autoSubmission: '',
+        accountNumber: '',
         doneValue: 'Skipped missing payload',
         autoValue: 'No',
         text: 'Skipped missing payload'
@@ -1146,6 +1204,52 @@
       chooseSuccessfulTag: false,
       missingPayloadFallback: true
     };
+  }
+
+  function extractWorkflowData(finalPayload) {
+    const payload = finalPayload.payload;
+    const currentJob = getBestCurrentJobForAz(finalPayload.azId);
+    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
+    const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
+      { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
+      { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
+      { source: 'final-home-bundle', raw: payload.bundle?.home?.data, sourceRank: 1 }
+    ], minSavedMs);
+    const autoChoice = choosePreferredProductPayload('auto', finalPayload.azId, [
+      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 3 },
+      { source: 'final-auto-payload', raw: isPlainObject(payload.autoPayload) ? payload.autoPayload : null, sourceRank: 2 },
+      { source: 'final-auto-bundle', raw: payload.bundle?.auto?.data, sourceRank: 1 }
+    ], minSavedMs);
+
+    return buildWorkflowDataFromProductChoices({
+      azId: finalPayload.azId,
+      payloadSavedAt: norm(payload.savedAt || finalPayload.ready.savedAt || ''),
+      payload,
+      homeChoice,
+      autoChoice
+    }) || buildMissingPayloadWorkflowData(finalPayload.azId);
+  }
+
+  function buildMissingPayloadWorkflowData(ticketId) {
+    const azId = norm(ticketId || '');
+    const currentJob = getBestCurrentJobForAz(azId);
+    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
+    const homeChoice = choosePreferredProductPayload('home', azId, [
+      { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 2 }
+    ], minSavedMs);
+    const autoChoice = choosePreferredProductPayload('auto', azId, [
+      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 2 }
+    ], minSavedMs);
+
+    return buildWorkflowDataFromProductChoices({
+      azId,
+      payloadSavedAt: '',
+      payload: {},
+      homeChoice,
+      autoChoice,
+      forceFailedTag: true,
+      missingPayloadFallback: true
+    }) || buildBlankMissingWorkflowData(azId);
   }
 
   function cssEscape(value) {
@@ -2181,6 +2285,9 @@
 
     const runs = readRuns();
     const runRecord = computeRunRecord(runs, data.azId);
+    const normalizedFields = getNormalizedWorkflowFields(data.fields);
+    const fieldSignature = JSON.stringify(normalizedFields);
+    const hasFieldValues = Object.keys(normalizedFields).length > 0;
     if (!forceRun && runRecord.completedAt) {
       log(`Previous completion found for AZ ${data.azId}; rerunning for front session ${state.frontSession}`);
     }
@@ -2199,16 +2306,22 @@
       await sleep(CFG.bigActionDelayMs);
 
       if (data.missingPayloadFallback) {
+        log(`Missing payload fallback active for AZ ${data.azId}`);
+      }
+
+      if (hasFieldValues && (forceRun || runRecord.fieldsSignature !== fieldSignature || !runRecord.fieldsUpdatedAt)) {
+        await fillTicketFields(data, runRecord, forceRun);
+        runRecord.fieldsSignature = fieldSignature;
+        saveRunRecord(runs, data.azId, runRecord);
+      } else if (!hasFieldValues) {
         if (!runRecord.fieldsUpdatedAt) {
           runRecord.fieldsUpdatedAt = nowIso();
+          runRecord.fieldsSignature = fieldSignature;
           saveRunRecord(runs, data.azId, runRecord);
         }
-        log(`Missing payload fallback active for AZ ${data.azId}`);
-      } else if (forceRun || !runRecord.fieldsUpdatedAt) {
-        await fillTicketFields(data, runRecord, forceRun);
-        saveRunRecord(runs, data.azId, runRecord);
+        log(`No Main field values available for AZ ${data.azId}; continuing with note/tag flow`);
       } else {
-        log('Fields already updated for this AZ ID, skipping field fill');
+        log('Main fields already match current payload, skipping field fill');
       }
 
       if (forceRun || !runRecord.noteSavedAt) {
