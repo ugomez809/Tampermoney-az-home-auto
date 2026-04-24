@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.7
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and waits for the finisher to close the ticket before continuing.
+// @version      2.5.8
+// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens the next ticket, saves Main payload, starts Quotes, pauses in background, and resumes immediately when the finisher closes the ticket or posts its cleanup trigger.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -19,7 +19,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.7';
+  const VERSION = '2.5.8';
 
   const CFG = {
     stageName: 'New Opportunities',
@@ -67,7 +67,8 @@
   };
 
   const SS_KEYS = {
-    BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1'
+    BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1',
+    LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED: 'tm_az_stage_runner_last_workflow_cleanup_request_handled_v1'
   };
 
   const SEL = {
@@ -191,7 +192,9 @@
     frontIdleLastActivityAt: Date.now(),
     frontIdleLastSignature: '',
     frontIdleArmedLogged: false,
-    frontIdleReloadPending: false
+    frontIdleReloadPending: false,
+    externalWakeTick: 0,
+    storageWakeHandler: null
   };
 
   init();
@@ -233,6 +236,13 @@
     };
     document.addEventListener('visibilitychange', state.visibilityPersistHandler, true);
 
+    state.storageWakeHandler = (event) => {
+      if (event?.storageArea !== localStorage) return;
+      if (event.key !== KEYS.FINISHER_CLOSE_SIGNAL && event.key !== KEYS.WORKFLOW_CLEANUP_REQUEST) return;
+      markExternalWake(event.key === KEYS.FINISHER_CLOSE_SIGNAL ? 'finisher-close' : 'workflow-cleanup');
+    };
+    window.addEventListener('storage', state.storageWakeHandler, true);
+
     setupFrontIdleReloadWatchdog();
 
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
@@ -271,6 +281,7 @@
     try { window.removeEventListener('beforeunload', state.persistHandler, true); } catch {}
     try { window.removeEventListener('pagehide', state.persistHandler, true); } catch {}
     try { document.removeEventListener('visibilitychange', state.visibilityPersistHandler, true); } catch {}
+    try { window.removeEventListener('storage', state.storageWakeHandler, true); } catch {}
     try { clearInterval(state.frontIdleInterval); } catch {}
     try { document.removeEventListener('click', state.frontIdleActivityHandler, true); } catch {}
     try { document.removeEventListener('keydown', state.frontIdleActivityHandler, true); } catch {}
@@ -455,6 +466,22 @@
     return signal && typeof signal === 'object' ? signal : null;
   }
 
+  function readWorkflowCleanupRequest() {
+    const request = readJson(KEYS.WORKFLOW_CLEANUP_REQUEST, null);
+    return request && typeof request === 'object' ? request : null;
+  }
+
+  function buildWorkflowCleanupRequestKey(request) {
+    return `${norm(request?.azId || request?.ticketId || '')}|${norm(request?.requestedAt || '')}`;
+  }
+
+  function markExternalWake(reason = 'external') {
+    state.externalWakeTick = Date.now();
+    if (reason) {
+      log(`Wake trigger noticed | ${reason}`, 'info');
+    }
+  }
+
   function consumeFinisherCloseSignal(ticketId) {
     const wantedId = norm(ticketId || '');
     const signal = readFinisherCloseSignal();
@@ -479,12 +506,50 @@
     return true;
   }
 
+  function consumeWorkflowCleanupRequest(ticketId) {
+    const wantedId = norm(ticketId || '');
+    const request = readWorkflowCleanupRequest();
+    if (!request || request.ready !== true) return false;
+
+    const requestId = norm(request.azId || request.ticketId || '');
+    const requestKey = buildWorkflowCleanupRequestKey(request);
+    const requestedAtMs = Date.parse(norm(request.requestedAt || ''));
+    if (!requestId || !requestKey) return false;
+
+    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) {
+      return false;
+    }
+
+    if (wantedId && requestId !== wantedId) return false;
+    if (readSession(SS_KEYS.LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED) === requestKey) return false;
+
+    writeSession(SS_KEYS.LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED, requestKey);
+    log(`Received workflow cleanup trigger | ${requestId}`, 'ok');
+    return true;
+  }
+
+  function consumeFinisherWakeTrigger(ticketId) {
+    if (consumeFinisherCloseSignal(ticketId)) return true;
+    if (consumeWorkflowCleanupRequest(ticketId)) return true;
+    return false;
+  }
+
   function nowIso() {
     return new Date().toISOString();
   }
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForWakeOrTimeout(ms) {
+    const wakeTick = state.externalWakeTick;
+    const end = Date.now() + ms;
+    while (state.running && !state.destroyed && Date.now() < end) {
+      if (state.externalWakeTick !== wakeTick) return true;
+      await sleep(Math.min(120, Math.max(0, end - Date.now())));
+    }
+    return state.running && !state.destroyed;
   }
 
   function norm(v) {
@@ -1033,9 +1098,7 @@
     let lastLogAt = 0;
 
     while (state.running && !state.destroyed) {
-      await waitUntilFrontStable(CFG.frontStableMs);
-
-      if (consumeFinisherCloseSignal(ticketId)) {
+      if (consumeFinisherWakeTrigger(ticketId)) {
         return true;
       }
 
@@ -1058,7 +1121,8 @@
         lastLogAt = now;
       }
 
-      await foregroundSleep(CFG.ticketClosePollMs);
+      const ok = await waitForWakeOrTimeout(CFG.ticketClosePollMs);
+      if (!ok) return false;
     }
 
     return false;
