@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.11
-// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
+// @version      1.0.12
+// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.11';
+  const VERSION = '1.0.12';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   const GM_KEYS = {
@@ -32,6 +32,7 @@
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
+    lexCloseConsumed: 'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
@@ -81,7 +82,8 @@
     mirrored: false,
     closeAttempted: false,
     closeAttempts: 0,
-    closeSignalKey: ''
+    closeSignalKey: '',
+    tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
   };
 
   init();
@@ -380,6 +382,18 @@
     return isPlainObject(value) ? value : null;
   }
 
+  function readLexCloseConsumedSignal() {
+    const value = readGM(GM_KEYS.lexCloseConsumed, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function readLexCloseClaimForSignal(signal) {
+    const signalKey = buildSignalKey(signal);
+    if (!signalKey) return null;
+    const value = readLexCloseConsumedSignal();
+    return buildSignalKey(value) === signalKey ? value : null;
+  }
+
   function isFreshCloseSignal(signal) {
     if (!isPlainObject(signal)) return false;
     const azId = norm(signal.azId || '');
@@ -388,6 +402,36 @@
     const postedMs = Date.parse(postedAt);
     if (!Number.isFinite(postedMs)) return false;
     return (Date.now() - postedMs) <= CFG.maxSignalAgeMs;
+  }
+
+  function isLexCloseConsumedForSignal(signal) {
+    return !!readLexCloseClaimForSignal(signal);
+  }
+
+  function isLexCloseConsumedByOtherTab(signal) {
+    const claim = readLexCloseClaimForSignal(signal);
+    return !!claim && norm(claim.claimedBy || '') !== state.tabId;
+  }
+
+  function claimLexCloseSignal(signal) {
+    if (!isLexHost()) return true;
+    const signalKey = buildSignalKey(signal);
+    if (!signalKey) return false;
+    const existing = readLexCloseClaimForSignal(signal);
+    if (existing) return norm(existing.claimedBy || '') === state.tabId;
+
+    writeGM(GM_KEYS.lexCloseConsumed, {
+      signalKey,
+      azId: norm(signal?.azId || ''),
+      postedAt: norm(signal?.postedAt || signal?.signalPostedAt || ''),
+      claimedAt: nowIso(),
+      claimedBy: state.tabId,
+      source: SCRIPT_NAME,
+      version: VERSION
+    });
+
+    const latest = readLexCloseConsumedSignal();
+    return buildSignalKey(latest) === signalKey && norm(latest?.claimedBy || '') === state.tabId;
   }
 
   function readyMatchesSignal(signal) {
@@ -801,10 +845,26 @@
     }, 350);
   }
 
-  function attemptClose() {
-    if (!state.activeSignal && !isFreshCloseSignal(readCloseSignal())) return;
+  function attemptClose(signal = null) {
+    const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
+    if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
+
+    const signalKey = buildSignalKey(effectiveSignal);
+    if (isLexHost()) {
+      if (!signalKey) return;
+      if (!claimLexCloseSignal(effectiveSignal)) {
+        state.closeAttempted = true;
+        writeSession(SS_KEYS.closeAttempted, '1');
+        markSignalHandled(signalKey);
+        log('LEX close already consumed for this signal');
+        setStatus('LEX close already consumed');
+        return;
+      }
+    }
+
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
+    if (signalKey) markSignalHandled(signalKey);
 
     state.closeAttempts += 1;
     log(`Attempting to close current non-AZ tab (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
@@ -885,7 +945,7 @@
       if (Date.now() >= state.countdownEndsAt) {
         publishCloseSignal(state.activeSignal || signal);
         if (closeSignalMatches(state.activeSignal || signal)) {
-          attemptClose();
+          attemptClose(state.activeSignal || signal);
         }
       }
     } else if (!isAzHost() && isFreshCloseSignal(closeSignal) && !state.closeAttempted) {
@@ -896,16 +956,34 @@
           postedAt: norm(closeSignal.postedAt || '')
         };
         state.activeSignalKey = signalKey;
+        state.closeAttempted = false;
+        state.closeAttempts = 0;
+      }
+      if (isLexHost() && isLexCloseConsumedByOtherTab(closeSignal)) {
+        state.closeAttempted = true;
+        writeSession(SS_KEYS.closeAttempted, '1');
+        markSignalHandled(signalKey);
+        setStatus('LEX close already consumed');
+        renderAll();
+        return;
       }
       log('Shared close signal received');
-      attemptClose();
+      attemptClose(closeSignal);
     } else if (!signal && isAzHost() && mirroredMeta?.azId) {
       setStatus('Mirrored payload available in AZ');
     } else if (!signal) {
       setStatus('Watching for webhook success');
     } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
+      if (isLexHost() && isLexCloseConsumedByOtherTab(state.activeSignal || signal)) {
+        state.closeAttempted = true;
+        writeSession(SS_KEYS.closeAttempted, '1');
+        markSignalHandled(buildSignalKey(state.activeSignal || signal));
+        setStatus('LEX close already consumed');
+        renderAll();
+        return;
+      }
       log('Shared close signal received');
-      attemptClose();
+      attemptClose(state.activeSignal || signal);
     }
 
     renderAll();
