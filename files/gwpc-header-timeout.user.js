@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.2.7
-// @description  Fresh GWPC timeout + saved-selector gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves timeout or selected errors into the shared GWPC bundle flow, and raises the shared webhook send signal without closing tabs.
+// @version      2.3.0
+// @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, has a persistent instant ON/OFF safety override for timeout actions, saves real timeout errors into the shared GWPC bundle flow, purges legacy selector rules/artifacts, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.2.7';
+  const VERSION = '2.3.0';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
@@ -52,6 +52,7 @@
     maxRuleText: 280,
     zIndex: 2147483647,
     panelWidth: 320,
+    selectorRulesEnabled: false,
     selectorOutlineColor: '#fca5a5',
     selectorFillColor: 'rgba(252,165,165,0.14)',
     observerThrottleMs: 60
@@ -135,6 +136,9 @@
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
     clearLegacyTimeoutProductPayloads();
+    clearLegacySelectorRules();
+    clearLegacySelectorSentEvents();
+    clearLegacySelectorBundleArtifacts();
     log(`Script started v${VERSION}`);
     log(`Origin: ${location.origin}`);
     log('Fresh timeout gatherer armed');
@@ -791,6 +795,163 @@
     }
   }
 
+  function savedSelectorRulesEnabled() {
+    return CFG.selectorRulesEnabled === true;
+  }
+
+  function isSelectorEvent(event) {
+    if (!isPlainObject(event)) return false;
+    const triggerType = normalizeText(event.triggerType || '').toLowerCase();
+    const errorType = normalizeText(event.errorType || '').toLowerCase();
+    const actionKey = normalizeText(event.actionKey || '').toLowerCase();
+    const selectorRuleId = normalizeText(event.selectorRuleId || '');
+    return triggerType === 'selector'
+      || errorType === 'savedselectormatch'
+      || actionKey.includes('saved_selector')
+      || (!!selectorRuleId && normalizeText(event.source || '') === SCRIPT_NAME);
+  }
+
+  function clearLegacySelectorRules() {
+    const parsed = safeJsonParse(localStorage.getItem(KEYS.selectorRules), []);
+    const rules = Array.isArray(parsed) ? parsed : [];
+    if (!rules.length) return 0;
+    try { localStorage.removeItem(KEYS.selectorRules); } catch {}
+    log(`Cleared ${rules.length} legacy saved selector rule(s)`);
+    return rules.length;
+  }
+
+  function clearLegacySelectorSentEvents() {
+    const store = readSentEventsStore();
+    const next = { byId: {}, byDedupeKey: {}, order: [] };
+    let removed = 0;
+
+    for (const eventId of Array.isArray(store.order) ? store.order : []) {
+      const record = isPlainObject(store.byId?.[eventId]) ? deepClone(store.byId[eventId]) : null;
+      if (!record) continue;
+      const source = normalizeText(record.source || '').toLowerCase();
+      const ruleId = normalizeText(record.ruleId || '');
+      if (source === 'selector' || ruleId) {
+        removed += 1;
+        continue;
+      }
+      next.byId[eventId] = record;
+      if (record.dedupeKey) next.byDedupeKey[record.dedupeKey] = eventId;
+      next.order.push(eventId);
+    }
+
+    if (!removed) return 0;
+    writeSentEventsStore(next);
+    log(`Cleared ${removed} legacy selector sent-event record(s)`);
+    return removed;
+  }
+
+  function clearFieldIfRemovedValue(container, fieldName, removedValues) {
+    if (!isPlainObject(container)) return false;
+    if (!removedValues.size) return false;
+    const current = normalizeText(container[fieldName] || '');
+    if (!current || !removedValues.has(current)) return false;
+    container[fieldName] = '';
+    return true;
+  }
+
+  function clearRemovedSelectorFields(container, product, removedEvents) {
+    if (!isPlainObject(container) || !Array.isArray(removedEvents) || !removedEvents.length) return false;
+    const removedValues = new Set(
+      removedEvents
+        .map((event) => normalizeText(event?.resultValue || event?.errorText || event?.errorMessage || ''))
+        .filter(Boolean)
+    );
+
+    let changed = false;
+    if (product === 'home') {
+      changed = clearFieldIfRemovedValue(container, 'Done?', removedValues) || changed;
+      changed = clearFieldIfRemovedValue(container, 'Result', removedValues) || changed;
+    } else if (product === 'auto') {
+      changed = clearFieldIfRemovedValue(container, 'Auto', removedValues) || changed;
+    }
+    return changed;
+  }
+
+  function clearSelectorArtifactsFromSection(section, product) {
+    if (!isPlainObject(section)) {
+      return { changed: false, removedCount: 0, nextSection: section };
+    }
+
+    const nextSection = deepClone(section);
+    nextSection.data = isPlainObject(nextSection.data) ? nextSection.data : {};
+
+    const currentErrors = Array.isArray(nextSection.data.errors) ? nextSection.data.errors : [];
+    const keptErrors = currentErrors.filter((event) => !isSelectorEvent(event));
+    const removedErrors = currentErrors.filter((event) => isSelectorEvent(event));
+
+    let changed = keptErrors.length !== currentErrors.length;
+    if (changed) {
+      if (keptErrors.length) nextSection.data.errors = keptErrors;
+      else delete nextSection.data.errors;
+    }
+
+    if (isSelectorEvent(nextSection.data.latestError)) {
+      changed = true;
+      if (keptErrors.length) nextSection.data.latestError = deepClone(keptErrors[keptErrors.length - 1]);
+      else delete nextSection.data.latestError;
+    }
+
+    changed = clearRemovedSelectorFields(nextSection.data, product, removedErrors) || changed;
+    if (isPlainObject(nextSection.data.row)) {
+      changed = clearRemovedSelectorFields(nextSection.data.row, product, removedErrors) || changed;
+    }
+
+    return {
+      changed,
+      removedCount: removedErrors.length,
+      nextSection
+    };
+  }
+
+  function clearLegacySelectorBundleArtifacts() {
+    const bundle = readBundle();
+    if (!isPlainObject(bundle)) return 0;
+
+    const next = deepClone(bundle);
+    let changed = false;
+    let removedCount = 0;
+
+    for (const product of ['home', 'auto']) {
+      const result = clearSelectorArtifactsFromSection(next[product], product);
+      if (result.changed) {
+        next[product] = result.nextSection;
+        changed = true;
+      }
+      removedCount += result.removedCount;
+    }
+
+    const timeoutEvents = Array.isArray(next.timeout?.events) ? next.timeout.events : [];
+    const keptTimeoutEvents = timeoutEvents.filter((event) => !isSelectorEvent(event));
+    const removedTimeoutEvents = timeoutEvents.length - keptTimeoutEvents.length;
+    const removedTimeoutLastEvent = isSelectorEvent(next.timeout?.lastEvent);
+    if (removedTimeoutEvents || removedTimeoutLastEvent) {
+      next.timeout = isPlainObject(next.timeout) ? next.timeout : {};
+      next.timeout.events = keptTimeoutEvents;
+      next.timeout.ready = keptTimeoutEvents.length > 0;
+      if (removedTimeoutLastEvent) {
+        if (keptTimeoutEvents.length) next.timeout.lastEvent = deepClone(keptTimeoutEvents[keptTimeoutEvents.length - 1]);
+        else delete next.timeout.lastEvent;
+      }
+      changed = true;
+      removedCount += removedTimeoutEvents + (removedTimeoutLastEvent ? 1 : 0);
+    }
+
+    if (!changed) return 0;
+
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.updatedAt = nowIso();
+    next.meta.lastWriter = SCRIPT_NAME;
+    next.meta.version = VERSION;
+    writeBundle(next);
+    log(`Cleared ${removedCount} legacy selector bundle artifact(s)`);
+    return removedCount;
+  }
+
   function buildSignatureJobBundle(job, bundle) {
     const sigObj = {
       'AZ ID': job['AZ ID'] || '',
@@ -1396,6 +1557,7 @@
   }
 
   function getSelectorRules() {
+    if (!savedSelectorRulesEnabled()) return [];
     const parsed = safeJsonParse(localStorage.getItem(KEYS.selectorRules), []);
     const list = Array.isArray(parsed) ? parsed : [];
     const normalized = list.map(normalizeRule).filter(Boolean);
@@ -1403,6 +1565,12 @@
   }
 
   function saveSelectorRules(rules) {
+    if (!savedSelectorRulesEnabled()) {
+      try { localStorage.removeItem(KEYS.selectorRules); } catch {}
+      renderManageRulesModal();
+      renderAll();
+      return;
+    }
     localStorage.setItem(KEYS.selectorRules, JSON.stringify(rules, null, 2));
     renderManageRulesModal();
     renderAll();
@@ -1562,6 +1730,13 @@
   }
 
   function startSelectorMode() {
+    if (!savedSelectorRulesEnabled()) {
+      log('Saved selector rules are disabled in this version');
+      setStatus(state.running ? 'Watching header' : 'Stopped');
+      renderButtons();
+      renderAll();
+      return;
+    }
     if (state.selectorMode || state.modalOpen) return;
 
     publishSelectorPause();
@@ -1589,6 +1764,10 @@
   }
 
   function openSaveRuleModal(target) {
+    if (!savedSelectorRulesEnabled()) {
+      closeSelectorSession('Saved selector rules are disabled in this version');
+      return;
+    }
     if (!(target instanceof Element)) return;
 
     state.selectorMode = false;
@@ -1777,6 +1956,14 @@
   }
 
   function openManageRulesModal() {
+    if (!savedSelectorRulesEnabled()) {
+      const removed = clearLegacySelectorRules();
+      log(removed ? 'Saved selector rules are disabled. Legacy rules were cleared.' : 'Saved selector rules are disabled in this version');
+      setStatus(state.running ? 'Watching header' : 'Stopped');
+      renderButtons();
+      renderAll();
+      return;
+    }
     if (state.manageRulesOpen) return;
     if (state.selectorMode || state.modalOpen) {
       closeSelectorSession('', { logIt: false, restorePause: true });
@@ -1838,14 +2025,18 @@
     const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
     const current = buildElementFingerprint(el);
 
-    if (fingerprint.id && current.id && fingerprint.id === current.id) return true;
-
     let required = 0;
     let score = 0;
+    let textRequired = false;
+    let textMatches = false;
 
     if (fingerprint.tag) {
       required += 1;
       if (fingerprint.tag === current.tag) score += 1;
+    }
+    if (fingerprint.id) {
+      required += 1;
+      if (fingerprint.id === current.id) score += 1;
     }
     if (fingerprint.name) {
       required += 1;
@@ -1867,16 +2058,19 @@
     }
     if (fingerprint.textFingerprint) {
       required += 1;
+      textRequired = true;
       const savedText = normalizeText(fingerprint.textFingerprint);
       const currentText = normalizeText(current.textFingerprint);
       if (savedText && currentText && (currentText.includes(savedText) || savedText.includes(currentText))) {
         score += 1;
+        textMatches = true;
       }
     }
 
-    if (required === 0) return true;
+    if (textRequired && !textMatches) return false;
+    if (required === 0) return false;
     if (required === 1) return score === 1;
-    return score >= 2;
+    return score === required || (required >= 3 && score >= (required - 1));
   }
 
   function findRuleMatch(rule) {
@@ -1894,6 +2088,7 @@
   }
 
   function processSelectorMatches() {
+    if (!savedSelectorRulesEnabled()) return;
     const context = buildEventContext();
     if (!context.ok) return;
 
@@ -2023,6 +2218,13 @@
     };
 
     state.els.selector.onclick = () => {
+      if (!savedSelectorRulesEnabled()) {
+        log('Saved selector rules are disabled in this version');
+        setStatus(state.running ? 'Watching header' : 'Stopped');
+        renderButtons();
+        renderAll();
+        return;
+      }
       if (state.selectorMode || state.modalOpen) {
         closeSelectorSession('Selector canceled');
       } else {
@@ -2031,6 +2233,14 @@
     };
 
     state.els.manageRules.onclick = () => {
+      if (!savedSelectorRulesEnabled()) {
+        const removed = clearLegacySelectorRules();
+        log(removed ? 'Saved selector rules are disabled. Legacy rules were cleared.' : 'Saved selector rules are disabled in this version');
+        setStatus(state.running ? 'Watching header' : 'Stopped');
+        renderButtons();
+        renderAll();
+        return;
+      }
       if (state.manageRulesOpen) {
         closeManageRulesModal('Rule manager closed');
       } else {
@@ -2056,20 +2266,40 @@
     }
 
     if (state.els.selector) {
-      state.els.selector.textContent = state.selectorMode || state.modalOpen ? 'CANCEL SELECTOR' : 'SELECTOR MODE';
-      state.els.selector.style.background = state.selectorMode || state.modalOpen ? '#f59e0b' : '#0891b2';
-      state.els.selector.disabled = false;
-      state.els.selector.style.opacity = '1';
-      state.els.selector.style.cursor = 'pointer';
+      if (!savedSelectorRulesEnabled()) {
+        state.els.selector.textContent = 'SELECTOR DISABLED';
+        state.els.selector.style.background = '#475569';
+        state.els.selector.disabled = true;
+        state.els.selector.style.opacity = '.75';
+        state.els.selector.style.cursor = 'not-allowed';
+      } else {
+        state.els.selector.textContent = state.selectorMode || state.modalOpen ? 'CANCEL SELECTOR' : 'SELECTOR MODE';
+        state.els.selector.style.background = state.selectorMode || state.modalOpen ? '#f59e0b' : '#0891b2';
+        state.els.selector.disabled = false;
+        state.els.selector.style.opacity = '1';
+        state.els.selector.style.cursor = 'pointer';
+      }
     }
 
     if (state.els.manageRules) {
-      const ruleCount = getSelectorRules().length;
-      state.els.manageRules.textContent = state.manageRulesOpen
-        ? 'CLOSE RULES'
-        : `MANAGE RULES${ruleCount ? ` (${ruleCount})` : ''}`;
-      state.els.manageRules.style.background = state.manageRulesOpen ? '#f59e0b' : '#7c3aed';
-      state.els.manageRules.style.color = '#fff';
+      if (!savedSelectorRulesEnabled()) {
+        state.els.manageRules.textContent = 'RULES DISABLED';
+        state.els.manageRules.style.background = '#334155';
+        state.els.manageRules.style.color = '#cbd5e1';
+        state.els.manageRules.disabled = true;
+        state.els.manageRules.style.opacity = '.75';
+        state.els.manageRules.style.cursor = 'not-allowed';
+      } else {
+        const ruleCount = getSelectorRules().length;
+        state.els.manageRules.textContent = state.manageRulesOpen
+          ? 'CLOSE RULES'
+          : `MANAGE RULES${ruleCount ? ` (${ruleCount})` : ''}`;
+        state.els.manageRules.style.background = state.manageRulesOpen ? '#f59e0b' : '#7c3aed';
+        state.els.manageRules.style.color = '#fff';
+        state.els.manageRules.disabled = false;
+        state.els.manageRules.style.opacity = '1';
+        state.els.manageRules.style.cursor = 'pointer';
+      }
     }
 
   }
