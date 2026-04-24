@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.8
+// @version      1.0.9
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.8';
+  const VERSION = '1.0.9';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
 
@@ -176,6 +176,24 @@
       return parsed == null ? localValue : parsed;
     } catch {
       return localValue;
+    }
+  }
+
+  function readLocalOnly(key, fallback = null) {
+    try {
+      const value = readJson(localStorage.getItem(key), fallback);
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function readGmOnly(key, fallback = null) {
+    try {
+      const value = readJson(GM_getValue(key, undefined), fallback);
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
     }
   }
 
@@ -403,9 +421,13 @@
   }
 
   function getFinalPayload() {
-    const ready = readGM(GM_KEYS.finalReady, null);
-    const payload = readGM(GM_KEYS.finalPayload, null);
+    const localPayload = readLocalOnly(GM_KEYS.finalPayload, null);
+    const gmPayload = readGmOnly(GM_KEYS.finalPayload, null);
+    const payload = isPlainObject(localPayload) && norm(localPayload.azId || '') ? localPayload : gmPayload;
     if (!isPlainObject(payload)) return null;
+    const localReady = readLocalOnly(GM_KEYS.finalReady, null);
+    const gmReady = readGmOnly(GM_KEYS.finalReady, null);
+    const ready = isPlainObject(localReady) && (localReady.ready === true || norm(localReady.azId || '')) ? localReady : gmReady;
     const readyLike = isPlainObject(ready) ? ready : {};
     const readyOk = readyLike.ready === true;
     const azId = norm(payload.azId || readyLike.azId || '');
