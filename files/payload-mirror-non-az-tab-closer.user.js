@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.6
+// @version      1.0.7
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ GWPC/LEX tabs from the shared close signal while leaving AgencyZoom available and showing mirrored payload state correctly on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
@@ -254,10 +254,12 @@
     const ready = readGM(GM_KEYS.finalReady, null);
     const azId = norm(payload?.azId || ready?.azId || '');
     const savedAt = norm(payload?.savedAt || ready?.savedAt || '');
+    const signalPostedAt = norm(payload?.signalPostedAt || ready?.signalPostedAt || '');
     if (!azId) return null;
     return {
       azId,
       savedAt,
+      signalPostedAt,
       ready: ready?.ready === true
     };
   }
@@ -280,7 +282,59 @@
   function readyMatchesSignal(signal) {
     const ready = readReadySignal();
     if (!ready || ready.ready !== true) return false;
-    return norm(ready.azId || '') === norm(signal?.azId || '');
+    return buildSignalKey(ready) === buildSignalKey(signal);
+  }
+
+  function countFilledKeys(value, keys) {
+    if (!isPlainObject(value)) return 0;
+    let count = 0;
+    for (const key of keys) {
+      if (norm(value[key] || '')) count += 1;
+    }
+    return count;
+  }
+
+  function scoreMirroredPayload(payload) {
+    if (!isPlainObject(payload)) return -1;
+    const bundle = isPlainObject(payload.bundle) ? payload.bundle : {};
+    const homePayload = isPlainObject(payload.homePayload) ? payload.homePayload : {};
+    const autoPayload = isPlainObject(payload.autoPayload) ? payload.autoPayload : {};
+    const homeData = isPlainObject(bundle.home?.data) ? bundle.home.data : homePayload;
+    const autoData = isPlainObject(bundle.auto?.data) ? bundle.auto.data : autoPayload;
+    const homeRow = isPlainObject(homeData?.row) ? homeData.row : {};
+    const autoRow = isPlainObject(autoData?.row) ? autoData.row : {};
+    const scoreKeysHome = [
+      'CFP?',
+      'Reconstruction Cost',
+      'Year Built',
+      'Square FT',
+      '# of Story',
+      'Water Device?',
+      'Standard Pricing No Auto Discount',
+      'Enhance Pricing No Auto Discount',
+      'Standard Pricing Auto Discount',
+      'Enhance Pricing Auto Discount',
+      'Submission Number',
+      'Done?'
+    ];
+    const scoreKeysAuto = [
+      'Auto',
+      'Submission Number (Auto)',
+      'Total Policy Premium',
+      'PrimaryInsuredName',
+      'PA_All_Coverages'
+    ];
+
+    let score = 0;
+    if (norm(payload.currentJob?.['SubmissionNumber'] || '')) score += 5;
+    if (bundle.home?.ready === true || homePayload.ready === true) score += 20;
+    if (bundle.auto?.ready === true || autoPayload.ready === true) score += 20;
+    score += countFilledKeys(homeRow, scoreKeysHome) * 3;
+    score += countFilledKeys(autoRow, scoreKeysAuto) * 4;
+    if (Array.isArray(autoPayload.drivers) && autoPayload.drivers.length) score += 4;
+    if (Array.isArray(autoPayload.vehicles) && autoPayload.vehicles.length) score += 4;
+    if (Array.isArray(bundle.timeout?.events) && bundle.timeout.events.length) score += 2;
+    return score;
   }
 
   function collectGwpcPayloads(signal) {
@@ -306,6 +360,8 @@
     return {
       azId: norm(signal?.azId || currentJob?.['AZ ID'] || bundle?.['AZ ID'] || homePayload?.['AZ ID'] || autoPayload?.['AZ ID'] || ''),
       savedAt: nowIso(),
+      signalPostedAt: norm(signal?.postedAt || ''),
+      signalKey: buildSignalKey(signal),
       source: 'GWPC',
       currentJob: isPlainObject(currentJob) ? currentJob : {},
       bundle: isPlainObject(bundle) ? bundle : {},
@@ -336,11 +392,34 @@
       return false;
     }
 
+    const existing = readGM(GM_KEYS.finalPayload, null);
+    const existingKey = norm(existing?.signalKey || '');
+    const nextKey = norm(payload.signalKey || '');
+    if (isPlainObject(existing) && norm(existing.azId || '') === payload.azId) {
+      const existingSignalMs = Date.parse(norm(existing.signalPostedAt || ''));
+      const nextSignalMs = Date.parse(norm(payload.signalPostedAt || ''));
+      if (existingKey && nextKey && existingKey === nextKey) {
+        const existingScore = scoreMirroredPayload(existing);
+        const nextScore = scoreMirroredPayload(payload);
+        if (nextScore < existingScore) {
+          log(`Mirror skipped: existing payload score ${existingScore} is better than ${nextScore}`);
+          state.mirrored = true;
+          return false;
+        }
+      } else if (Number.isFinite(existingSignalMs) && Number.isFinite(nextSignalMs) && existingSignalMs > nextSignalMs) {
+        log('Mirror skipped: existing payload is from a newer webhook success');
+        state.mirrored = true;
+        return false;
+      }
+    }
+
     writeGM(GM_KEYS.finalPayload, payload);
     writeGM(GM_KEYS.finalReady, {
       ready: true,
       azId: payload.azId,
-      savedAt: payload.savedAt
+      savedAt: payload.savedAt,
+      signalPostedAt: payload.signalPostedAt,
+      signalKey: payload.signalKey
     });
 
     state.mirrored = true;
