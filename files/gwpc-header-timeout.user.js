@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.6
+// @version      2.3.7
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.6';
+  const VERSION = '2.3.7';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -56,7 +56,8 @@
     watchPending: 'tm_pc_header_timeout_watch_pending_v1',
     selectorRuleTombstones: 'tm_pc_header_timeout_selector_rule_tombstones_v1',
     sharedRulesClientId: 'tm_pc_header_timeout_shared_rules_client_id_v1',
-    watchAlertWebhookUrl: 'tm_pc_header_timeout_watch_alert_webhook_url_v1'
+    watchAlertWebhookUrl: 'tm_pc_header_timeout_watch_alert_webhook_url_v1',
+    timeoutTextWebhookUrl: 'tm_pc_header_timeout_text_webhook_url_v1'
   };
 
   const CFG = {
@@ -87,6 +88,7 @@
     timeoutEnabled: true,
     watchModeEnabled: false,
     watchAlertWebhookBusy: false,
+    timeoutTextWebhookBusy: false,
     logs: [],
     els: {},
     panel: null,
@@ -125,10 +127,12 @@
     sharedRulesSyncQueued: false,
     lastSharedRulesSyncError: '',
     savedWatchAlertWebhookUrl: '',
+    savedTimeoutTextWebhookUrl: '',
     lastScanAt: 0,
     lastRuntimePersistKey: '',
     pausedAtMs: 0,
-    frozenElapsedMs: 0
+    frozenElapsedMs: 0,
+    timeoutDispatchInFlightKey: ''
   };
 
   boot();
@@ -168,6 +172,7 @@
     state.timeoutEnabled = true;
     state.watchModeEnabled = readWatchModeEnabled();
     hydrateWatchAlertWebhookStorage();
+    hydrateTimeoutTextWebhookStorage();
     restoreStaleSelectorPause();
     clearOwnedSendArtifacts();
     clearLegacyTimeoutProductPayloads();
@@ -222,6 +227,7 @@
     setStatus('Watching header');
     syncWatchAlertFromStorage();
     syncWatchAlertWebhookUi();
+    syncTimeoutTextWebhookUi();
     renderAll();
   }
 
@@ -242,6 +248,7 @@
     try { document.removeEventListener('visibilitychange', handleVisibilityChange, true); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { persistWatchAlertWebhookFromUi(false); } catch {}
+    try { persistTimeoutTextWebhookFromUi(false); } catch {}
 
     closeSelectorSession('', { logIt: false, restorePause: true });
     closeManageRulesModal('', { logIt: false });
@@ -395,6 +402,30 @@
     if (value.length <= max) return value;
     const part = Math.max(12, Math.floor((max - 3) / 2));
     return `${value.slice(0, part)}...${value.slice(-part)}`;
+  }
+
+  function normalizeScreenText(value) {
+    const raw = String(value == null ? '' : value)
+      .replace(/\u00A0/g, ' ')
+      .replace(/\r/g, '');
+    const lines = raw
+      .split('\n')
+      .map((line) => line.replace(/[ \t]+/g, ' ').trim());
+
+    const out = [];
+    let lastBlank = false;
+    for (const line of lines) {
+      if (!line) {
+        if (!lastBlank && out.length) {
+          out.push('');
+        }
+        lastBlank = true;
+        continue;
+      }
+      out.push(line);
+      lastBlank = false;
+    }
+    return out.join('\n').trim();
   }
 
   function log(message) {
@@ -574,6 +605,83 @@
     updateWatchAlertWebhookActiveUi(saved);
     if (withLog && saved !== before) {
       log(saved ? 'Watch alert webhook URL saved' : 'Watch alert webhook URL cleared');
+    }
+    return saved;
+  }
+
+  function readTimeoutTextWebhookUrlFromGM() {
+    try {
+      return normalizeText(GM_getValue(KEYS.timeoutTextWebhookUrl, ''));
+    } catch {
+      return '';
+    }
+  }
+
+  function readTimeoutTextWebhookUrlFromLocal() {
+    try {
+      return normalizeText(localStorage.getItem(KEYS.timeoutTextWebhookUrl) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function mirrorTimeoutTextWebhookUrl(url) {
+    const normalized = normalizeText(url);
+    try { GM_setValue(KEYS.timeoutTextWebhookUrl, normalized); } catch {}
+    try { localStorage.setItem(KEYS.timeoutTextWebhookUrl, normalized); } catch {}
+    try { sessionStorage.setItem(KEYS.timeoutTextWebhookUrl, normalized); } catch {}
+    state.savedTimeoutTextWebhookUrl = normalized;
+    return normalized;
+  }
+
+  function hydrateTimeoutTextWebhookStorage() {
+    const gmUrl = readTimeoutTextWebhookUrlFromGM();
+    const localUrl = readTimeoutTextWebhookUrlFromLocal();
+    const resolved = gmUrl || localUrl || '';
+    if (resolved) mirrorTimeoutTextWebhookUrl(resolved);
+    else state.savedTimeoutTextWebhookUrl = '';
+  }
+
+  function getTimeoutTextWebhookUrl() {
+    const gmUrl = readTimeoutTextWebhookUrlFromGM();
+    const localUrl = readTimeoutTextWebhookUrlFromLocal();
+    const resolved = gmUrl || localUrl || state.savedTimeoutTextWebhookUrl || '';
+    if (resolved && (gmUrl !== resolved || localUrl !== resolved || state.savedTimeoutTextWebhookUrl !== resolved)) {
+      mirrorTimeoutTextWebhookUrl(resolved);
+    } else {
+      state.savedTimeoutTextWebhookUrl = resolved;
+    }
+    return resolved;
+  }
+
+  function getCurrentTimeoutTextWebhookUrlFromUi() {
+    const uiValue = normalizeText(state.els.timeoutTextWebhookUrl?.value || '');
+    return uiValue || getTimeoutTextWebhookUrl();
+  }
+
+  function updateTimeoutTextWebhookActiveUi(url) {
+    const current = normalizeText(url);
+    if (state.els.timeoutTextWebhookActive) {
+      state.els.timeoutTextWebhookActive.textContent = current ? truncateMiddle(current, 110) : '(empty)';
+      state.els.timeoutTextWebhookActive.title = current || '';
+    }
+  }
+
+  function syncTimeoutTextWebhookUi() {
+    const url = getTimeoutTextWebhookUrl();
+    if (state.els.timeoutTextWebhookUrl && state.els.timeoutTextWebhookUrl.value !== url) {
+      state.els.timeoutTextWebhookUrl.value = url;
+    }
+    updateTimeoutTextWebhookActiveUi(url);
+  }
+
+  function persistTimeoutTextWebhookFromUi(withLog = false) {
+    const current = normalizeText(state.els.timeoutTextWebhookUrl?.value || '');
+    const before = getTimeoutTextWebhookUrl();
+    const saved = mirrorTimeoutTextWebhookUrl(current);
+    updateTimeoutTextWebhookActiveUi(saved);
+    if (withLog && saved !== before) {
+      log(saved ? 'Timeout text webhook URL saved' : 'Timeout text webhook URL cleared');
     }
     return saved;
   }
@@ -1315,12 +1423,14 @@
       restoreSelectorPause();
     }
     try { persistWatchAlertWebhookFromUi(false); } catch {}
+    try { persistTimeoutTextWebhookFromUi(false); } catch {}
     persistPanelPos();
   }
 
   function handleVisibilityChange() {
     if (document.visibilityState === 'hidden') {
       try { persistWatchAlertWebhookFromUi(false); } catch {}
+      try { persistTimeoutTextWebhookFromUi(false); } catch {}
       return;
     }
     if (document.visibilityState === 'visible') {
@@ -1697,6 +1807,78 @@
     };
   }
 
+  function captureSelectableScreenText(maxChars = 50000) {
+    const docs = getAllDocs();
+    const blocks = [];
+    const seen = new Set();
+
+    for (const doc of docs) {
+      let raw = '';
+      try {
+        raw = String(doc?.body?.innerText || doc?.documentElement?.innerText || '');
+      } catch {}
+      const text = normalizeScreenText(raw);
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+
+      let urlLabel = '';
+      try {
+        const docUrl = normalizeText(doc?.location?.href || doc?.URL || '');
+        if (docUrl && docUrl !== normalizeText(location.href)) {
+          urlLabel = `URL: ${docUrl}\n`;
+        }
+      } catch {}
+
+      blocks.push(`${urlLabel}${text}`);
+    }
+
+    const joined = blocks.join('\n\n-----\n\n').trim();
+    if (!joined) {
+      return {
+        text: '',
+        length: 0,
+        truncated: false
+      };
+    }
+
+    if (joined.length <= maxChars) {
+      return {
+        text: joined,
+        length: joined.length,
+        truncated: false
+      };
+    }
+
+    const suffix = '\n\n[truncated]';
+    return {
+      text: `${joined.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`,
+      length: joined.length,
+      truncated: true
+    };
+  }
+
+  function buildTimeoutTextWebhookBody(event, context, options = {}) {
+    const test = options.test === true;
+    const snapshot = captureSelectableScreenText(50000);
+    return {
+      message: test ? 'GWPC timeout text snapshot test' : normalizeText(event?.errorText || 'Header timeout'),
+      event: test ? 'gwpc_timeout_text_snapshot_test' : 'gwpc_timeout_text_snapshot',
+      test,
+      source: SCRIPT_NAME,
+      version: VERSION,
+      azId: normalizeText(context?.job?.['AZ ID'] || event?.identity?.['AZ ID'] || ''),
+      product: normalizeText(context?.productLabel || context?.product || event?.productLabel || event?.product || ''),
+      header: normalizeText(context?.header || event?.headerText || ''),
+      submissionNumber: normalizeText(context?.submission || event?.submissionNumber || ''),
+      detectedAt: normalizeText(event?.detectedAt || nowIso()),
+      url: location.href,
+      title: document.title,
+      screenText: snapshot.text,
+      screenTextLength: snapshot.length,
+      screenTextTruncated: snapshot.truncated
+    };
+  }
+
   function updatePendingWatchPostAlertState(patch) {
     const current = readPendingWatchPost();
     if (!current) return null;
@@ -1784,6 +1966,95 @@
     if (!isPlainObject(record?.event)) return;
     if (normalizeText(record.alertWebhookSentAt || '')) return;
     sendWatchAlertWebhook(record, { test: false }).catch(() => {});
+  }
+
+  async function sendTimeoutTextWebhookSnapshot(event, context, options = {}) {
+    if (state.timeoutTextWebhookBusy) {
+      if (options.test === true) log('Timeout text webhook test skipped: already busy');
+      return false;
+    }
+
+    const endpoint = options.url || getCurrentTimeoutTextWebhookUrlFromUi();
+    if (!isValidHttpUrl(endpoint)) {
+      if (options.test === true) {
+        setStatus('Text webhook missing');
+        log('Timeout text webhook test failed: webhook URL missing or invalid');
+        renderButtons();
+        renderAll();
+      }
+      return false;
+    }
+
+    persistTimeoutTextWebhookFromUi(false);
+
+    state.timeoutTextWebhookBusy = true;
+    renderButtons();
+    if (options.test === true) {
+      setStatus('Sending text test...');
+      log(`TEST TEXT POST ${endpoint}`);
+    }
+
+    try {
+      const res = await gmPostJson(endpoint, buildTimeoutTextWebhookBody(event, context, options), 8000);
+      const raw = typeof res?.responseText === 'string' ? res.responseText : '';
+      const json = safeJsonParse(raw, null);
+      if (Number(res?.status || 0) < 200 || Number(res?.status || 0) >= 400) {
+        throw new Error(`HTTP ${res.status}${raw ? ` | ${raw.slice(0, 300)}` : ''}`);
+      }
+      if (json && json.ok === false) {
+        throw new Error(json.error || json.message || 'Receiver returned ok:false');
+      }
+
+      if (options.test === true) {
+        setStatus('Text test sent');
+        log('Timeout text webhook test success');
+      } else {
+        log('Timeout text webhook sent');
+      }
+      return true;
+    } catch (err) {
+      const message = normalizeText(err?.message || err || 'Timeout text webhook failed') || 'Timeout text webhook failed';
+      if (options.test === true) {
+        setStatus('Text test failed');
+        log(`Timeout text webhook test failed: ${message}`);
+      } else {
+        log(`Timeout text webhook failed: ${message}`);
+      }
+      return false;
+    } finally {
+      state.timeoutTextWebhookBusy = false;
+      renderButtons();
+      renderAll();
+    }
+  }
+
+  function queueTimeoutTextWebhookThenDispatch(event, context) {
+    const dedupeKey = normalizeText(event?.dedupeKey || '');
+    if (dedupeKey && state.timeoutDispatchInFlightKey === dedupeKey) return;
+    state.timeoutDispatchInFlightKey = dedupeKey;
+
+    (async () => {
+      try {
+        await sendTimeoutTextWebhookSnapshot(event, context, { test: false });
+      } catch {}
+      try {
+        dispatchEvent(event, context);
+      } finally {
+        if (!dedupeKey || state.timeoutDispatchInFlightKey === dedupeKey) {
+          state.timeoutDispatchInFlightKey = '';
+        }
+        renderButtons();
+        renderAll();
+      }
+    })().catch((err) => {
+      log(`Timeout dispatch queue failed: ${err?.message || err}`);
+      if (!dedupeKey || state.timeoutDispatchInFlightKey === dedupeKey) {
+        state.timeoutDispatchInFlightKey = '';
+      }
+      dispatchEvent(event, context);
+      renderButtons();
+      renderAll();
+    });
   }
 
   function closeWatchAlert(message = '', options = {}) {
@@ -1935,7 +2206,7 @@
       return;
     }
 
-    dispatchEvent(event);
+    queueTimeoutTextWebhookThenDispatch(event, context);
   }
 
   function sharedRulesSyncEnabled() {
@@ -3104,6 +3375,7 @@
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">WATCH MODE OFF</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-push" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#991b1b;color:#fff;font-weight:800;cursor:pointer;">PUSH WATCH PAYLOAD</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-test" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">TEST ALERT</button>
+          <button ${UI_MARKER_ATTR}="1" id="tm-timeout-text-webhook-test" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">TEST TEXT WEBHOOK</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-selector" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SELECTOR MODE</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-manage-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">MANAGE RULES</button>
           <button ${UI_MARKER_ATTR}="1" id="tm-timeout-sync-rules" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SYNC NOW</button>
@@ -3115,6 +3387,14 @@
           <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:44px 1fr;gap:5px 8px;">
             <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Active</div>
             <div ${UI_MARKER_ATTR}="1" id="tm-timeout-watch-alert-webhook-active" style="word-break:break-all;">(empty)</div>
+          </div>
+        </div>
+        <div ${UI_MARKER_ATTR}="1" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px;">
+          <div ${UI_MARKER_ATTR}="1" style="opacity:.75;font-size:11px;">Timeout Text Webhook</div>
+          <input ${UI_MARKER_ATTR}="1" id="tm-timeout-text-webhook-url" type="text" spellcheck="false" placeholder="https://your-webhook.example/..." style="width:100%;border:1px solid #374151;border-radius:10px;background:#0b1220;color:#f9fafb;padding:8px 10px;" />
+          <div ${UI_MARKER_ATTR}="1" style="display:grid;grid-template-columns:44px 1fr;gap:5px 8px;">
+            <div ${UI_MARKER_ATTR}="1" style="opacity:.75;">Active</div>
+            <div ${UI_MARKER_ATTR}="1" id="tm-timeout-text-webhook-active" style="word-break:break-all;">(empty)</div>
           </div>
         </div>
         <div ${UI_MARKER_ATTR}="1" id="tm-timeout-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching header</div>
@@ -3145,6 +3425,9 @@
     state.els.watchAlertTest = $('#tm-timeout-watch-alert-test', panel);
     state.els.watchAlertWebhookUrl = $('#tm-timeout-watch-alert-webhook-url', panel);
     state.els.watchAlertWebhookActive = $('#tm-timeout-watch-alert-webhook-active', panel);
+    state.els.timeoutTextTest = $('#tm-timeout-text-webhook-test', panel);
+    state.els.timeoutTextWebhookUrl = $('#tm-timeout-text-webhook-url', panel);
+    state.els.timeoutTextWebhookActive = $('#tm-timeout-text-webhook-active', panel);
     state.els.selector = $('#tm-timeout-selector', panel);
     state.els.manageRules = $('#tm-timeout-manage-rules', panel);
     state.els.syncRules = $('#tm-timeout-sync-rules', panel);
@@ -3236,6 +3519,38 @@
       renderAll();
     };
 
+    state.els.timeoutTextTest.onclick = () => {
+      const context = buildEventContext();
+      const fallbackContext = context.ok ? context : {
+        ok: true,
+        job: { 'AZ ID': state.current.azId || '' },
+        identity: {},
+        product: state.current.product || '',
+        productLabel: state.current.productLabel || '',
+        header: state.current.header || '',
+        headerSinceMs: Number(state.current.headerSinceMs || Date.now()),
+        submission: state.current.submission || ''
+      };
+      const testEvent = {
+        detectedAt: nowIso(),
+        errorText: 'Header timeout text snapshot test',
+        product: fallbackContext.product || '',
+        productLabel: fallbackContext.productLabel || '',
+        headerText: fallbackContext.header || '',
+        submissionNumber: fallbackContext.submission || '',
+        identity: {
+          'AZ ID': fallbackContext.job?.['AZ ID'] || ''
+        }
+      };
+      sendTimeoutTextWebhookSnapshot(testEvent, fallbackContext, { test: true }).catch(() => {});
+    };
+
+    state.els.timeoutTextWebhookUrl.onchange = () => {
+      persistTimeoutTextWebhookFromUi(true);
+      renderButtons();
+      renderAll();
+    };
+
     state.els.selector.onclick = () => {
       if (!savedSelectorRulesEnabled()) {
         log('Saved selector rules are disabled in this version');
@@ -3275,6 +3590,7 @@
     state.els.copyLogs.onclick = () => copyLogsToClipboard();
 
     syncWatchAlertWebhookUi();
+    syncTimeoutTextWebhookUi();
     renderButtons();
     renderAll();
   }
@@ -3314,6 +3630,17 @@
       state.els.watchAlertTest.style.color = hasUrl ? '#fff' : '#cbd5e1';
       state.els.watchAlertTest.style.opacity = enabled || state.watchAlertWebhookBusy ? '1' : '.75';
       state.els.watchAlertTest.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    }
+
+    if (state.els.timeoutTextTest) {
+      const hasUrl = isValidHttpUrl(getCurrentTimeoutTextWebhookUrlFromUi());
+      const enabled = !state.timeoutTextWebhookBusy && hasUrl;
+      state.els.timeoutTextTest.textContent = state.timeoutTextWebhookBusy ? 'SENDING TEXT...' : 'TEST TEXT WEBHOOK';
+      state.els.timeoutTextTest.disabled = !enabled;
+      state.els.timeoutTextTest.style.background = state.timeoutTextWebhookBusy ? '#0f766e' : (hasUrl ? '#0f766e' : '#334155');
+      state.els.timeoutTextTest.style.color = hasUrl ? '#fff' : '#cbd5e1';
+      state.els.timeoutTextTest.style.opacity = enabled || state.timeoutTextWebhookBusy ? '1' : '.75';
+      state.els.timeoutTextTest.style.cursor = enabled ? 'pointer' : 'not-allowed';
     }
 
     if (state.els.selector) {
