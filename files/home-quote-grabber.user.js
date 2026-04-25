@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.9
+// @version      4.1.10
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.9';
+  const VERSION = '4.1.10';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -2240,6 +2240,10 @@
     if (node instanceof HTMLSelectElement) {
       return normalizeText(node.selectedOptions?.[0]?.textContent || node.value || '');
     }
+    const select = node.querySelector?.('select');
+    if (select instanceof HTMLSelectElement) {
+      return normalizeText(select.selectedOptions?.[0]?.textContent || select.value || '');
+    }
     return normalizeText(node.innerText || node.textContent || '');
   }
 
@@ -2414,6 +2418,9 @@
     if (!el) return '';
 
     const candidates = [
+      el.matches?.('select') ? el : null,
+      el.querySelector('select'),
+      el.querySelector('input:not([type="hidden"]), textarea'),
       el.querySelector('.gw-value-readonly-wrapper'),
       el.querySelector('.gw-vw--value'),
       el.querySelector('.gw-value'),
@@ -2422,7 +2429,7 @@
     ];
 
     for (const c of candidates) {
-      const value = getElementText(c);
+      const value = readFieldNodeValue(c);
       if (value && value !== 'Code') return value;
     }
 
