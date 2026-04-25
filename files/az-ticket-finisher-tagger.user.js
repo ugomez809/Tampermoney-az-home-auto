@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.45
+// @version      1.0.46
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.45';
+  const VERSION = '1.0.46';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1251,8 +1251,8 @@
       note: {
         homeSubmission: '',
         accountNumber: '',
-        doneValue: 'Skipped missing payload',
-        text: 'Skipped missing payload'
+        doneValue: 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE',
+        text: 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE'
       },
       sources: {
         home: 'missing-payload'
