@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.21
+// @version      2.5.22
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.21';
+  const VERSION = '2.5.22';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -35,7 +35,7 @@
   let _lastLogClearHandledAt = '';
 
   const CFG = {
-    stageName: 'New Opportunities',
+    stageLabelFallback: 'First visible',
     savedQueryName: 'Ignored tags',
 
     openTryMs: 4200,
@@ -1131,7 +1131,7 @@
         </div>
         <div id="hb-az-stage-runner-status">STOPPED</div>
         <div id="hb-az-stage-runner-meta">
-          <div class="k">Stage</div><div id="hb-az-stage-runner-stage">${escapeHtml(CFG.stageName)}</div>
+          <div class="k">Stage</div><div id="hb-az-stage-runner-stage">${escapeHtml(CFG.stageLabelFallback)}</div>
           <div class="k">Mode</div><div id="hb-az-stage-runner-mode">—</div>
           <div class="k">Page</div><div id="hb-az-stage-runner-page">—</div>
           <div class="k">Last ID</div><div id="hb-az-stage-runner-lastid">—</div>
@@ -1148,6 +1148,7 @@
     state.ui.start = panel.querySelector('#hb-az-stage-runner-start');
     state.ui.stop = panel.querySelector('#hb-az-stage-runner-stop');
     state.ui.status = panel.querySelector('#hb-az-stage-runner-status');
+    state.ui.stage = panel.querySelector('#hb-az-stage-runner-stage');
     state.ui.mode = panel.querySelector('#hb-az-stage-runner-mode');
     state.ui.page = panel.querySelector('#hb-az-stage-runner-page');
     state.ui.lastId = panel.querySelector('#hb-az-stage-runner-lastid');
@@ -1194,6 +1195,7 @@
     state.ui.start.textContent = 'Start';
     state.ui.start.disabled = !canStart;
     state.ui.stop.disabled = !canStop;
+    state.ui.stage.textContent = getCurrentStageName() || CFG.stageLabelFallback;
     state.ui.mode.textContent = state.mode ? state.mode.toUpperCase() : '—';
   }
 
@@ -1303,7 +1305,7 @@
         const stageWrap = getStageWrap();
         if (!stageWrap) {
           setStatus('Waiting stage');
-          log(`Stage not found: ${CFG.stageName}`, 'warn');
+          log('Stage not found: first visible pipeline stage is missing', 'warn');
           await sleep(1000);
           continue;
         }
@@ -1601,11 +1603,18 @@
     return false;
   }
 
+  function getStageLabel(stageWrap = null) {
+    const wrap = stageWrap instanceof Element ? stageWrap : null;
+    return norm(wrap?.querySelector('.dd-header h2')?.textContent || '');
+  }
+
+  function getCurrentStageName() {
+    return getStageLabel(getStageWrap()) || CFG.stageLabelFallback;
+  }
+
   function getStageWrap() {
-    return [...document.querySelectorAll(SEL.stageWrap)].find(w => {
-      const h2 = w.querySelector('.dd-header h2');
-      return lower(h2?.textContent) === lower(CFG.stageName);
-    }) || null;
+    return [...document.querySelectorAll(SEL.stageWrap)]
+      .find((wrap) => visible(wrap) && !!wrap.parentElement) || null;
   }
 
   function getStageContainer() {
@@ -1918,7 +1927,7 @@
             ticketId: snapshot.fields['AZ ID'],
             az: snapshot.fields,
             meta: {
-              stageName: CFG.stageName,
+              stageName: getCurrentStageName(),
               mode: state.mode,
               page: ctx.pageLabel || '',
               savedAt: nowIso(),
@@ -2042,7 +2051,7 @@
       action,
       ticketId,
       page: pageLabel || '',
-      stageName: CFG.stageName,
+      stageName: getCurrentStageName(),
       mode: state.mode,
       at: nowIso(),
       url: location.href
