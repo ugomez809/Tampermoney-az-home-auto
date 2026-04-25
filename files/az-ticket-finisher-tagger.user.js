@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.43
+// @version      1.0.44
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.43';
+  const VERSION = '1.0.44';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -100,7 +100,7 @@
     updateButton: 'button.btn.btn-primary.action[onclick*="leadDetailTab.doSave"], button.action[onclick*="doSave"]',
     noteOpener: 'a.btn-note.az-tooltip.tooltipstered, a.btn-note',
     noteEditor: 'div.ql-editor[contenteditable="true"], div[data-placeholder="Add note here"][contenteditable="true"], .ql-editor',
-    pinTop: 'a.pin-top[data-value="0"], a.pin-top',
+    pinTop: 'a.pin-top[data-value="0"], a.pin-top, a.d-flex.align-items-center.pin-top',
     saveNote: 'button#add-note, button.btn-primary#add-note',
     tagOpener: 'a.btn-tag.az-tooltip.tooltipstered, a.btn-tag',
     tagForm: '#add-tag-form',
@@ -680,6 +680,31 @@
       } catch {}
     }
     try { el.click(); return true; } catch { return false; }
+  }
+
+  function dtClick(el) {
+    if (!(el instanceof Element)) return false;
+
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    const view = el.ownerDocument?.defaultView || window;
+
+    for (const type of ['mouseover', 'mousedown', 'mouseup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          view,
+          clientX,
+          clientY
+        }));
+      } catch {}
+    }
+
+    return true;
   }
 
   function showBootstrapTab(anchor) {
@@ -1636,13 +1661,32 @@
   }
 
   function findPinToTop() {
-    let el = findVisibleElements(SEL.pinTop)[0];
+    let el = findVisibleElements('a.pin-top, a.d-flex.align-items-center.pin-top')
+      .find((candidate) => lower(candidate.textContent).includes('pin to top'));
+    if (el) return el;
+
+    el = findVisibleElements(SEL.pinTop)[0];
     if (el) return el;
 
     const icon = Array.from(document.querySelectorAll('i.fas.fa-thumbtack')).find(visible);
     if (icon) return icon.closest('a,button,[role="button"]');
 
     return findByText(['a', 'button'], 'Pin to top');
+  }
+
+  function clickPinToTop(pin) {
+    if (!(pin instanceof Element)) return false;
+
+    const text = lower(pin.textContent || '');
+    if (pin.matches('a.pin-top, a.d-flex.align-items-center.pin-top') && text.includes('pin to top')) {
+      dtClick(pin);
+      log('Clicked: Pin to top (DT fallback)');
+      return true;
+    }
+
+    strongClick(pin);
+    log('Clicked: Pin to top');
+    return true;
   }
 
   function findSaveNoteButton() {
@@ -1661,8 +1705,7 @@
 
     const pin = findPinToTop();
     if (pin) {
-      strongClick(pin);
-      log('Clicked: Pin to top');
+      clickPinToTop(pin);
       await sleep(CFG.bigActionDelayMs);
     } else {
       log('Pin to top not found');
