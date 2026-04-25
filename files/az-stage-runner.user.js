@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.20
+// @version      2.5.21
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.20';
+  const VERSION = '2.5.21';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -250,6 +250,7 @@
     window.addEventListener('keydown', state.keyHandler, true);
 
     state.persistHandler = () => {
+      armRefreshResumeToken();
       persistState();
     };
     window.addEventListener('beforeunload', state.persistHandler, true);
@@ -268,6 +269,7 @@
     window.addEventListener('storage', state.storageWakeHandler, true);
 
     setupFrontIdleReloadWatchdog();
+    startLogPersistenceHooks();
 
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
@@ -301,10 +303,6 @@
         startRun(false);
       }
     }, 0);
-
-    state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
-    window.addEventListener('storage', handleLogClearStorageEvent, true);
-    persistLogsThrottled();
   }
 
   function cleanup() {
@@ -378,6 +376,23 @@
 
   function clearBootstrapReloadToken() {
     try { sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN); } catch {}
+  }
+
+  function armRefreshResumeToken() {
+    // Any real page unload in this tab should come back running. Stop is only
+    // for the current live page session, not for the next refresh.
+    if (state.destroyed) return;
+    setBootstrapReloadMode(state.mode || 'home');
+    setBootstrapReloadToken();
+  }
+
+  function startLogPersistenceHooks() {
+    if (!state.logsIntervalTimer) {
+      state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
+    }
+    window.removeEventListener('storage', handleLogClearStorageEvent, true);
+    window.addEventListener('storage', handleLogClearStorageEvent, true);
+    persistLogsThrottled();
   }
 
   function clearPendingActionTimers() {
