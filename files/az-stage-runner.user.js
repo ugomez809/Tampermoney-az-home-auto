@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.18
+// @version      2.5.19
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.18';
+  const VERSION = '2.5.19';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -289,13 +289,13 @@
       return;
     }
 
-    state.running = false;
-    saveRunning(false);
+    state.running = true;
+    saveRunning(true);
     syncUi();
     setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
     log(`Fresh auto bootstrap | mode=${state.mode.toUpperCase()}`, 'ok');
     schedulePendingStart(() => {
-      if (!state.destroyed && !state.running && !state.busy && !state.refreshRequiredThisLoad) {
+      if (!state.destroyed && state.running && !state.busy && !state.refreshRequiredThisLoad) {
         startRun(false);
       }
     }, 0);
@@ -347,16 +347,15 @@
   }
 
   function loadRunning() {
-    try {
-      return localStorage.getItem(KEYS.RUNNING) === '1';
-    } catch {
-      return false;
-    }
+    // Always re-arm after refresh. Stop is only for the current page session.
+    try { localStorage.removeItem(KEYS.RUNNING); } catch {}
+    return true;
   }
 
   function saveRunning(on) {
     try {
-      localStorage.setItem(KEYS.RUNNING, on ? '1' : '0');
+      if (on) localStorage.removeItem(KEYS.RUNNING);
+      else localStorage.setItem(KEYS.RUNNING, '0');
     } catch {}
   }
 

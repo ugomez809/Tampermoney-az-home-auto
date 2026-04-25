@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.5
+// @version      1.9.6
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.5';
+  const VERSION = '1.9.6';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -76,7 +76,7 @@
   };
 
   const state = {
-    running: sessionStorage.getItem(SS_KEYS.STOP) !== '1',
+    running: true,
     busy: false,
     logs: [],
     ui: null,
@@ -90,6 +90,7 @@
   init();
 
   function init() {
+    clearStoppedForPageLoad();
     buildUI();
     log(`Loaded ${SCRIPT_NAME} V${VERSION}`);
     log(isAzOrigin() ? 'Mode: AZ capture' : isGwpcOrigin() ? 'Mode: GWPC apply' : 'Mode: idle');
@@ -101,6 +102,10 @@
     window.addEventListener('storage', handleLogClearStorageEvent, true);
     persistLogsThrottled();
     tick();
+  }
+
+  function clearStoppedForPageLoad() {
+    try { sessionStorage.removeItem(SS_KEYS.STOP); } catch {}
   }
 
   function tick() {
