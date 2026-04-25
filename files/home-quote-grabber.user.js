@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.10
+// @version      4.1.11
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.10';
+  const VERSION = '4.1.11';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -2232,17 +2232,36 @@
     return '';
   }
 
+  function elementTagName(node) {
+    return String(node?.tagName || '').toUpperCase();
+  }
+
+  function isSelectNode(node) {
+    return elementTagName(node) === 'SELECT';
+  }
+
+  function isTextInputNode(node) {
+    const tag = elementTagName(node);
+    return tag === 'INPUT' || tag === 'TEXTAREA';
+  }
+
+  function getSelectedOptionText(selectEl) {
+    if (!isSelectNode(selectEl)) return '';
+    const option = selectEl.selectedOptions?.[0] || selectEl.options?.[selectEl.selectedIndex];
+    return normalizeText(option?.textContent || option?.innerText || selectEl.value || '');
+  }
+
   function readFieldNodeValue(node) {
-    if (!(node instanceof Element)) return '';
-    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+    if (!node || typeof node !== 'object') return '';
+    if (isTextInputNode(node)) {
       return normalizeText(node.value || node.getAttribute('value') || '');
     }
-    if (node instanceof HTMLSelectElement) {
-      return normalizeText(node.selectedOptions?.[0]?.textContent || node.value || '');
+    if (isSelectNode(node)) {
+      return getSelectedOptionText(node);
     }
     const select = node.querySelector?.('select');
-    if (select instanceof HTMLSelectElement) {
-      return normalizeText(select.selectedOptions?.[0]?.textContent || select.value || '');
+    if (isSelectNode(select)) {
+      return getSelectedOptionText(select);
     }
     return normalizeText(node.innerText || node.textContent || '');
   }
@@ -2671,29 +2690,30 @@
   function readCustomFieldElementValue(el) {
     if (!el) return '';
 
-    if (el instanceof HTMLSelectElement) {
-      return normalizeText(el.selectedOptions?.[0]?.textContent || el.value || '');
+    if (isSelectNode(el)) {
+      return getSelectedOptionText(el);
     }
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    if (isTextInputNode(el)) {
       return normalizeText(el.value || el.getAttribute('value') || '');
     }
 
     const candidates = [
-      el,
+      q('select', el),
+      q('input:not([type="hidden"]), textarea', el),
       q('.gw-value-readonly-wrapper', el),
       q('.gw-vw--value', el),
       q('.gw-value', el),
       q('.gw-infoValue', el),
       q('[data-gw-getset="text"]', el),
-      q('input, textarea, select', el)
+      el
     ].filter(Boolean);
 
     for (const node of candidates) {
-      if (node instanceof HTMLSelectElement) {
-        const text = normalizeText(node.selectedOptions?.[0]?.textContent || node.value || '');
+      if (isSelectNode(node)) {
+        const text = getSelectedOptionText(node);
         if (text) return text;
       }
-      if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+      if (isTextInputNode(node)) {
         const text = normalizeText(node.value || node.getAttribute('value') || '');
         if (text) return text;
       }
