@@ -54,20 +54,27 @@ For one-by-one installs instead of the bundle:
 
 | Script | Install |
 | --- | --- |
-| GWPC Auto Quote Starter | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js) |
 | GWPC Policy Info Prefill | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js) |
 | GWPC Disclosure Qualification | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-disclosure-qualification.user.js) |
-| GWPC Auto Drivers Prefill | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js) |
-| GWPC Auto Vehicles Prefill | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js) |
-| GWPC Auto Specialty Quote | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js) |
 | GWPC Dwelling Water Rule | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js) |
 | GWPC Home Coverages + Risk Analysis | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js) |
 | GWPC Home Quote Extractor | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js) |
-| GWPC Auto Quote Extractor | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/auto-quote-grabber.user.js) |
 | GWPC Webhook Submission | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js) |
 | GWPC Unsaved Change Discard Clicker | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-discard-unsaved-change.user.js) |
 | GWPC Header Timeout Monitor | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-header-timeout.user.js) |
 | GWPC Popup Blocker | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-popup-blocker.user.js) |
+
+### Disabled Personal Auto placeholders
+
+These files remain installable only so existing Tampermonkey installs can auto-update into a silent no-op. They do not log, show UI, write storage, or run Personal Auto workflow steps.
+
+| Script | Install |
+| --- | --- |
+| GWPC Auto Quote Starter | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-start-auto-quote.user.js) |
+| GWPC Auto Drivers Prefill | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-drivers.user.js) |
+| GWPC Auto Vehicles Prefill | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-vehicles.user.js) |
+| GWPC Auto Specialty Quote | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/aqb-specialty-product.user.js) |
+| GWPC Auto Quote Extractor | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/auto-quote-grabber.user.js) |
 
 ### Cross-origin utilities
 

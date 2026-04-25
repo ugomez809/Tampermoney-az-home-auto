@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.22
-// @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
+// @version      2.5.23
+// @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @run-at       document-end
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.22';
+  const VERSION = '2.5.23';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -98,7 +98,6 @@
 
     quotesTab: 'a#policyTabTitle[href="#tabQuote"][data-toggle="tab"]',
     quotePane: '#tabQuote',
-    autoLink: '#tabQuote > div > div.ml-4 > a:nth-child(1)',
     homeLink: '#tabQuote > div > div.ml-4 > a:nth-child(3)',
 
     dockRoot: '.az-dock, #serviceDetailDock, #notePanelContainer, .az-dock__top',
@@ -237,9 +236,9 @@
     }
 
     log(`${SCRIPT_NAME} V${VERSION} loaded`, 'ok');
-    log(`Auto start enabled | mode=${state.mode.toUpperCase()}`, 'info');
+    log(`Home-only start enabled | mode=${state.mode.toUpperCase()}`, 'info');
     log(`Main must return ${FIELD_ORDER.length}/${FIELD_ORDER.length} AZ fields before Quotes`, 'info');
-    log(`Auto start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
+    log(`Home start clears workflow data, reloads, and resumes automatically with ${CFG.savedQueryName}`, 'info');
     log('Ticket is only done when the finisher closes it', 'info');
     log('ESC stops the run', 'info');
     writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Idle' : 'Stopped');
@@ -296,8 +295,8 @@
     state.running = true;
     saveRunning(true);
     syncUi();
-    setStatus(`AUTO STARTING (${state.mode.toUpperCase()})`);
-    log(`Fresh auto bootstrap | mode=${state.mode.toUpperCase()}`, 'ok');
+    setStatus('HOME STARTING');
+    log('Fresh home bootstrap | mode=HOME', 'ok');
     schedulePendingStart(() => {
       if (!state.destroyed && state.running && !state.busy && !state.refreshRequiredThisLoad) {
         startRun(false);
@@ -336,14 +335,18 @@
   function loadMode() {
     try {
       const v = localStorage.getItem(KEYS.MODE);
-      return v === 'auto' || v === 'home' ? v : '';
+      if (v === 'auto') {
+        localStorage.setItem(KEYS.MODE, 'home');
+        return 'home';
+      }
+      return 'home';
     } catch {
-      return '';
+      return 'home';
     }
   }
 
   function saveMode(mode) {
-    try { localStorage.setItem(KEYS.MODE, mode || ''); } catch {}
+    try { localStorage.setItem(KEYS.MODE, 'home'); } catch {}
   }
 
   function loadRunning() {
@@ -369,7 +372,7 @@
 
   function setBootstrapReloadMode(mode) {
     try {
-      if (mode === 'auto' || mode === 'home') sessionStorage.setItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE, mode);
+      if (mode === 'home') sessionStorage.setItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE, 'home');
       else sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE);
     } catch {}
   }
@@ -451,7 +454,7 @@
     try {
       const mode = sessionStorage.getItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE) || '';
       sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_MODE);
-      return mode === 'auto' || mode === 'home' ? mode : '';
+      return mode === 'home' ? 'home' : '';
     } catch {
       return '';
     }
@@ -985,7 +988,7 @@
     if (!state.running && !state.busy) return 'stopped';
     if (status.includes('paused')) return 'paused';
     if (status.includes('running') || status.includes('starting') || status.includes('restoring') || status.includes('reloading')) return 'working';
-    if (status.includes('waiting') || status.includes('pick auto/home') || status.includes('refresh required')) return 'waiting';
+    if (status.includes('waiting') || status.includes('refresh required')) return 'waiting';
     if (status.includes('failed') || status.includes('fatal')) return 'error';
     if (status.includes('complete') || status.includes('done')) return 'done';
     if (status.includes('stopped')) return 'stopped';
@@ -1124,7 +1127,6 @@
       </div>
       <div id="hb-az-stage-runner-body">
         <div id="hb-az-stage-runner-mini">
-          <button type="button" id="hb-az-stage-runner-auto">Auto</button>
           <button type="button" id="hb-az-stage-runner-home">Home</button>
           <button type="button" id="hb-az-stage-runner-start" data-running="0">Start</button>
           <button type="button" id="hb-az-stage-runner-stop">Stop</button>
@@ -1143,7 +1145,6 @@
 
     state.ui.root = panel;
     state.ui.head = panel.querySelector('#hb-az-stage-runner-head');
-    state.ui.auto = panel.querySelector('#hb-az-stage-runner-auto');
     state.ui.home = panel.querySelector('#hb-az-stage-runner-home');
     state.ui.start = panel.querySelector('#hb-az-stage-runner-start');
     state.ui.stop = panel.querySelector('#hb-az-stage-runner-stop');
@@ -1158,13 +1159,6 @@
   }
 
   function bindUi() {
-    state.ui.auto?.addEventListener('click', () => {
-      state.mode = 'auto';
-      saveMode(state.mode);
-      syncUi();
-      log('Mode set: Auto', 'info');
-    });
-
     state.ui.home?.addEventListener('click', () => {
       state.mode = 'home';
       saveMode(state.mode);
@@ -1189,8 +1183,7 @@
     const canStart = !state.running && !state.busy && !hasPendingTimers;
     const canStop = state.running || state.busy || hasPendingTimers || state.refreshRequiredThisLoad || state.frontIdleReloadPending;
 
-    state.ui.auto.dataset.active = state.mode === 'auto' ? '1' : '0';
-    state.ui.home.dataset.active = state.mode === 'home' ? '1' : '0';
+    state.ui.home.dataset.active = '1';
     state.ui.start.dataset.running = state.running ? '1' : '0';
     state.ui.start.textContent = 'Start';
     state.ui.start.disabled = !canStart;
@@ -1214,8 +1207,10 @@
       state.running = false;
       saveRunning(false);
       syncUi();
-      setStatus('Pick Auto/Home first');
-      log('Pick Auto or Home first', 'warn');
+      state.mode = 'home';
+      saveMode(state.mode);
+      setStatus('Home mode restored');
+      log('Home mode restored', 'warn');
       return;
     }
 
@@ -1227,10 +1222,12 @@
       state.processedIds.clear();
       state.bgPauseLogged = false;
       syncUi();
-      setStatus(`RELOADING (${state.mode.toUpperCase()})`);
+      state.mode = 'home';
+      saveMode(state.mode);
+      setStatus('RELOADING (HOME)');
       const cleared = clearTransientWorkflowData();
       log(`Cleared ${cleared} transient workflow key${cleared === 1 ? '' : 's'} before fresh run`, 'ok');
-      log(`Reloading before run | mode=${state.mode.toUpperCase()}`, 'info');
+      log('Reloading before run | mode=HOME', 'info');
       setBootstrapReloadToken();
       schedulePendingReload(() => {
         if (!state.destroyed) reloadToPipelineRoot();
@@ -1246,8 +1243,10 @@
     state.busy = false;
     state.bgPauseLogged = false;
     syncUi();
-    setStatus(`RUNNING (${state.mode.toUpperCase()})`);
-    log(isRestore ? `Restored | mode=${state.mode.toUpperCase()}` : `Started | mode=${state.mode.toUpperCase()}`, 'ok');
+    state.mode = 'home';
+    saveMode(state.mode);
+    setStatus('RUNNING (HOME)');
+    log(isRestore ? 'Restored | mode=HOME' : 'Started | mode=HOME', 'ok');
 
     runLoop().catch(err => {
       log(`Fatal: ${err?.message || err}`, 'error');
@@ -1427,8 +1426,8 @@
 
     await foregroundSleep(450);
 
-    const modeSelector = state.mode === 'auto' ? SEL.autoLink : SEL.homeLink;
-    const modeLabel = state.mode === 'auto' ? 'Auto link' : 'Home link';
+    const modeSelector = SEL.homeLink;
+    const modeLabel = 'Home link';
     const modeOk = await clickSelectorWithRetry(modeSelector, modeLabel, 6);
     if (!modeOk) return false;
 
@@ -1568,7 +1567,7 @@
       if (!state.running || state.destroyed) return false;
 
       const pane = document.querySelector(SEL.quotePane);
-      const modeLink = document.querySelector(state.mode === 'auto' ? SEL.autoLink : SEL.homeLink);
+      const modeLink = document.querySelector(SEL.homeLink);
 
       if (pane && (pane.classList.contains('active') || pane.classList.contains('show') || visible(pane))) {
         if (modeLink && visible(modeLink)) {

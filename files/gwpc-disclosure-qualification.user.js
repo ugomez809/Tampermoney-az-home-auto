@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.3.4
-// @description  On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, handle 2 extra Personal Auto Yes radios when needed, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
+// @version      2.3.5
+// @description  HOME-only Disclosure & Qualification flow. On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -19,7 +19,7 @@
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Disclosure Qualification';
-  const VERSION = '2.3.4';
+  const VERSION = '2.3.5';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_disclosure_qualification_logs_v1';
@@ -204,9 +204,8 @@
   }
 
   function getActiveFlow() {
-    if (matchesStage('auto', 'disclosure') && hasPersonalAutoAnyDoc()) return 'auto';
-    if (matchesStage('home', 'disclosure') && !hasPersonalAutoAnyDoc()) return 'home';
-    if (titleIsDisclosureAnyDoc() && hasPersonalAutoAnyDoc()) return 'auto';
+    if (hasPersonalAutoAnyDoc() && !hasHomeownersAnyDoc()) return '';
+    if (matchesStage('home', 'disclosure')) return 'home';
     if (titleIsDisclosureAnyDoc()) return 'home';
     return '';
   }
@@ -474,7 +473,6 @@
     if (!titleIsDisclosureAnyDoc()) {
       const flow = getActiveFlow();
       if (flow === 'home') writeFlowStage('home', 'policy_info');
-      if (flow === 'auto') writeFlowStage('auto', 'policy_info');
       return hardFinish();
     }
     return false;
@@ -514,12 +512,6 @@
 
     const primaryYesState = ensurePrimaryYesHandled();
     if (!primaryYesState.sawAnything || !primaryYesState.handled) {
-      scheduleRetry(RETRY_AFTER_YES_MS);
-      return;
-    }
-
-    const extraAutoYesState = ensureExtraAutoYesHandled();
-    if (extraAutoYesState.required && (!extraAutoYesState.sawAnything || !extraAutoYesState.handled)) {
       scheduleRetry(RETRY_AFTER_YES_MS);
       return;
     }
@@ -574,7 +566,7 @@
     if (hardStopIfQuoted()) return;
     const stage = readFlowStage();
     if (!norm(stage.product) && titleIsDisclosureAnyDoc()) {
-      writeFlowStage(hasPersonalAutoAnyDoc() ? 'auto' : 'home', 'disclosure');
+      if (!hasPersonalAutoAnyDoc() || hasHomeownersAnyDoc()) writeFlowStage('home', 'disclosure');
     }
     runSequence();
   }

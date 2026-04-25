@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.6
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC resets once per tab entry, seeds tm_pc_current_job_v1 plus incomplete payload records early, preserves same-AZ current job values to avoid noisy reseeding, enriches the current job from GWPC identity, and only advances Home -> Auto after final same-AZ Home payload readiness. APEX ignored.
+// @version      1.9.7
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.6';
+  const VERSION = '1.9.7';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -262,7 +262,7 @@
 
     const gwpcIdentity = getGwpcIdentity();
     if (!gwpcIdentity) {
-      setIdle('gw-no-gwpc-identity', 'GWPC waiting for current job / auto payload / home payload / bundle');
+      setIdle('gw-no-gwpc-identity', 'GWPC waiting for current job / home payload / bundle');
       return;
     }
 
@@ -468,20 +468,21 @@
     if (clean(stage.product) === 'home' && clean(stage.step) === 'handoff') {
       const homeState = getHomeGatherState(azId);
       if (homeState.finalReady) {
-        writeFlowStage('auto', 'start', azId);
+        writeFlowStage('home', 'sender', azId);
       }
       return;
     }
 
-    if (clean(stage.product) === 'auto' && clean(stage.step) === 'handoff') {
-      writeFlowStage('auto', 'sender', azId);
+    if (clean(stage.product) === 'auto') {
+      const homeState = getHomeGatherState(azId);
+      if (homeState.finalReady) writeFlowStage('home', 'sender', azId);
+      else if (hasVisibleExactLabel('Homeowners')) writeFlowStage('home', 'disclosure', azId);
     }
   }
 
   function getGwpcIdentity() {
     const currentJob = safeJsonParse(localStorage.getItem(GWPC_KEYS.currentJob), null);
     const homePayload = safeJsonParse(localStorage.getItem(GWPC_KEYS.homePayload), null);
-    const autoPayload = safeJsonParse(localStorage.getItem(GWPC_KEYS.autoPayload), null);
     const bundle = safeJsonParse(localStorage.getItem(GWPC_KEYS.bundle), null);
     const pageIdentity = getGwpcPageIdentity();
 
@@ -502,14 +503,9 @@
         submissionNumber: homePayload?.row?.['Submission Number'] || homePayload?.row?.submissionNumber || ''
       },
       {
-        name: autoPayload?.currentJob?.['Name'] || autoPayload?.row?.['Name'] || autoPayload?.summary?.primaryInsuredName || '',
-        mailingAddress: autoPayload?.currentJob?.['Mailing Address'] || autoPayload?.row?.['Mailing Address'] || '',
-        submissionNumber: autoPayload?.currentJob?.['SubmissionNumber'] || autoPayload?.row?.['Submission Number (Auto)'] || autoPayload?.summary?.submissionNumber || ''
-      },
-      {
-        name: bundle?.['Name'] || bundle?.auto?.data?.currentJob?.['Name'] || bundle?.home?.data?.row?.['Name'] || '',
-        mailingAddress: bundle?.['Mailing Address'] || bundle?.auto?.data?.currentJob?.['Mailing Address'] || bundle?.home?.data?.row?.['Mailing Address'] || '',
-        submissionNumber: bundle?.['SubmissionNumber'] || bundle?.auto?.data?.currentJob?.['SubmissionNumber'] || bundle?.auto?.data?.summary?.submissionNumber || bundle?.home?.data?.row?.['Submission Number'] || ''
+        name: bundle?.['Name'] || bundle?.home?.data?.row?.['Name'] || '',
+        mailingAddress: bundle?.['Mailing Address'] || bundle?.home?.data?.row?.['Mailing Address'] || '',
+        submissionNumber: bundle?.['SubmissionNumber'] || bundle?.home?.data?.row?.['Submission Number'] || ''
       }
     ];
 
@@ -870,15 +866,7 @@
       },
       auto: {
         ready: false,
-        data: null,
-        meta: {
-          product: 'auto',
-          step: 'seeded',
-          savedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          source: SCRIPT_NAME,
-          version: VERSION
-        }
+        data: null
       },
       timeout: {
         ready: false,
@@ -963,7 +951,6 @@
 
     ensureSeedBundle(seedJob);
     ensureSeedPayload(GWPC_KEYS.homePayload, 'home', seedJob);
-    ensureSeedPayload(GWPC_KEYS.autoPayload, 'auto', seedJob);
     return readCurrentJob();
   }
 

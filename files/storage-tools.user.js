@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.6
-// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
+// @version      1.5.7
+// @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC HOME payload/storage to TXT, mirrors key Home payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.6';
+  const VERSION = '1.5.7';
   const UI_ID = 'tm-az-apex-gwpc-storage-tools-v156';
   const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v156';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
@@ -33,9 +33,16 @@
 
   const TRACKED_PREFIXES = [
     'tm_',
-    'aqb_',
     'hb_'
   ];
+
+  const DISABLED_AUTO_LOG_KEYS = new Set([
+    'tm_pc_start_auto_quote_logs_v1',
+    'tm_pc_aqb_drivers_logs_v1',
+    'tm_pc_aqb_vehicles_logs_v1',
+    'tm_pc_aqb_specialty_product_logs_v1',
+    'tm_pc_auto_quote_grabber_logs_v1'
+  ]);
 
   const LIVE_KEYS = {
     azPayloadCandidates: [
@@ -49,7 +56,6 @@
     apexReady: 'tm_apex_home_bot_ready_v1',
     apexActiveRow: 'tm_apex_home_bot_active_row_v1',
     gwpcHomePayload: 'tm_pc_home_quote_grab_payload_v1',
-    gwpcAutoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     sharedCurrentJob: 'tm_pc_current_job_v1'
   };
 
@@ -58,8 +64,7 @@
     apexPayload: 'tm_shared_cache_apex_payload_v1',
     apexReady: 'tm_shared_cache_apex_ready_v1',
     apexActiveRow: 'tm_shared_cache_apex_active_row_v1',
-    gwpcHomePayload: 'tm_shared_cache_gwpc_home_quote_payload_v1',
-    gwpcAutoPayload: 'tm_shared_cache_gwpc_auto_quote_payload_v1'
+    gwpcHomePayload: 'tm_shared_cache_gwpc_home_quote_payload_v1'
   };
 
   const EXACT_TRACKED_KEYS = new Set([
@@ -67,7 +72,6 @@
     LIVE_KEYS.apexReady,
     LIVE_KEYS.apexActiveRow,
     LIVE_KEYS.gwpcHomePayload,
-    LIVE_KEYS.gwpcAutoPayload,
     LIVE_KEYS.sharedCurrentJob,
     ...LIVE_KEYS.azPayloadCandidates
   ]);
@@ -109,7 +113,8 @@
     'tm_az_missing_payload_fallback_trigger_v1',
     'tm_pc_header_timeout_runtime_v2',
     'tm_pc_header_timeout_sent_events_v2',
-    'tm_pc_flow_stage_v1'
+    'tm_pc_flow_stage_v1',
+    ...DISABLED_AUTO_LOG_KEYS
   ]);
 
   const AUTO_CLEAR_PREFIXES = [
@@ -325,7 +330,6 @@
       LIVE_KEYS.apexReady,
       LIVE_KEYS.apexActiveRow,
       LIVE_KEYS.gwpcHomePayload,
-      LIVE_KEYS.gwpcAutoPayload,
       LIVE_KEYS.sharedCurrentJob
     ];
 
@@ -490,7 +494,6 @@
 
     if (isGwpcHost()) {
       syncOneCache(CACHE_KEYS.gwpcHomePayload, LIVE_KEYS.gwpcHomePayload, ['localStorage', 'sessionStorage']);
-      syncOneCache(CACHE_KEYS.gwpcAutoPayload, LIVE_KEYS.gwpcAutoPayload, ['localStorage', 'sessionStorage']);
     }
   }
 
@@ -531,7 +534,6 @@
       const apexReadyCache = getCachedRecord(CACHE_KEYS.apexReady);
       const apexActiveRowCache = getCachedRecord(CACHE_KEYS.apexActiveRow);
       const gwpcHomePayloadCache = getCachedRecord(CACHE_KEYS.gwpcHomePayload);
-      const gwpcAutoPayloadCache = getCachedRecord(CACHE_KEYS.gwpcAutoPayload);
 
       const parts = [];
       parts.push('AZ + APEX + GWPC STORAGE EXPORT');
@@ -560,8 +562,6 @@
       parts.push('');
       parts.push(buildCachedSection('MIRRORED GWPC HOME QUOTE PAYLOAD', gwpcHomePayloadCache));
       parts.push('');
-      parts.push(buildCachedSection('MIRRORED GWPC AUTO QUOTE PAYLOAD', gwpcAutoPayloadCache));
-      parts.push('');
 
       const txt = parts.join('\n');
       const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
@@ -581,9 +581,8 @@
       const haveAz = !!(azPayloadCache && azPayloadCache.valueRaw != null);
       const haveApex = !!(apexPayloadCache && apexPayloadCache.valueRaw != null);
       const haveHome = !!(gwpcHomePayloadCache && gwpcHomePayloadCache.valueRaw != null);
-      const haveAuto = !!(gwpcAutoPayloadCache && gwpcAutoPayloadCache.valueRaw != null);
 
-      toast(`Exported. AZ: ${haveAz ? 'YES' : 'NO'} | APEX: ${haveApex ? 'YES' : 'NO'} | HOME: ${haveHome ? 'YES' : 'NO'} | AUTO: ${haveAuto ? 'YES' : 'NO'}`);
+      toast(`Exported. AZ: ${haveAz ? 'YES' : 'NO'} | APEX: ${haveApex ? 'YES' : 'NO'} | HOME: ${haveHome ? 'YES' : 'NO'}`);
     } catch (err) {
       console.error('[AZ+APEX+GWPC Storage Tools] Export failed:', err);
       toast('Export failed');
@@ -592,6 +591,7 @@
 
   function isLogKey(key) {
     if (typeof key !== 'string' || !key.endsWith(LOG_KEY_SUFFIX)) return false;
+    if (DISABLED_AUTO_LOG_KEYS.has(key)) return false;
     return TRACKED_PREFIXES.some(prefix => key.startsWith(prefix));
   }
 
@@ -979,6 +979,15 @@
         delete state.lastSeen[`${record.key}__lastRaw`];
       }
 
+      for (const key of DISABLED_AUTO_LOG_KEYS) {
+        try { if (localStorage.getItem(key) != null) { localStorage.removeItem(key); localCount++; } } catch {}
+        try { if (sessionStorage.getItem(key) != null) { sessionStorage.removeItem(key); sessionCount++; } } catch {}
+        try {
+          if (typeof GM_deleteValue === 'function') { GM_deleteValue(key); gmCount++; }
+        } catch {}
+        delete state.lastSeen[`${key}__lastRaw`];
+      }
+
       // Broadcast the clear-request signal so every running script empties
       // its in-memory buffer on its next log tick (2 s poll + storage event).
       const signal = { requestedAt: new Date().toISOString(), source: 'storage-tools' };
@@ -998,7 +1007,6 @@
     clearCachedRecord(CACHE_KEYS.apexReady);
     clearCachedRecord(CACHE_KEYS.apexActiveRow);
     clearCachedRecord(CACHE_KEYS.gwpcHomePayload);
-    clearCachedRecord(CACHE_KEYS.gwpcAutoPayload);
 
     delete state.lastSeen[`${CACHE_KEYS.azPayload}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.azPayload}__lastSourceKey`];
@@ -1006,7 +1014,6 @@
     delete state.lastSeen[`${CACHE_KEYS.apexReady}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.apexActiveRow}__lastRaw`];
     delete state.lastSeen[`${CACHE_KEYS.gwpcHomePayload}__lastRaw`];
-    delete state.lastSeen[`${CACHE_KEYS.gwpcAutoPayload}__lastRaw`];
   }
 
   function shouldAutoClearKey(key) {

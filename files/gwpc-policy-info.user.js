@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Policy Info Prefill
 // @namespace    homebot.gwpc-policy-info
-// @version      2.3.4
-// @description  Policy Info hybrid: if Personal Auto is present, run AQB Policy Info actions; otherwise keep the Home Bot Policy Info flow without clicking Home Auto discount. If the Non-Binary/Flex error appears, switch Gender to Male. Uses DT2 Next retry if stuck. Hard stops if Submission (Quoted) appears.
+// @version      2.3.5
+// @description  HOME-only Policy Info flow. Keeps the Home Bot Policy Info actions without clicking Home Auto discount, switches Gender to Male if the Non-Binary/Flex error appears, uses DT2 Next retry if stuck, and hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-3.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Policy Info Prefill';
-  const VERSION = '2.3.4';
+  const VERSION = '2.3.5';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_policy_info_logs_v1';
@@ -259,9 +259,8 @@
   }
 
   function getActiveFlow() {
-    if (matchesStage('auto', 'policy_info') && isPersonalAutoMode()) return 'auto';
-    if (matchesStage('home', 'policy_info') && !isPersonalAutoMode()) return 'home';
-    if (titleIsPolicyInfoAnyDoc() && isPersonalAutoMode()) return 'auto';
+    if (isPersonalAutoMode()) return '';
+    if (matchesStage('home', 'policy_info')) return 'home';
     if (titleIsPolicyInfoAnyDoc()) return 'home';
     return '';
   }
@@ -418,11 +417,10 @@
   }
 
   function applyPolicyInfoOnce() {
-    const autoMode = isPersonalAutoMode();
+    if (isPersonalAutoMode()) return;
 
     for (const doc of allDocs()) {
-      if (autoMode) applyAqbPolicyInfoOnce(doc);
-      else applyHomePolicyInfoOnce(doc);
+      applyHomePolicyInfoOnce(doc);
     }
   }
 
@@ -542,7 +540,6 @@
     if (!titleIsPolicyInfoAnyDoc()) {
       const flow = getActiveFlow();
       if (flow === 'home') writeFlowStage('home', 'dwelling');
-      if (flow === 'auto') writeFlowStage('auto', 'drivers');
       done = true;
       running = false;
       if (mo) { try { mo.disconnect(); } catch {} mo = null; }
@@ -640,7 +637,7 @@
     }
     const stage = readFlowStage();
     if (!normText(stage.product) && titleIsPolicyInfoAnyDoc()) {
-      writeFlowStage(isPersonalAutoMode() ? 'auto' : 'home', 'policy_info');
+      if (!isPersonalAutoMode()) writeFlowStage('home', 'policy_info');
     }
     if ((Date.now() - lastTabNudgeAt) < TAB_NUDGE_SETTLE_MS) return;
     if (nudgePolicyInfoTabIfNeeded()) return;

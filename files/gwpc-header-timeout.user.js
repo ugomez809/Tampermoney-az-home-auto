@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.10
-// @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
+// @version      2.3.11
+// @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.10';
+  const VERSION = '2.3.11';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -46,7 +46,6 @@
     identityCache: 'tm_pc_header_timeout_identity_cache_v2',
     selectorRules: 'tm_pc_header_timeout_selector_rules_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
-    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     runtime: 'tm_pc_header_timeout_runtime_v2',
     pendingPost: 'tm_pc_header_timeout_pending_post_v2',
     sentEvents: 'tm_pc_header_timeout_sent_events_v2',
@@ -946,9 +945,7 @@
   }
 
   function detectProduct() {
-    const hasAuto = hasLabelExactAnyDoc('Personal Auto');
     const hasHome = hasLabelExactAnyDoc('Homeowners');
-    if (hasAuto) return { product: 'auto', label: 'Personal Auto' };
     if (hasHome) return { product: 'home', label: 'Homeowners' };
     return { product: '', label: '' };
   }
@@ -1099,8 +1096,7 @@
       safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null),
       safeJsonParse(localStorage.getItem(LEGACY_SHARED_JOB_KEY), null),
       safeJsonParse(localStorage.getItem(BUNDLE_KEY), null),
-      safeJsonParse(localStorage.getItem(KEYS.homePayload), null)?.currentJob,
-      safeJsonParse(localStorage.getItem(KEYS.autoPayload), null)?.currentJob
+      safeJsonParse(localStorage.getItem(KEYS.homePayload), null)?.currentJob
     ];
 
     for (const candidate of candidates) {
@@ -1160,7 +1156,7 @@
       'Mailing Address': normalizeText(job?.['Mailing Address']),
       'SubmissionNumber': normalizeText(job?.['SubmissionNumber']),
       home: {},
-      auto: {},
+      auto: { ready: false, data: null },
       timeout: {
         ready: false,
         events: []
@@ -1231,19 +1227,6 @@
         if (eventSubmission) section.data.row['Submission Number'] = eventSubmission;
       }
       if (eventSubmission) section.submissionNumber = eventSubmission;
-    } else {
-      section.data['Auto'] = event.resultValue;
-      if (isPlainObject(section.data.row)) {
-        section.data.row['Auto'] = event.resultValue;
-        if (eventSubmission) section.data.row['Submission Number (Auto)'] = eventSubmission;
-      }
-      if (eventSubmission) {
-        section.submissionNumber = eventSubmission;
-        section.data.submissionNumberAuto = eventSubmission;
-        section.data.autoSubmissionNumber = eventSubmission;
-        section.data.submissionNumber = eventSubmission;
-        section.data['Submission Number (Auto)'] = eventSubmission;
-      }
     }
 
     next[product] = section;
@@ -1270,8 +1253,7 @@
 
   function clearLegacyTimeoutProductPayloads() {
     for (const [label, key] of [
-      ['HOME', KEYS.homePayload],
-      ['AUTO', KEYS.autoPayload]
+      ['HOME', KEYS.homePayload]
     ]) {
       const payload = safeJsonParse(localStorage.getItem(key), null);
       if (!isLegacyTimeoutProductPayload(payload)) continue;
@@ -1401,7 +1383,7 @@
     let changed = false;
     let removedCount = 0;
 
-    for (const product of ['home', 'auto']) {
+    for (const product of ['home']) {
       const result = clearSelectorArtifactsFromSection(next[product], product);
       if (result.changed) {
         next[product] = result.nextSection;
@@ -1789,10 +1771,10 @@
       product: context.product,
       productLabel: context.productLabel,
       errorType: 'HeaderTimeout',
-      errorName: context.product === 'home' ? 'HOME timeout' : 'AUTO timeout',
+      errorName: 'HOME timeout',
       errorMessage: resultValue,
       errorText: resultValue,
-      resultField: context.product === 'home' ? 'Done?' : 'Auto',
+      resultField: 'Done?',
       resultValue,
       headerText: context.header,
       submissionNumber: context.submission,

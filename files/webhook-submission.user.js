@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.7
-// @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
+// @version      1.18.8
+// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.7';
+  const VERSION = '1.18.8';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -44,7 +44,6 @@
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
   const BUNDLE_KEY = 'tm_pc_webhook_bundle_v1';
   const HOME_KEY = 'tm_pc_home_quote_grab_payload_v1';
-  const AUTO_KEY = 'tm_pc_auto_quote_grab_payload_v1';
 
   const CFG = {
     webhookUrlKey: 'tm_pc_webhook_submit_url_v17',
@@ -541,16 +540,12 @@
     return safeJsonParse(localStorage.getItem(HOME_KEY), null);
   }
 
-  function readAutoPayload() {
-    return safeJsonParse(localStorage.getItem(AUTO_KEY), null);
-  }
-
   function hasMeaningfulHome(bundle) {
     return !!(bundle?.home?.ready && isPlainObject(bundle?.home?.data));
   }
 
   function hasMeaningfulAuto(bundle) {
-    return !!(bundle?.auto?.ready && isPlainObject(bundle?.auto?.data));
+    return false;
   }
 
   function hasPendingTimeout(bundle) {
@@ -573,20 +568,18 @@
   }
 
   function hasAutoError(bundle) {
-    if (hasSectionErrors(bundle?.auto)) return true;
-    return getTimeoutEvents(bundle).some((event) => normalizeText(event?.product).toLowerCase() === 'auto');
+    return false;
   }
 
   function hasHomeSuccess(bundle) {
     return hasMeaningfulHome(bundle) && !hasHomeError(bundle);
   }
 
-  function hasAutoSuccess(bundle) {
-    return hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
-  }
-
-  function shouldWaitForAuto(bundle) {
-    return hasHomeSuccess(bundle) && !hasMeaningfulAuto(bundle) && !hasAutoError(bundle);
+  function normalizeHomeOnlyBundle(bundle) {
+    if (!isPlainObject(bundle)) return bundle;
+    const next = deepClone(bundle);
+    next.auto = { ready: false, data: null };
+    return next;
   }
 
   function buildHomeOnlySyntheticBundle(job, homePayload) {
@@ -633,9 +626,9 @@
 
     if (isPlainObject(rawBundle) &&
         normalizeText(rawBundle['AZ ID']) === job['AZ ID'] &&
-        (hasMeaningfulHome(rawBundle) || hasMeaningfulAuto(rawBundle) || hasPendingTimeout(rawBundle))) {
+        (hasMeaningfulHome(rawBundle) || hasPendingTimeout(rawBundle))) {
       return {
-        bundle: rawBundle,
+        bundle: normalizeHomeOnlyBundle(rawBundle),
         source: 'bundle'
       };
     }
@@ -948,9 +941,6 @@
       bundle?.['SubmissionNumber'] ||
       bundle?.home?.data?.row?.['Submission Number'] ||
       bundle?.home?.submissionNumber ||
-      bundle?.auto?.data?.row?.['Submission Number (Auto)'] ||
-      bundle?.auto?.data?.summary?.submissionNumber ||
-      bundle?.auto?.submissionNumber ||
       ''
     );
   }
@@ -1002,7 +992,7 @@
     if (!job['Name'] || !job['Mailing Address']) return { ok: false, reason: 'Waiting for full tm_pc_current_job_v1 identity' };
     if (!isPlainObject(bundle)) return { ok: false, reason: 'Waiting for home payload / bundle' };
     if (normalizeText(bundle['AZ ID']) !== job['AZ ID']) return { ok: false, reason: 'Bundle AZ ID mismatch' };
-    if (!(hasMeaningfulHome(bundle) || hasMeaningfulAuto(bundle) || hasPendingTimeout(bundle))) {
+    if (!(hasMeaningfulHome(bundle) || hasPendingTimeout(bundle))) {
       return { ok: false, reason: 'Waiting for gathered data' };
     }
     return { ok: true };
@@ -1053,7 +1043,7 @@
   }
 
   async function afterSuccess(job, bundle) {
-    writeFlowStage('auto', 'done', job['AZ ID']);
+    writeFlowStage('home', 'done', job['AZ ID']);
 
     state.running = false;
     sessionStorage.setItem(CFG.stoppedKey, '1');
@@ -1121,14 +1111,9 @@
 
   function shouldSendNow(bundle) {
     if (hasHomeError(bundle)) return true;
-    if (hasAutoError(bundle)) return true;
-    if (shouldWaitForAuto(bundle)) {
-      state.quoteSeenAt = 0;
-      return false;
-    }
     if (hasPendingTimeout(bundle)) return true;
 
-    if (!(hasMeaningfulHome(bundle) || hasMeaningfulAuto(bundle))) {
+    if (!hasMeaningfulHome(bundle)) {
       state.quoteSeenAt = 0;
       return false;
     }
@@ -1325,7 +1310,7 @@
     }
 
     if (!forceSend) {
-      const stageReady = matchesStage('home', 'sender', job['AZ ID']) || matchesStage('auto', 'sender', job['AZ ID']);
+      const stageReady = matchesStage('home', 'sender', job['AZ ID']);
       if (!stageReady) {
         state.quoteSeenAt = 0;
         setStatus('Waiting for sender trigger');
@@ -1340,21 +1325,8 @@
       return;
     }
 
-    if (shouldWaitForAuto(bundle)) {
-      state.quoteSeenAt = 0;
-      setStatus('Home complete, waiting for auto');
-      logWait('wait-auto-after-home', 'Home complete. Waiting for AUTO completion or AUTO error before sending');
-      return;
-    }
-
     if (hasHomeError(bundle)) {
       setStatus('Home error ready');
-      sendBundle(false);
-      return;
-    }
-
-    if (hasAutoError(bundle)) {
-      setStatus('Auto error ready');
       sendBundle(false);
       return;
     }
@@ -1365,7 +1337,7 @@
       return;
     }
 
-    if (hasMeaningfulHome(bundle) || hasMeaningfulAuto(bundle)) {
+    if (hasMeaningfulHome(bundle)) {
       sendBundle(false);
       return;
     }

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.19
-// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
+// @version      1.0.20
+// @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.19';
+  const VERSION = '1.0.20';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -51,8 +51,7 @@
     webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
     tabHeartbeats: 'tm_payload_mirror_tab_heartbeats_v1',
     apexWakeState: 'tm_payload_mirror_apex_wake_state_v1',
-    homePayload: 'tm_pc_home_quote_grab_payload_v1',
-    autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
+    homePayload: 'tm_pc_home_quote_grab_payload_v1'
   };
 
   const LS_KEYS = {
@@ -70,7 +69,6 @@
     'tm_pc_webhook_bundle_v1',
     'tm_pc_current_job_v1',
     'tm_pc_home_quote_grab_payload_v1',
-    'tm_pc_auto_quote_grab_payload_v1',
     'tm_pc_header_timeout_runtime_v2',
     'tm_pc_header_timeout_sent_events_v2'
   ];
@@ -479,17 +477,15 @@
     const finalPayload = readPreferredMirroredFinalPayload();
     const finalReady = readGM(GM_KEYS.finalReady, null);
     const homePayload = readPreferredMirroredProductPayload(GM_KEYS.homePayload);
-    const autoPayload = readPreferredMirroredProductPayload(GM_KEYS.autoPayload);
 
     const azId = norm(
       finalPayload?.azId
       || finalReady?.azId
       || extractProductAzId(homePayload)
-      || extractProductAzId(autoPayload)
       || ''
     );
 
-    if (!azId && !isPlainObject(finalPayload) && !isPlainObject(homePayload) && !isPlainObject(autoPayload)) {
+    if (!azId && !isPlainObject(finalPayload) && !isPlainObject(homePayload)) {
       return null;
     }
 
@@ -502,8 +498,7 @@
       azId,
       finalPayload: isPlainObject(finalPayload) ? deepClone(finalPayload) : {},
       finalReady: isPlainObject(finalReady) ? deepClone(finalReady) : {},
-      homePayload: isPlainObject(homePayload) ? deepClone(homePayload) : {},
-      autoPayload: isPlainObject(autoPayload) ? deepClone(autoPayload) : {}
+      homePayload: isPlainObject(homePayload) ? deepClone(homePayload) : {}
     };
   }
 
@@ -568,8 +563,7 @@
     const keys = [
       'tm_pc_current_job_v1',
       'tm_pc_webhook_bundle_v1',
-      'tm_pc_home_quote_grab_payload_v1',
-      'tm_pc_auto_quote_grab_payload_v1'
+      'tm_pc_home_quote_grab_payload_v1'
     ];
     for (const key of keys) {
       const value = readLocalJson(key);
@@ -1141,18 +1135,6 @@
         'Submission Number',
         'Done?'
       ]) * 3;
-    } else {
-      score += countFilledKeys(row, [
-        'Auto',
-        'Submission Number (Auto)',
-        'Total Policy Premium',
-        'PrimaryInsuredName',
-        'PA_All_Coverages'
-      ]) * 4;
-      if (Array.isArray(raw?.drivers) && raw.drivers.length) score += 4;
-      if (Array.isArray(raw?.vehicles) && raw.vehicles.length) score += 4;
-      if (Array.isArray(data?.drivers) && data.drivers.length) score += 4;
-      if (Array.isArray(data?.vehicles) && data.vehicles.length) score += 4;
     }
 
     return score;
@@ -1220,13 +1202,9 @@
     if (!isPlainObject(payload)) return -1;
     const bundle = isPlainObject(payload.bundle) ? payload.bundle : {};
     const homePayloadRaw = isPlainObject(payload.homePayload) ? payload.homePayload : {};
-    const autoPayloadRaw = isPlainObject(payload.autoPayload) ? payload.autoPayload : {};
     const homePayload = isLegacyTimeoutOwnedProductPayload(homePayloadRaw) ? {} : homePayloadRaw;
-    const autoPayload = isLegacyTimeoutOwnedProductPayload(autoPayloadRaw) ? {} : autoPayloadRaw;
     const homeData = isPlainObject(bundle.home?.data) ? bundle.home.data : homePayload;
-    const autoData = isPlainObject(bundle.auto?.data) ? bundle.auto.data : autoPayload;
     const homeRow = isPlainObject(homeData?.row) ? homeData.row : {};
-    const autoRow = isPlainObject(autoData?.row) ? autoData.row : {};
     const scoreKeysHome = [
       'CFP?',
       'Reconstruction Cost',
@@ -1241,22 +1219,11 @@
       'Submission Number',
       'Done?'
     ];
-    const scoreKeysAuto = [
-      'Auto',
-      'Submission Number (Auto)',
-      'Total Policy Premium',
-      'PrimaryInsuredName',
-      'PA_All_Coverages'
-    ];
 
     let score = 0;
     if (norm(payload.currentJob?.['SubmissionNumber'] || '')) score += 5;
     if (bundle.home?.ready === true || homePayload.ready === true) score += 20;
-    if (bundle.auto?.ready === true || autoPayload.ready === true) score += 20;
     score += countFilledKeys(homeRow, scoreKeysHome) * 3;
-    score += countFilledKeys(autoRow, scoreKeysAuto) * 4;
-    if (Array.isArray(autoPayload.drivers) && autoPayload.drivers.length) score += 4;
-    if (Array.isArray(autoPayload.vehicles) && autoPayload.vehicles.length) score += 4;
     if (Array.isArray(bundle.timeout?.events) && bundle.timeout.events.length) score += 2;
     return score;
   }
@@ -1266,9 +1233,7 @@
     const currentJob = readLocalKey('tm_pc_current_job_v1', rawKeysFound) || {};
     const bundle = readLocalKey('tm_pc_webhook_bundle_v1', rawKeysFound) || {};
     const homePayloadRaw = readLocalKey('tm_pc_home_quote_grab_payload_v1', rawKeysFound) || {};
-    const autoPayloadRaw = readLocalKey('tm_pc_auto_quote_grab_payload_v1', rawKeysFound) || {};
     const homePayload = isLegacyTimeoutOwnedProductPayload(homePayloadRaw) ? {} : homePayloadRaw;
-    const autoPayload = isLegacyTimeoutOwnedProductPayload(autoPayloadRaw) ? {} : autoPayloadRaw;
     const timeoutRuntime = readLocalKey('tm_pc_header_timeout_runtime_v2', rawKeysFound);
     const timeoutSentEvents = readLocalKey('tm_pc_header_timeout_sent_events_v2', rawKeysFound);
 
@@ -1284,7 +1249,7 @@
     }
 
     return {
-      azId: norm(signal?.azId || currentJob?.['AZ ID'] || bundle?.['AZ ID'] || homePayload?.['AZ ID'] || autoPayload?.['AZ ID'] || ''),
+      azId: norm(signal?.azId || currentJob?.['AZ ID'] || bundle?.['AZ ID'] || homePayload?.['AZ ID'] || ''),
       savedAt: nowIso(),
       signalPostedAt: norm(signal?.postedAt || ''),
       signalKey: buildSignalKey(signal),
@@ -1292,7 +1257,6 @@
       currentJob: isPlainObject(currentJob) ? currentJob : {},
       bundle: isPlainObject(bundle) ? bundle : {},
       homePayload: isPlainObject(homePayload) ? homePayload : {},
-      autoPayload: isPlainObject(autoPayload) ? autoPayload : {},
       timeoutPayload: Object.keys(timeoutPayload).length ? timeoutPayload : {},
       rawKeysFound
     };
@@ -1355,9 +1319,7 @@
 
   function syncMirroredProductPayloadsFromGwpc() {
     if (!isGwpcHost()) return false;
-    const homeChanged = syncMirroredProductPayload('home', GM_KEYS.homePayload);
-    const autoChanged = syncMirroredProductPayload('auto', GM_KEYS.autoPayload);
-    return homeChanged || autoChanged;
+    return syncMirroredProductPayload('home', GM_KEYS.homePayload);
   }
 
   function bridgePayloadToAzLocal() {
@@ -1376,7 +1338,7 @@
   function bridgeProductPayloadsToAzLocal() {
     if (!isAzHost()) return false;
     let bridged = false;
-    for (const key of [GM_KEYS.homePayload, GM_KEYS.autoPayload]) {
+    for (const key of [GM_KEYS.homePayload]) {
       const localPayload = readLocalJson(key);
       const payload = readGM(key, null);
       if (isLegacyTimeoutOwnedProductPayload(payload)) {

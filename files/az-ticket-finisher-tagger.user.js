@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.39
+// @version      1.0.40
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.39';
+  const VERSION = '1.0.40';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -40,7 +40,6 @@
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
-    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     azCurrentJob: 'tm_az_current_job_v1',
     currentJob: 'tm_pc_current_job_v1',
     missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
@@ -70,7 +69,6 @@
     'Standard Pricing Auto Discount',
     'Enhance Pricing Auto Discount',
     'Home Submission Number',
-    'Auto Submission Number',
     'Account Number'
   ];
 
@@ -996,18 +994,6 @@
         'Submission Number',
         'Done?'
       ]) * 3;
-    } else {
-      score += countFilledKeys(row, [
-        'Auto',
-        'Submission Number (Auto)',
-        'Total Policy Premium',
-        'PrimaryInsuredName',
-        'PA_All_Coverages'
-      ]) * 4;
-      if (Array.isArray(raw?.drivers) && raw.drivers.length) score += 4;
-      if (Array.isArray(raw?.vehicles) && raw.vehicles.length) score += 4;
-      if (Array.isArray(data?.drivers) && data.drivers.length) score += 4;
-      if (Array.isArray(data?.vehicles) && data.vehicles.length) score += 4;
     }
 
     return score;
@@ -1120,13 +1106,9 @@
 
     const payload = isPlainObject(options.payload) ? options.payload : {};
     const homeChoice = options.homeChoice || {};
-    const autoChoice = options.autoChoice || {};
     const homeRaw = isPlainObject(homeChoice.raw) ? homeChoice.raw : {};
-    const autoRaw = isPlainObject(autoChoice.raw) ? autoChoice.raw : {};
     const home = unwrapProductPayload(homeRaw);
-    const auto = unwrapProductPayload(autoRaw);
     const homeRow = getProductRow(homeRaw);
-    const autoRow = getProductRow(autoRaw);
 
     const doneValue = pickFirst(
       homeRaw['Done?'],
@@ -1134,18 +1116,6 @@
       homeRow['Done?'],
       payload.bundle?.home?.data?.row?.['Done?'],
       payload.bundle?.home?.ready ? 'Yes' : ''
-    );
-
-    const autoBranchExists = isPlainObject(payload.bundle?.auto) || isPlainObject(autoRaw) || isPlainObject(payload.autoPayload);
-    const autoValue = pickFirst(
-      autoRaw['Auto'],
-      auto['Auto'],
-      autoRaw.auto,
-      auto.auto,
-      autoRaw.data?.auto,
-      auto.data?.auto,
-      autoRow['Auto'],
-      payload.bundle?.auto?.ready ? 'Yes' : (autoBranchExists ? 'No' : '')
     );
 
     const homeSubmission = pickFirst(
@@ -1156,17 +1126,6 @@
       home.submissionNumber,
       home.currentJob?.SubmissionNumber,
       payload.bundle?.home?.submissionNumber
-    );
-
-    const autoSubmission = pickFirst(
-      autoRaw['Submission Number (Auto)'],
-      auto['Submission Number (Auto)'],
-      autoRaw.submissionNumberAuto,
-      auto.submissionNumberAuto,
-      autoRaw.autoSubmissionNumber,
-      auto.autoSubmissionNumber,
-      autoRow['Submission Number (Auto)'],
-      payload.bundle?.auto?.submissionNumber
     );
 
     const accountNumber = pickFirst(
@@ -1193,24 +1152,19 @@
       'Standard Pricing Auto Discount': pickFirst(homeRow['Standard Pricing Auto Discount']),
       'Enhance Pricing Auto Discount': pickFirst(homeRow['Enhance Pricing Auto Discount']),
       'Home Submission Number': homeSubmission,
-      'Auto Submission Number': autoSubmission,
       'Account Number': accountNumber
     };
 
     const noteLines = [
       `Home Submission Number: ${homeSubmission}`,
-      `Auto Submission Number: ${autoSubmission}`,
       `Account Number: ${accountNumber}`,
-      `Done?: ${doneValue}`,
-      `Auto: ${autoValue}`
+      `Done?: ${doneValue}`
     ];
 
     const hasSubstantiveProductData = (
       Number(homeChoice.score || 0) > 0 ||
-      Number(autoChoice.score || 0) > 0 ||
       Object.keys(getNormalizedWorkflowFields(fields)).length > 0 ||
-      !!norm(doneValue) ||
-      !!norm(autoValue)
+      !!norm(doneValue)
     );
 
     if (!hasSubstantiveProductData) return null;
@@ -1221,17 +1175,14 @@
       fields,
       note: {
         homeSubmission,
-        autoSubmission,
         accountNumber,
         doneValue,
-        autoValue,
         text: noteLines.join('\n')
       },
       sources: {
-        home: formatProductChoiceSource(homeChoice, options.homeSourceFallback || 'missing-payload'),
-        auto: formatProductChoiceSource(autoChoice, options.autoSourceFallback || 'missing-payload')
+        home: formatProductChoiceSource(homeChoice, options.homeSourceFallback || 'missing-payload')
       },
-      chooseSuccessfulTag: options.forceFailedTag ? false : (normalizeYes(doneValue) && normalizeYes(autoValue)),
+      chooseSuccessfulTag: options.forceFailedTag ? false : normalizeYes(doneValue),
       missingPayloadFallback: options.missingPayloadFallback === true
     };
   }
@@ -1257,20 +1208,16 @@
         'Standard Pricing Auto Discount': '',
         'Enhance Pricing Auto Discount': '',
         'Home Submission Number': '',
-        'Auto Submission Number': '',
         'Account Number': ''
       },
       note: {
         homeSubmission: '',
-        autoSubmission: '',
         accountNumber: '',
         doneValue: 'Skipped missing payload',
-        autoValue: 'No',
         text: 'Skipped missing payload'
       },
       sources: {
-        home: 'missing-payload',
-        auto: 'missing-payload'
+        home: 'missing-payload'
       },
       chooseSuccessfulTag: false,
       missingPayloadFallback: true
@@ -1285,18 +1232,12 @@
       { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
       { source: 'final-home-bundle', raw: payload.bundle?.home?.data, sourceRank: 1 }
     ], minSavedMs);
-    const autoChoice = choosePreferredProductPayload('auto', finalPayload.azId, [
-      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 3 },
-      { source: 'final-auto-payload', raw: isPlainObject(payload.autoPayload) ? payload.autoPayload : null, sourceRank: 2 },
-      { source: 'final-auto-bundle', raw: payload.bundle?.auto?.data, sourceRank: 1 }
-    ], minSavedMs);
 
     return buildWorkflowDataFromProductChoices({
       azId: finalPayload.azId,
       payloadSavedAt: norm(payload.savedAt || finalPayload.ready.savedAt || ''),
       payload,
-      homeChoice,
-      autoChoice
+      homeChoice
     }) || buildMissingPayloadWorkflowData(finalPayload.azId);
   }
 
@@ -1306,16 +1247,12 @@
     const homeChoice = choosePreferredProductPayload('home', azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 2 }
     ], minSavedMs);
-    const autoChoice = choosePreferredProductPayload('auto', azId, [
-      { source: 'bridged-auto', raw: readDirectProductPayload(GM_KEYS.autoPayload), sourceRank: 2 }
-    ], minSavedMs);
 
     return buildWorkflowDataFromProductChoices({
       azId,
       payloadSavedAt: '',
       payload: {},
       homeChoice,
-      autoChoice,
       forceFailedTag: true,
       missingPayloadFallback: true
     }) || buildBlankMissingWorkflowData(azId);
@@ -2425,10 +2362,10 @@
     }
 
     state.activeAzId = data.azId;
-    const sourceSignature = `${data.sources.home} | ${data.sources.auto}`;
+    const sourceSignature = `${data.sources.home}`;
     if (state.lastPayloadSourceSignature !== sourceSignature) {
       state.lastPayloadSourceSignature = sourceSignature;
-      log(`Payload sources | Home=${data.sources.home} | Auto=${data.sources.auto}`);
+      log(`Payload source | Home=${data.sources.home}`);
     }
 
     if (!data.missingPayloadFallback && !hasAllFieldTargets()) {
@@ -2495,7 +2432,7 @@
         if (data.missingPayloadFallback) {
           log('Note data | Skipped missing payload');
         } else {
-          log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Auto Submission=${data.note.autoSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'} | Auto=${data.note.autoValue || '(blank)'}`);
+          log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'}`);
         }
         const noteOk = await addPinnedNote(data.note.text);
         if (noteOk) {
