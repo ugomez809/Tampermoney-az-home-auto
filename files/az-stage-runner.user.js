@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.24
+// @version      2.5.25
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.24';
+  const VERSION = '2.5.25';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -1450,6 +1450,7 @@
 
   async function waitForTicketClosedByFinisher(ticketId) {
     let lastLogAt = 0;
+    let drawerHiddenLogged = false;
 
     while (state.running && !state.destroyed) {
       if (consumeFinisherWakeTrigger(ticketId)) {
@@ -1458,9 +1459,12 @@
 
       const info = getOpenTicketInfo();
       if (!isTicketDrawerOpen() || !String(info.ticketId || '')) {
-        clearFinisherCloseSignal();
-        log(`Ticket closed after finisher | ${ticketId}`, 'ok');
-        return true;
+        if (!drawerHiddenLogged) {
+          drawerHiddenLogged = true;
+          log(`Ticket drawer hidden before finisher signal; waiting for finisher close trigger | ${ticketId}`, 'warn');
+        }
+        await waitForWakeOrTimeout(CFG.ticketClosePollMs);
+        continue;
       }
 
       if (String(info.ticketId || '') !== String(ticketId) && String(info.ticketId || '') !== '') {
@@ -1470,7 +1474,7 @@
       }
 
       const now = Date.now();
-      if (!lastLogAt || (now - lastLogAt) >= CFG.ticketCloseWaitLogEveryMs) {
+      if (!lastLogAt || (now - lastLogAt) >= CFG.ticketCloseLogEveryMs) {
         log(`Waiting for finisher to close ${ticketId}...`, 'warn');
         lastLogAt = now;
       }
