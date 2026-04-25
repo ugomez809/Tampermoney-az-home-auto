@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.29
+// @version      2.5.30
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.29';
+  const VERSION = '2.5.30';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -214,7 +214,10 @@
     frontIdleLastSignature: '',
     frontIdleArmedLogged: false,
     frontIdleReloadPending: false,
+    frontIdleBusyLogged: false,
     refreshRequiredThisLoad: false,
+    activeTicketId: '',
+    fatalFallbackInFlight: false,
     externalWakeTick: 0,
     storageWakeHandler: null,
     pendingStartTimer: 0,
@@ -426,6 +429,7 @@
     state.frontIdleFrontSinceAt = 0;
     state.frontIdleArmedLogged = false;
     state.frontIdleReloadPending = false;
+    state.frontIdleBusyLogged = false;
     state.frontIdleLastActivityAt = Date.now();
     state.frontIdleLastSignature = getFrontIdleSignature();
   }
@@ -538,6 +542,7 @@
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
+      state.frontIdleBusyLogged = false;
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
     }
@@ -546,15 +551,32 @@
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
+      state.frontIdleBusyLogged = false;
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
     }
+
+    if (state.busy || state.fatalFallbackInFlight) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      state.frontIdleLastActivityAt = Date.now();
+      state.frontIdleLastSignature = getFrontIdleSignature();
+      if (!state.frontIdleBusyLogged) {
+        state.frontIdleBusyLogged = true;
+        log('Front idle reload suppressed: launcher is actively working', 'info');
+      }
+      return;
+    }
+
+    state.frontIdleBusyLogged = false;
 
     const openTicket = getOpenTicketInfo();
     if (isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
+      state.frontIdleBusyLogged = false;
       state.frontIdleLastActivityAt = Date.now();
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
@@ -570,6 +592,7 @@
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
+      state.frontIdleBusyLogged = false;
       return;
     }
 
@@ -1363,9 +1386,66 @@
     log(isRestore ? 'Restored | mode=HOME' : 'Started | mode=HOME', 'ok');
 
     runLoop().catch(err => {
-      log(`Fatal: ${err?.message || err}`, 'error');
-      stopRun('Error');
+      handleRunLoopFatal(err).catch(fallbackErr => {
+        log(`Fatal fallback failed: ${fallbackErr?.message || fallbackErr}`, 'error');
+        stopRun('Error');
+      });
     });
+  }
+
+  async function handleRunLoopFatal(err) {
+    if (state.fatalFallbackInFlight) return;
+
+    const message = norm(err?.message || err || 'Unknown launcher error') || 'Unknown launcher error';
+    log(`Fatal: ${message}`, 'error');
+
+    const openTicket = getOpenTicketInfo();
+    const activeTicketId = norm(state.activeTicketId || openTicket.ticketId || '');
+    const openTicketId = norm(openTicket.ticketId || '');
+    const canFailCurrentTicket = !!(
+      activeTicketId
+      && openTicketId
+      && openTicketId === activeTicketId
+      && isTicketDrawerOpen()
+    );
+
+    if (!canFailCurrentTicket) {
+      stopRun('Error');
+      return;
+    }
+
+    state.fatalFallbackInFlight = true;
+    state.busy = true;
+    syncUi();
+
+    try {
+      clearFinisherCloseSignal();
+      clearMissingPayloadTrigger();
+      publishMissingPayloadTrigger(activeTicketId, `LAUNCHER ERROR: ${message}`);
+      setStatus('WAITING ERROR FINISHER');
+      clearDockHighlight();
+
+      const ticketClosed = await waitForTicketClosedByFinisher(activeTicketId, {
+        maxWaitMs: CFG.missingPayloadFinisherMaxWaitMs,
+        timeoutLabel: 'launcher error finisher'
+      });
+
+      if (ticketClosed) {
+        state.processedIds.add(activeTicketId);
+        clearMainPayloadFailure(activeTicketId);
+        clearMissingPayloadTrigger();
+        blockUntilRefresh(activeTicketId);
+        return;
+      }
+
+      setStatus('STOPPED ERROR FINISHER TIMEOUT');
+      log(`Launcher error fallback did not finish within ${Math.round(CFG.missingPayloadFinisherMaxWaitMs / 1000)}s; stopping instead of refreshing`, 'error');
+      stopRun('Launcher error finisher timeout');
+    } finally {
+      state.fatalFallbackInFlight = false;
+      if (!state.running) state.busy = false;
+      syncUi();
+    }
   }
 
   function stopRun(reason = 'Stopped', { manual = false } = {}) {
@@ -1467,6 +1547,7 @@
         const ticketId = norm(card.getAttribute('data-id'));
         const cardName = norm(card.querySelector(SEL.customerLink)?.textContent);
 
+        state.activeTicketId = ticketId;
         updateLastId(ticketId);
         highlightCard(card, 'checking');
         log(`Opening | ${ticketId} | ${cardName || 'Unknown'}`, 'info');
