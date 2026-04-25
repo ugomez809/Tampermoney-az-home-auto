@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.38
+// @version      1.0.39
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.38';
+  const VERSION = '1.0.39';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -948,7 +948,7 @@
     const currentJobMs = getCurrentJobUpdatedMs(currentJob);
     if (!currentJobMs) return false;
     if (!payloadSavedMs) return true;
-    return (payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs;
+    return false;
   }
 
   function countFilledKeys(value, keys) {
@@ -1279,8 +1279,7 @@
 
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
-    const currentJob = getBestCurrentJobForAz(finalPayload.azId);
-    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
+    const minSavedMs = 0;
     const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
       { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
@@ -1303,8 +1302,7 @@
 
   function buildMissingPayloadWorkflowData(ticketId) {
     const azId = norm(ticketId || '');
-    const currentJob = getBestCurrentJobForAz(azId);
-    const minSavedMs = getCurrentJobUpdatedMs(currentJob);
+    const minSavedMs = 0;
     const homeChoice = choosePreferredProductPayload('home', azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 2 }
     ], minSavedMs);
@@ -2621,6 +2619,18 @@
     const effectiveAzId = norm(workflowPayload?.azId || fallbackTicketId || openTicket.ticketId || '');
 
     state.activeAzId = effectiveAzId;
+
+    if (fallbackMissingPayload && !missingPayloadTrigger && !state.forceRunRequested && effectiveAzId) {
+      const runRecord = computeRunRecord(readRuns(), effectiveAzId);
+      if (runRecord.completedAt) {
+        resetWaitingTicketMismatch();
+        markFrontRunCompleted(openTicket.ticketId || effectiveAzId);
+        setStatus('Completed earlier');
+        log(`Skipping missing payload fallback for AZ ${effectiveAzId}; previous completion already exists`);
+        renderAll();
+        return;
+      }
+    }
 
     if (!openTicket.ticketId && !finalPayload) {
       resetWaitingTicketMismatch();
