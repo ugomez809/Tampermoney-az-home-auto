@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.5
+// @version      1.18.6
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.5';
+  const VERSION = '1.18.6';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -62,7 +62,7 @@
   };
 
   const state = {
-    running: sessionStorage.getItem(CFG.stoppedKey) !== '1',
+    running: true,
     busy: false,
     quoteSeenAt: 0,
     destroyed: false,
@@ -91,6 +91,7 @@
   init();
 
   function init() {
+    clearStoppedForPageLoad();
     clearStaleSharedPause();
     hydrateWebhookStorage();
     buildUI();
@@ -298,6 +299,10 @@
     state.lastStatus = text;
     if (state.statusEl) state.statusEl.textContent = text;
     writeActivityState(state.activityState, text);
+  }
+
+  function clearStoppedForPageLoad() {
+    try { sessionStorage.removeItem(CFG.stoppedKey); } catch {}
   }
 
   function readScriptActivityMap() {
