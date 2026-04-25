@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.4
+// @version      3.9.5
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.4';
+  const VERSION = '3.9.5';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -36,10 +36,12 @@
   const CFG = {
     tickMs: 900,
     clickPauseMs: 400,
+    beforeRunDelayMs: 2000,
     fieldWaitMs: 25000,
     optionalFieldWaitMs: 2500,
     fieldsWaitAfterCreateMs: 30000,
     afterLocationReportsMs: 3000,
+    afterCreateValuationClickMs: 5000,
     beforeQuoteWaitMs: 5000,
     afterQuoteWaitMs: 10000,
     afterGarageFixMs: 1200,
@@ -403,8 +405,12 @@
     return [exactRoleBtn, roleBtn, inner, label, wrap].filter(Boolean);
   }
 
+  function getBestCreateTarget() {
+    return getCreateTargets()[0] || null;
+  }
+
   function hasCreateValuationButton() {
-    return getCreateTargets().length > 0;
+    return !!getBestCreateTarget();
   }
 
   function hasConfirmRiskAddressPrompt() {
@@ -446,29 +452,34 @@
 
   async function clickCreateValuation() {
     await clickGetLocationReportsIfNeeded();
-    const targets = getCreateTargets();
+    const el = getBestCreateTarget();
 
-    if (!targets.length) {
+    if (!el) {
       log('Create Valuation not available. Going straight to fill');
       return false;
     }
 
-    for (const el of targets) {
-      const txt = (el.textContent || '').trim();
-      const tag = el.tagName.toLowerCase();
-      const cls = String(el.className || '').trim().replace(/\s+/g, '.');
-      log(`Trying Create Valuation -> ${tag}${cls ? '.' + cls : ''}${txt ? ` [${txt}]` : ''}`);
+    const txt = normalizeText(el.textContent || el.getAttribute?.('aria-label') || '');
+    const tag = el.tagName.toLowerCase();
+    const cls = String(el.className || '').trim().replace(/\s+/g, '.');
+    log(`Trying Create Valuation -> ${tag}${cls ? '.' + cls : ''}${txt ? ` [${txt}]` : ''}`);
 
-      strongClick(el);
-      await sleep(CFG.clickPauseMs);
-
-      if (fieldsReady()) {
-        log('Dwelling fields appeared after Create Valuation');
-        return true;
-      }
+    if (!strongClick(el)) {
+      log('Create Valuation click did not succeed');
+      return false;
     }
 
-    return false;
+    log('Clicked Create Valuation once');
+    log('Waiting 5s after Create Valuation click');
+    await sleep(CFG.afterCreateValuationClickMs);
+
+    if (fieldsReady()) {
+      log('Dwelling fields appeared after Create Valuation');
+    } else {
+      log('Dwelling fields not ready yet after 5s wait');
+    }
+
+    return true;
   }
 
   async function ensureRadioChecked(id, label) {
@@ -878,6 +889,13 @@
     log(message);
   }
 
+  async function waitBeforeDwellingRun() {
+    setStatus('Waiting 2s before Dwelling run');
+    log('Waiting 2s before Dwelling run');
+    await sleep(CFG.beforeRunDelayMs);
+    if (!state.running) throw new Error('Stopped');
+  }
+
   async function tick() {
     if (!state.running || state.busy || state.done) return;
     if ((Date.now() - state.lastTabNudgeAt) < CFG.tabNudgeSettleMs) {
@@ -902,6 +920,13 @@
     state.busy = true;
     writeActivityState('active', 'Working Dwelling');
     try {
+      await waitBeforeDwellingRun();
+
+      if (!isDwellingHere()) {
+        setStatus('Waiting for Dwelling tab');
+        return;
+      }
+
       if (fieldsReady()) {
         setStatus('Filling Dwelling');
         await fillDwellingFlow();
