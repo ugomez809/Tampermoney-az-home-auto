@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.17
+// @version      1.0.18
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
+// @grant        GM_openInTab
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
 // ==/UserScript==
@@ -24,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.17';
+  const VERSION = '1.0.18';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -48,12 +49,15 @@
     lexCloseConsumed: 'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
     ignoreCloseLease: 'tm_pc_payload_mirror_ignore_close_lease_v1',
     webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
+    tabHeartbeats: 'tm_payload_mirror_tab_heartbeats_v1',
+    apexWakeState: 'tm_payload_mirror_apex_wake_state_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
 
   const LS_KEYS = {
     running: 'tm_pc_payload_mirror_running_v1',
+    apexWakeEnabled: 'tm_payload_mirror_apex_wake_enabled_v1',
     panelPos: 'tm_pc_payload_mirror_panel_pos_v1'
   };
 
@@ -76,6 +80,14 @@
     maxSignalAgeMs: 90000,
     closeDelayMs: 5000,
     samePageCloseMs: 5 * 60 * 1000,
+    tabHeartbeatMs: 5000,
+    apexWakeMissingMs: 10 * 60 * 1000,
+    apexWakeOpenMs: 20000,
+    apexWakeCooldownMs: 60000,
+    apexWakeUrls: [
+      'https://farmersagent.lightning.force.com/',
+      'https://farmersagent.lightning.force.com/lightning/page/home'
+    ],
     ignoreCloseLeaseTtlMs: 8000,
     ignoreCloseLeaseHeartbeatMs: 1500,
     maxLogLines: 70,
@@ -103,6 +115,13 @@
     closeSignalKey: '',
     logsIntervalTimer: null,
     tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    apexWakeEnabled: loadApexWakeEnabled(),
+    apexWakeMonitorStartedAt: Date.now(),
+    apexWakeTab: null,
+    apexWakeCloseAt: 0,
+    apexWakeStatus: '',
+    lastTabHeartbeatAt: 0,
+    lastApexWakeLogKey: '',
     lastIgnoreCloseLeaseHeartbeatAt: 0,
     lastIgnoreCloseSignalKey: '',
     lastWebhookFatalHoldLogKey: '',
@@ -122,6 +141,8 @@
 
     log(`Loaded v${VERSION}`);
     log(`Host: ${location.hostname}`);
+    writeTabHeartbeat(true);
+    if (isAzHost()) log(`APEX wake monitor ${state.apexWakeEnabled ? 'ON' : 'OFF'}`);
     setStatus(state.running ? 'Watching for webhook success' : 'Stopped');
 
     if (typeof GM_addValueChangeListener === 'function') {
@@ -187,6 +208,15 @@
       if (on) localStorage.removeItem(LS_KEYS.running);
       else localStorage.setItem(LS_KEYS.running, '0');
     } catch {}
+  }
+
+  function loadApexWakeEnabled() {
+    try { return localStorage.getItem(LS_KEYS.apexWakeEnabled) !== '0'; }
+    catch { return true; }
+  }
+
+  function saveApexWakeEnabled(on) {
+    try { localStorage.setItem(LS_KEYS.apexWakeEnabled, on ? '1' : '0'); } catch {}
   }
 
   function readJson(raw, fallback = null) {
@@ -336,6 +366,24 @@
   function handlePageUnload() {
     clearIgnoreCloseLeaseIfOwned();
     persistPanelPos();
+  }
+
+  function parseTimeMs(value) {
+    const ms = Date.parse(norm(value || ''));
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  function formatAge(ms) {
+    const safe = Math.max(0, Number(ms || 0));
+    if (safe < 1000) return '0s';
+    const seconds = Math.floor(safe / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const restSeconds = seconds % 60;
+    if (minutes < 60) return restSeconds ? `${minutes}m ${restSeconds}s` : `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
   }
 
   function buildSignalKey(signal) {
@@ -538,6 +586,221 @@
       if (azId) return azId;
     }
     return norm(state.activeSignal?.azId || readMirroredPayloadMeta()?.azId || '');
+  }
+
+  function getHeartbeatKind() {
+    if (isAzHost()) return 'az';
+    if (isLexHost()) return 'lex';
+    if (isGwpcHost()) return 'gwpc';
+    return '';
+  }
+
+  function readTabHeartbeats() {
+    const gmValue = readGM(GM_KEYS.tabHeartbeats, null);
+    if (isPlainObject(gmValue)) return gmValue;
+    return {};
+  }
+
+  function saveTabHeartbeats(next) {
+    writeGM(GM_KEYS.tabHeartbeats, isPlainObject(next) ? next : {});
+  }
+
+  function writeTabHeartbeat(force = false) {
+    const kind = getHeartbeatKind();
+    if (!kind) return;
+    const now = Date.now();
+    if (!force && (now - Number(state.lastTabHeartbeatAt || 0)) < CFG.tabHeartbeatMs) return;
+    state.lastTabHeartbeatAt = now;
+
+    const heartbeats = readTabHeartbeats();
+    heartbeats[kind] = {
+      kind,
+      tabId: state.tabId,
+      host: location.hostname,
+      url: location.href,
+      title: document.title,
+      updatedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    saveTabHeartbeats(heartbeats);
+  }
+
+  function getLastNonAzHeartbeatMs(heartbeats = null) {
+    const value = isPlainObject(heartbeats) ? heartbeats : readTabHeartbeats();
+    return Math.max(
+      parseTimeMs(value?.lex?.updatedAt),
+      parseTimeMs(value?.gwpc?.updatedAt)
+    );
+  }
+
+  function readApexWakeState() {
+    const value = readGM(GM_KEYS.apexWakeState, null);
+    return isPlainObject(value) ? value : {};
+  }
+
+  function saveApexWakeState(next) {
+    writeGM(GM_KEYS.apexWakeState, isPlainObject(next) ? next : {});
+  }
+
+  function chooseApexWakeUrl() {
+    const urls = Array.isArray(CFG.apexWakeUrls) ? CFG.apexWakeUrls.filter(Boolean) : [];
+    if (!urls.length) return 'https://farmersagent.lightning.force.com/';
+    return urls[Math.floor(Math.random() * urls.length)];
+  }
+
+  function isWakeStateActive(wakeState) {
+    if (!isPlainObject(wakeState) || wakeState.wakeActive !== true) return false;
+    const closeAtMs = parseTimeMs(wakeState.wakeCloseAt);
+    if (!closeAtMs) return false;
+    return Date.now() < (closeAtMs + CFG.apexWakeOpenMs);
+  }
+
+  function closeOwnedApexWakeTabIfReady() {
+    if (!state.apexWakeCloseAt || Date.now() < state.apexWakeCloseAt) return;
+
+    let closeOk = false;
+    try {
+      if (state.apexWakeTab && typeof state.apexWakeTab.close === 'function') {
+        state.apexWakeTab.close();
+        closeOk = true;
+      }
+    } catch {}
+
+    const wakeState = readApexWakeState();
+    if (norm(wakeState.ownerTabId || '') === state.tabId) {
+      saveApexWakeState({
+        ...wakeState,
+        wakeActive: false,
+        wakeClosedAt: nowIso(),
+        closeOk,
+        missingSinceAt: nowIso(),
+        source: SCRIPT_NAME,
+        version: VERSION
+      });
+    }
+
+    state.apexWakeTab = null;
+    state.apexWakeCloseAt = 0;
+    state.apexWakeStatus = closeOk ? 'Wake tab closed' : 'Wake close attempted';
+    log(closeOk ? 'APEX wake tab closed after 20s' : 'APEX wake tab close attempted, but no closable tab handle was available');
+  }
+
+  function openApexWakeTab() {
+    if (typeof GM_openInTab !== 'function') {
+      state.apexWakeStatus = 'GM_openInTab unavailable';
+      log('APEX wake skipped: GM_openInTab unavailable');
+      return false;
+    }
+
+    const now = Date.now();
+    const startedAt = nowIso();
+    const wakeUrl = chooseApexWakeUrl();
+    const closeAt = new Date(now + CFG.apexWakeOpenMs).toISOString();
+    const wakeState = {
+      wakeActive: true,
+      ownerTabId: state.tabId,
+      ownerHost: location.hostname,
+      ownerUrl: location.href,
+      wakeUrl,
+      wakeStartedAt: startedAt,
+      wakeCloseAt: closeAt,
+      lastWakeAt: startedAt,
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+
+    saveApexWakeState(wakeState);
+
+    try {
+      state.apexWakeTab = GM_openInTab(wakeUrl, {
+        active: false,
+        insert: true,
+        setParent: true
+      });
+      state.apexWakeCloseAt = now + CFG.apexWakeOpenMs;
+      state.apexWakeStatus = 'Wake tab open';
+      log(`APEX wake opened for 20s | ${wakeUrl}`);
+      return true;
+    } catch (err) {
+      saveApexWakeState({
+        ...wakeState,
+        wakeActive: false,
+        wakeFailedAt: nowIso(),
+        error: norm(err?.message || err || 'open failed')
+      });
+      state.apexWakeStatus = 'Wake open failed';
+      log(`APEX wake open failed: ${err?.message || err}`);
+      return false;
+    }
+  }
+
+  function checkApexWakeMonitor() {
+    closeOwnedApexWakeTabIfReady();
+    if (!isAzHost()) {
+      state.apexWakeStatus = 'AZ only';
+      return;
+    }
+    if (!state.apexWakeEnabled) {
+      state.apexWakeStatus = 'Off';
+      return;
+    }
+
+    const heartbeats = readTabHeartbeats();
+    const lastNonAzMs = getLastNonAzHeartbeatMs(heartbeats);
+    const wakeState = readApexWakeState();
+
+    if (lastNonAzMs && (Date.now() - lastNonAzMs) < CFG.apexWakeMissingMs) {
+      if (norm(wakeState.missingSinceAt || '')) {
+        saveApexWakeState({
+          ...wakeState,
+          missingSinceAt: '',
+          lastHealthyAt: nowIso(),
+          source: SCRIPT_NAME,
+          version: VERSION
+        });
+      }
+      state.apexWakeStatus = `Healthy ${formatAge(Date.now() - lastNonAzMs)} ago`;
+      state.lastApexWakeLogKey = '';
+      return;
+    }
+
+    let missingSinceMs = parseTimeMs(wakeState.missingSinceAt);
+    const derivedMissingSinceMs = Math.max(lastNonAzMs || missingSinceMs || Date.now(), Number(state.apexWakeMonitorStartedAt || 0));
+    if (!missingSinceMs || Math.abs(missingSinceMs - derivedMissingSinceMs) > 1000) {
+      missingSinceMs = derivedMissingSinceMs;
+      saveApexWakeState({
+        ...wakeState,
+        missingSinceAt: new Date(missingSinceMs).toISOString(),
+        source: SCRIPT_NAME,
+        version: VERSION
+      });
+    }
+
+    const missingMs = Date.now() - missingSinceMs;
+    const remainingMs = Math.max(0, CFG.apexWakeMissingMs - missingMs);
+    if (remainingMs > 0) {
+      state.apexWakeStatus = `Missing, wake in ${formatAge(remainingMs)}`;
+      return;
+    }
+
+    if (isWakeStateActive(wakeState)) {
+      state.apexWakeStatus = 'Wake already active';
+      return;
+    }
+
+    const lastWakeMs = parseTimeMs(wakeState.lastWakeAt || wakeState.wakeStartedAt);
+    if (lastWakeMs && (Date.now() - lastWakeMs) < CFG.apexWakeCooldownMs) {
+      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - (Date.now() - lastWakeMs))}`;
+      return;
+    }
+
+    const logKey = `missing-${Math.floor(missingSinceMs / 1000)}`;
+    if (state.lastApexWakeLogKey !== logKey) {
+      state.lastApexWakeLogKey = logKey;
+      log('No APEX/LEX or GWPC heartbeat for 10m; opening APEX wake tab');
+    }
+    openApexWakeTab();
   }
 
   function readWebhookFatalHold() {
@@ -1289,6 +1552,8 @@
 
   function tick(reason = 'tick') {
     if (state.destroyed) return;
+    writeTabHeartbeat();
+    closeOwnedApexWakeTabIfReady();
     refreshIgnoreCloseLeaseHeartbeat();
     if (!state.running) {
       setStatus('Stopped');
@@ -1378,6 +1643,7 @@
     }
 
     checkGwpcSamePageCloseWatchdog();
+    checkApexWakeMonitor();
     renderAll();
   }
 
@@ -1416,6 +1682,18 @@
         : (active ? 'IGNORE CLOSE ACTIVE' : 'IGNORE CLOSE OFF');
       state.ui.ignoreClose.style.background = owned ? '#b45309' : (active ? '#7c2d12' : '#475569');
       state.ui.ignoreClose.style.opacity = active && !owned ? '.92' : '1';
+    }
+
+    if (state.ui.apexWake) {
+      state.ui.apexWake.textContent = state.apexWakeEnabled ? 'APEX WAKE ON' : 'APEX WAKE OFF';
+      state.ui.apexWake.style.background = state.apexWakeEnabled ? '#0f766e' : '#475569';
+      state.ui.apexWake.disabled = !isAzHost();
+      state.ui.apexWake.style.opacity = isAzHost() ? '1' : '.55';
+      state.ui.apexWake.style.cursor = isAzHost() ? 'pointer' : 'not-allowed';
+    }
+
+    if (state.ui.apexWakeStatus) {
+      state.ui.apexWakeStatus.textContent = state.apexWakeStatus || (isAzHost() ? 'Watching' : 'AZ only');
     }
 
     renderLogs();
@@ -1458,12 +1736,14 @@
           <button id="tm-payload-mirror-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button id="tm-payload-mirror-download" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#1d4ed8;color:#fff;font-weight:800;cursor:pointer;">DOWNLOAD MIRROR</button>
           <button id="tm-payload-mirror-ignore-close" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">IGNORE CLOSE OFF</button>
+          <button id="tm-payload-mirror-apex-wake" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">APEX WAKE ON</button>
         </div>
         <div id="tm-payload-mirror-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching for webhook success</div>
         <div style="display:grid;grid-template-columns:110px 1fr;gap:6px 8px;margin-bottom:10px;">
           <div style="opacity:.72;">AZ ID</div><div id="tm-payload-mirror-azid">-</div>
           <div style="opacity:.72;">Payload mirrored</div><div id="tm-payload-mirror-mirrored">No</div>
           <div style="opacity:.72;">Close countdown</div><div id="tm-payload-mirror-countdown">-</div>
+          <div style="opacity:.72;">APEX wake</div><div id="tm-payload-mirror-apex-wake-status">Watching</div>
         </div>
         <textarea id="tm-payload-mirror-logs" readonly style="width:100%;min-height:140px;max-height:190px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
@@ -1475,10 +1755,12 @@
     state.ui.toggle = panel.querySelector('#tm-payload-mirror-toggle');
     state.ui.download = panel.querySelector('#tm-payload-mirror-download');
     state.ui.ignoreClose = panel.querySelector('#tm-payload-mirror-ignore-close');
+    state.ui.apexWake = panel.querySelector('#tm-payload-mirror-apex-wake');
     state.ui.status = panel.querySelector('#tm-payload-mirror-status');
     state.ui.azId = panel.querySelector('#tm-payload-mirror-azid');
     state.ui.mirrored = panel.querySelector('#tm-payload-mirror-mirrored');
     state.ui.countdown = panel.querySelector('#tm-payload-mirror-countdown');
+    state.ui.apexWakeStatus = panel.querySelector('#tm-payload-mirror-apex-wake-status');
     state.ui.logs = panel.querySelector('#tm-payload-mirror-logs');
 
     makeDraggable(panel, state.ui.head);
@@ -1510,6 +1792,25 @@
       const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
       setIgnoreCloseEnabledForThisPage(!owned);
       tick('manual-ignore-close');
+    });
+
+    state.ui.apexWake?.addEventListener('click', () => {
+      if (!isAzHost()) {
+        log('APEX wake toggle is only active on AgencyZoom');
+        return;
+      }
+      state.apexWakeEnabled = !state.apexWakeEnabled;
+      saveApexWakeEnabled(state.apexWakeEnabled);
+      if (!state.apexWakeEnabled) {
+        state.apexWakeStatus = 'Off';
+        log('APEX wake monitor OFF');
+      } else {
+        state.apexWakeMonitorStartedAt = Date.now();
+        state.apexWakeStatus = 'Watching';
+        log('APEX wake monitor ON');
+        checkApexWakeMonitor();
+      }
+      renderAll();
     });
   }
 
