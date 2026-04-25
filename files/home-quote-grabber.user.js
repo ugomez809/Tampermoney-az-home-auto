@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.13
+// @version      4.1.14
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.13';
+  const VERSION = '4.1.14';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1820,6 +1820,11 @@
     const quoteAfterDiscountData = extractQuoteFields();
     const quoteAfterDiscountCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
     log(`Quote fields after auto discount: ${JSON.stringify(quoteAfterDiscountData)}`);
+    logDiscountQuotedResult(
+      'Home after auto discount',
+      [quoteAfterDiscountData, quoteAfterDiscountCustomCapture.updates],
+      { forceApplied: state.autoDiscountChosenThisLoad === true || isAutoDiscountApplied() }
+    );
 
     setStatus('Opening Dwelling');
     await goToDwelling();
@@ -1873,6 +1878,11 @@
     const quoteData = extractQuoteFields();
     const finalQuoteCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
     log(`Final quote fields read: ${JSON.stringify(quoteData)}`);
+    logDiscountQuotedResult(
+      'Home final quote',
+      [quoteData, quoteAfterDiscountData, finalQuoteCustomCapture.updates, quoteAfterDiscountCustomCapture.updates],
+      { forceApplied: state.autoDiscountChosenThisLoad === true || isAutoDiscountApplied() }
+    );
 
     const finalBaseState = normalizeHomeState(jobAfterDwelling);
     const customFieldUpdates = {
@@ -2415,6 +2425,69 @@
     };
   }
 
+  function collectDiscountEntries(...sources) {
+    const out = [];
+    const seen = new Set();
+
+    const add = (value) => {
+      const text = normalizeText(value);
+      if (!text || text === 'N/A') return;
+      if (seen.has(text)) return;
+      seen.add(text);
+      out.push(text);
+    };
+
+    const visit = (value, key = '') => {
+      if (value == null) return;
+
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        const rawText = String(value == null ? '' : value);
+        const text = normalizeText(rawText);
+        const keyText = normalizeText(key);
+        if (keyText && keyText.toLowerCase().includes('discount')) {
+          add(`${keyText}=${text || 'blank'}`);
+          return;
+        }
+        if (rawText.includes('\n')) {
+          for (const line of rawText.split(/\n+/)) {
+            const normalizedLine = normalizeText(line);
+            if (normalizedLine.toLowerCase().includes('discount')) add(normalizedLine);
+          }
+          return;
+        }
+        if (text.toLowerCase().includes('discount')) add(text);
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, key);
+        return;
+      }
+
+      if (typeof value === 'object') {
+        for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey);
+      }
+    };
+
+    for (const source of sources) visit(source);
+    return out;
+  }
+
+  function logDiscountQuotedResult(context, sources, options = {}) {
+    const entries = collectDiscountEntries(...sources);
+    if (entries.length) {
+      log(`DISCOUNT QUOTED | ${normalizeText(context || 'Quote')} | ${entries.join(' || ')}`);
+      return;
+    }
+
+    if (options.forceApplied === true) {
+      log(`DISCOUNT QUOTED | ${normalizeText(context || 'Quote')} | discount applied but no discount value was shown`);
+      return;
+    }
+
+    log(`DISCOUNT CHECK | ${normalizeText(context || 'Quote')} | no discount entries detected`);
+  }
+
   function extractSubmissionNumber() {
     const titleEl = findInDocs((doc) => {
       const nodes = doc.querySelectorAll('div.gw-Wizard--Title');
@@ -2498,6 +2571,7 @@
 
       if (isAutoDiscountApplied()) {
         log('Auto discount already selected');
+        log('DISCOUNT ADDED | Home | Auto Discount already selected');
         return;
       }
 
@@ -2519,6 +2593,7 @@
       if (ok) {
         state.autoDiscountChosenThisLoad = true;
         log('Auto discount selected');
+        log('DISCOUNT ADDED | Home | Auto Discount selected');
         return;
       }
     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.8
+// @version      2.9.9
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__AUTO_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
-  const VERSION = '2.9.8';
+  const VERSION = '2.9.9';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_auto_quote_grabber_logs_v1';
@@ -598,6 +598,7 @@
     const quoteCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
     Object.assign(customFieldValues, quoteCustomCapture.updates);
     log(`Quote read: ${JSON.stringify(quoteData)}`);
+    logDiscountQuotedResult('Auto quote', [paCoveragesData, quoteData, customFieldValues]);
 
     if (quoteData['Total Policy Premium'] === 'N/A') {
       throw new Error('Total Policy Premium not found');
@@ -1214,6 +1215,64 @@
       'Submission Number (Auto)': submission,
       'Quote_TotalCost_Raw': premium
     };
+  }
+
+  function collectDiscountEntries(...sources) {
+    const out = [];
+    const seen = new Set();
+
+    const add = (value) => {
+      const text = normalizeText(value);
+      if (!text || text === 'N/A') return;
+      if (seen.has(text)) return;
+      seen.add(text);
+      out.push(text);
+    };
+
+    const visit = (value, key = '') => {
+      if (value == null) return;
+
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        const rawText = String(value == null ? '' : value);
+        const text = normalizeText(rawText);
+        const keyText = normalizeText(key);
+        if (keyText && keyText.toLowerCase().includes('discount')) {
+          add(`${keyText}=${text || 'blank'}`);
+          return;
+        }
+        if (rawText.includes('\n')) {
+          for (const line of rawText.split(/\n+/)) {
+            const normalizedLine = normalizeText(line);
+            if (normalizedLine.toLowerCase().includes('discount')) add(normalizedLine);
+          }
+          return;
+        }
+        if (text.toLowerCase().includes('discount')) add(text);
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, key);
+        return;
+      }
+
+      if (typeof value === 'object') {
+        for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey);
+      }
+    };
+
+    for (const source of sources) visit(source);
+    return out;
+  }
+
+  function logDiscountQuotedResult(context, sources) {
+    const entries = collectDiscountEntries(...sources);
+    if (entries.length) {
+      log(`DISCOUNT QUOTED | ${normalizeText(context || 'Quote')} | ${entries.join(' || ')}`);
+      return;
+    }
+
+    log(`DISCOUNT CHECK | ${normalizeText(context || 'Quote')} | no discount entries detected`);
   }
 
   function isQuoteReady() {
