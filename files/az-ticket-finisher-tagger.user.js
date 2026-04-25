@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.34
+// @version      1.0.35
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.34';
+  const VERSION = '1.0.35';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -207,12 +207,16 @@
   }
 
   function loadRunning() {
-    try { return localStorage.getItem(LS_KEYS.running) !== '0'; }
-    catch { return true; }
+    // Always re-arm after refresh. Stop is only for the current page session.
+    try { localStorage.removeItem(LS_KEYS.running); } catch {}
+    return true;
   }
 
   function saveRunning(on) {
-    try { localStorage.setItem(LS_KEYS.running, on ? '1' : '0'); } catch {}
+    try {
+      if (on) localStorage.removeItem(LS_KEYS.running);
+      else localStorage.setItem(LS_KEYS.running, '0');
+    } catch {}
   }
 
   function readJson(raw, fallback = null) {
