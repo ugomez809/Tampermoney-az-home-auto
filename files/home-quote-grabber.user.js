@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.7
+// @version      4.1.8
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.7';
+  const VERSION = '4.1.8';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1213,7 +1213,13 @@
           const text = normalizeText(message.textContent || '');
           if (!text) continue;
           const lowerText = text.toLowerCase();
-          if (COVERAGES_WARNING_FRAGMENTS.every((fragment) => lowerText.includes(fragment))) {
+          if (
+            COVERAGES_WARNING_FRAGMENTS.every((fragment) => lowerText.includes(fragment)) ||
+            (
+              lowerText.includes('deductible has been increased') &&
+              lowerText.includes('split water deductible')
+            )
+          ) {
             return text;
           }
         }
@@ -1222,9 +1228,21 @@
     return '';
   }
 
+  function normalizeCoveragesWarningSignature(text) {
+    return normalizeText(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9$+]+/g, ' ')
+      .trim();
+  }
+
   async function clickQuoteUntilTransition() {
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
+      const baselineWarningText = getCoveragesRetryWarningText();
+      const baselineWarningSig = normalizeCoveragesWarningSignature(baselineWarningText);
+      if (baselineWarningText) {
+        log(`Pre-existing Coverages warning before Quote attempt ${attempt}: ${baselineWarningText}`);
+      }
       const clicked = clickQuoteOnce();
       if (!clicked) {
         await sleep(CFG.betweenQuoteAttemptsMs);
@@ -1232,25 +1250,40 @@
       }
       await sleep(CFG.afterQuoteWaitMs);
       const transitionOrWarning = await waitFor(
-        () => !headerStillCoverages() || !!getCoveragesRetryWarningText(),
+        () => {
+          if (!headerStillCoverages()) return true;
+          const currentWarningText = getCoveragesRetryWarningText();
+          const currentWarningSig = normalizeCoveragesWarningSignature(currentWarningText);
+          return !!currentWarningSig && currentWarningSig !== baselineWarningSig;
+        },
         CFG.quoteTransitionTimeoutMs,
         `Quote transition (attempt ${attempt})`
       );
       const warningText = getCoveragesRetryWarningText();
-      const movedOff = transitionOrWarning && !headerStillCoverages() && !warningText;
+      const warningSig = normalizeCoveragesWarningSignature(warningText);
+      const warningChanged = !!warningSig && warningSig !== baselineWarningSig;
+      const movedOff = transitionOrWarning && !headerStillCoverages();
       if (movedOff) {
         log('Quote succeeded (moved off Coverages)');
         return { ok: true, needsCoverageReapply: false, warningText: '' };
       }
-      if (warningText) {
+      if (warningChanged) {
         log(`Detected Coverages warning after Quote attempt ${attempt}: ${warningText}`);
         return { ok: false, needsCoverageReapply: true, warningText };
+      }
+      if (warningText) {
+        log(`Coverages warning still visible after Quote attempt ${attempt}: ${warningText}`);
       }
       log(`Still on Coverages after Quote attempt ${attempt}`);
       if (attempt < CFG.maxQuoteAttempts) {
         setStatus(`Waiting to retry Quote (${attempt}/${CFG.maxQuoteAttempts})`);
         await sleep(CFG.betweenQuoteAttemptsMs);
       }
+    }
+    const finalWarningText = getCoveragesRetryWarningText();
+    if (finalWarningText) {
+      log(`Coverages warning remained visible after Quote retries: ${finalWarningText}`);
+      return { ok: false, needsCoverageReapply: true, warningText: finalWarningText };
     }
     return { ok: false, needsCoverageReapply: false, warningText: '' };
   }
