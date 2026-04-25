@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.6
+// @version      1.8.7
 // @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.6';
+  const VERSION = '1.8.7';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -45,6 +45,7 @@
     afterResidenceRadioInternalMs: 250,
     afterResidenceBeforeContinueMs: 1000,
     afterContinueClickMs: 1200,
+    afterContinueBeforeCloseMs: 5000,
 
     residenceRadioAttempts: 3,
     maxLogLines: 16,
@@ -960,6 +961,9 @@
       markDoneThisLoad();
       setStatus('Done this load');
       try { clearInterval(state.tickTimer); } catch {}
+      log(`Waiting ${Math.ceil(CFG.afterContinueBeforeCloseMs / 1000)} seconds before closing APEX tab...`);
+      await sleep(CFG.afterContinueBeforeCloseMs);
+      triggerForceClose('Continue New Quote clicked. Closing APEX tab.');
     } catch (err) {
       log(`Error: ${err?.message || err}`);
       setStatus('Error');
