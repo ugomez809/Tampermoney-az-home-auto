@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.28
+// @version      2.5.29
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.28';
+  const VERSION = '2.5.29';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -51,6 +51,8 @@
     waitForHideAfterQuoteMs: 10000,
     ticketClosePollMs: 1200,
     ticketCloseLogEveryMs: 8000,
+    missingPayloadFinisherMaxWaitMs: 90 * 1000,
+    maxMainPayloadFailureAttempts: 1,
     nextRunAfterCloseMs: 3000,
     frontIdleReloadMs: 40 * 1000,
     frontIdlePollMs: 1000,
@@ -78,6 +80,7 @@
     WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1',
     FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1',
     MISSING_PAYLOAD_TRIGGER: 'tm_az_missing_payload_fallback_trigger_v1',
+    MAIN_PAYLOAD_FAILURES: 'tm_az_stage_runner_main_payload_failures_v1',
     FINAL_PAYLOAD: 'tm_az_gwpc_final_payload_v1',
     FINAL_READY: 'tm_az_gwpc_final_payload_ready_v1'
   };
@@ -141,6 +144,7 @@
     'tm_pc_payload_mirror_close_attempted_v1',
     'tm_az_gwpc_final_payload_v1',
     'tm_az_gwpc_final_payload_ready_v1',
+    KEYS.MAIN_PAYLOAD_FAILURES,
     'tm_pc_header_timeout_runtime_v2',
     'tm_pc_header_timeout_sent_events_v2',
     'tm_pc_flow_stage_v1',
@@ -681,6 +685,45 @@
     try { GM_setValue(KEYS.MISSING_PAYLOAD_TRIGGER, trigger); } catch {}
     log(`Triggered missing payload fallback | ${cleanTicketId} | ${trigger.reason}`, 'warn');
     return true;
+  }
+
+  function readMainPayloadFailures() {
+    const value = readJson(KEYS.MAIN_PAYLOAD_FAILURES, {});
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  function writeMainPayloadFailures(value) {
+    writeJson(KEYS.MAIN_PAYLOAD_FAILURES, value && typeof value === 'object' ? value : {});
+  }
+
+  function recordMainPayloadFailure(ticketId, reason = 'MAIN/PAYLOAD FAILED') {
+    const cleanTicketId = norm(ticketId || '');
+    if (!cleanTicketId) return { count: 0, repeated: false };
+
+    const failures = readMainPayloadFailures();
+    const current = failures[cleanTicketId] && typeof failures[cleanTicketId] === 'object'
+      ? failures[cleanTicketId]
+      : {};
+    const count = Number(current.count || 0) + 1;
+    failures[cleanTicketId] = {
+      count,
+      reason: norm(reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED',
+      updatedAt: nowIso()
+    };
+    writeMainPayloadFailures(failures);
+    return {
+      count,
+      repeated: count > CFG.maxMainPayloadFailureAttempts
+    };
+  }
+
+  function clearMainPayloadFailure(ticketId) {
+    const cleanTicketId = norm(ticketId || '');
+    if (!cleanTicketId) return;
+    const failures = readMainPayloadFailures();
+    if (!Object.prototype.hasOwnProperty.call(failures, cleanTicketId)) return;
+    delete failures[cleanTicketId];
+    writeMainPayloadFailures(failures);
   }
 
   function readFinisherCloseSignal() {
@@ -1442,20 +1485,40 @@
         if (!ready) {
           highlightCard(card, 'error');
           log(`MAIN/PAYLOAD FAILED | ${ticketId}`, 'error');
+          const failure = recordMainPayloadFailure(ticketId, 'MAIN/PAYLOAD FAILED');
+          log(`Main payload failure count | ${ticketId} | ${failure.count}`, failure.repeated ? 'error' : 'warn');
+          if (failure.repeated) {
+            clearFinisherCloseSignal();
+            clearMissingPayloadTrigger();
+            clearDockHighlight();
+            setStatus('STOPPED REPEATED MAIN/PAYLOAD FAILURE');
+            log(`Repeated MAIN/PAYLOAD failure for ${ticketId}; stopping to prevent refresh loop`, 'error');
+            stopRun('Repeated MAIN/PAYLOAD failure');
+            return;
+          }
           clearFinisherCloseSignal();
           clearMissingPayloadTrigger();
           publishMissingPayloadTrigger(ticketId, 'MAIN/PAYLOAD FAILED');
           setStatus('WAITING MISSING PAYLOAD FINISHER');
           clearDockHighlight();
-          const ticketClosed = await waitForTicketClosedByFinisher(ticketId);
+          const ticketClosed = await waitForTicketClosedByFinisher(ticketId, {
+            maxWaitMs: CFG.missingPayloadFinisherMaxWaitMs,
+            timeoutLabel: 'missing payload finisher'
+          });
           if (ticketClosed) {
             state.processedIds.add(ticketId);
+            clearMainPayloadFailure(ticketId);
             clearMissingPayloadTrigger();
+            blockUntilRefresh(ticketId);
+            return;
           }
-          blockUntilRefresh(ticketId);
+          setStatus('STOPPED MISSING PAYLOAD FINISHER TIMEOUT');
+          log(`Missing payload fallback did not finish within ${Math.round(CFG.missingPayloadFinisherMaxWaitMs / 1000)}s; stopping instead of refreshing`, 'error');
+          stopRun('Missing payload finisher timeout');
           return;
         }
 
+        clearMainPayloadFailure(ticketId);
         savePayload(ready.payload);
         saveSharedJob(ready.payload);
         highlightCard(card, 'saved');
@@ -1508,13 +1571,20 @@
     return true;
   }
 
-  async function waitForTicketClosedByFinisher(ticketId) {
+  async function waitForTicketClosedByFinisher(ticketId, options = {}) {
     let lastLogAt = 0;
     let drawerHiddenLogged = false;
     let finalPayloadReadyLogged = false;
     const waitStartedAt = Date.now();
+    const maxWaitMs = Math.max(0, Number(options.maxWaitMs || 0));
+    const timeoutLabel = norm(options.timeoutLabel || 'finisher');
 
     while (state.running && !state.destroyed) {
+      if (maxWaitMs && (Date.now() - waitStartedAt) >= maxWaitMs) {
+        log(`Timed out waiting for ${timeoutLabel} close trigger | ${ticketId}`, 'error');
+        return false;
+      }
+
       if (consumeFinisherWakeTrigger(ticketId)) {
         return true;
       }

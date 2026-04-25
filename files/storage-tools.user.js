@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.7
+// @version      1.5.8
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC HOME payload/storage to TXT, mirrors key Home payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.7';
+  const VERSION = '1.5.8';
   const UI_ID = 'tm-az-apex-gwpc-storage-tools-v156';
   const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v156';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
@@ -79,7 +79,7 @@
   const CFG = {
     syncMs: 1500,
     maxCleanupRequestAgeMs: 120000,
-    defaultReportHours: 8,
+    defaultReportHours: 4,
     maxReportHours: 48
   };
 
@@ -864,6 +864,16 @@
       parts.push(`${String(entry.count).padStart(4, ' ')} | ${getOriginShortLabel(entry.origin)} | ${entry.script}`);
     }
     parts.push('');
+    parts.push('=== DIAGNOSTIC TIMELINE (CHRONOLOGICAL) ===');
+    parts.push('');
+
+    for (const event of events) {
+      parts.push(
+        `${formatLocalDateTime(event.at)} | ${getOriginShortLabel(event.origin)} | ${event.script}: ${event.message}`
+      );
+    }
+
+    parts.push('');
     parts.push('=== MERGED TIMELINE ===');
     parts.push('');
 
@@ -1223,7 +1233,7 @@
 
     const reportExportBtn = makeButton(
       'REPORT',
-      'Prompt for a last-N-hours merged AZ + APEX + GWPC timeline report',
+      'Prompt for a last-N-hours merged AZ + APEX + GWPC timeline report (default 4 hours)',
       '#0f766e',
       exportRecentReportTxt
     );
