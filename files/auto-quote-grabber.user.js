@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.6
+// @version      2.9.7
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__AUTO_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
-  const VERSION = '2.9.6';
+  const VERSION = '2.9.7';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_auto_quote_grabber_logs_v1';
@@ -36,7 +36,8 @@
 
   const KEYS = {
     payload: 'tm_pc_auto_quote_grab_payload_v1',
-    panelPos: 'tm_pc_auto_quote_grab_panel_pos_v1'
+    panelPos: 'tm_pc_auto_quote_grab_panel_pos_v1',
+    customFieldRules: 'tm_pc_auto_quote_grab_custom_field_rules_v1'
   };
 
 
@@ -47,6 +48,76 @@
 
   function safeJsonParse(value, fallback = null) {
     try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  function hashString(value) {
+    const input = String(value || '');
+    let hash = 0;
+    for (let i = 0; i < input.length; i += 1) {
+      hash = ((hash << 5) - hash) + input.charCodeAt(i);
+      hash |= 0;
+    }
+    return `h${Math.abs(hash)}`;
+  }
+
+  function buildCustomFieldRuleId(headerText, fieldName) {
+    return `custom_${hashString(`${normalizeText(headerText).toLowerCase()}|${normalizeText(fieldName).toLowerCase()}`)}`;
+  }
+
+  function normalizeCustomFieldRule(raw) {
+    if (!isPlainObject(raw)) return null;
+
+    const headerText = normalizeText(raw.headerText || raw.header || '');
+    const fieldName = normalizeText(raw.fieldName || raw.saveAs || raw.label || '');
+    const selector = normalizeText(raw.selector || raw.cssSelector || '');
+    if (!headerText || !fieldName || !selector) return null;
+
+    const fingerprintRaw = isPlainObject(raw.fingerprint) ? raw.fingerprint : {};
+    return {
+      ruleId: normalizeText(raw.ruleId || buildCustomFieldRuleId(headerText, fieldName)),
+      headerText,
+      fieldName,
+      selector,
+      fingerprint: {
+        tag: normalizeText(fingerprintRaw.tag || ''),
+        id: normalizeText(fingerprintRaw.id || ''),
+        name: normalizeText(fingerprintRaw.name || ''),
+        role: normalizeText(fingerprintRaw.role || ''),
+        ariaLabel: normalizeText(fingerprintRaw.ariaLabel || ''),
+        classTokens: Array.isArray(fingerprintRaw.classTokens)
+          ? fingerprintRaw.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
+          : [],
+        textFingerprint: normalizeText(fingerprintRaw.textFingerprint || '')
+      },
+      savedAt: normalizeText(raw.savedAt || new Date().toISOString()),
+      updatedAt: normalizeText(raw.updatedAt || raw.savedAt || new Date().toISOString())
+    };
+  }
+
+  function readCustomFieldRules() {
+    const raw = safeJsonParse(localStorage.getItem(KEYS.customFieldRules), []);
+    return Array.isArray(raw) ? raw.map(normalizeCustomFieldRule).filter(Boolean) : [];
+  }
+
+  function writeCustomFieldRules(rules) {
+    const list = Array.isArray(rules) ? rules.map(normalizeCustomFieldRule).filter(Boolean) : [];
+    localStorage.setItem(KEYS.customFieldRules, JSON.stringify(list, null, 2));
+    updateCustomFieldButtons();
+    return list;
+  }
+
+  function upsertCustomFieldRule(rule) {
+    const nextRule = normalizeCustomFieldRule(rule);
+    if (!nextRule) return null;
+    const current = readCustomFieldRules().filter((item) => item.ruleId !== nextRule.ruleId);
+    current.push(nextRule);
+    writeCustomFieldRules(current);
+    return nextRule;
+  }
+
+  function clearCustomFieldRules() {
+    try { localStorage.removeItem(KEYS.customFieldRules); } catch {}
+    updateCustomFieldButtons();
   }
 
   function readFlowStage() {
@@ -345,7 +416,12 @@
     logLines: [],
     ui: null,
     activityState: 'idle',
-    activityMessage: 'Waiting for trigger'
+    activityMessage: 'Waiting for trigger',
+    customFieldPicker: null,
+    customFieldHoverBox: null,
+    customFieldPickerMove: null,
+    customFieldPickerClick: null,
+    customFieldPickerKeydown: null
   };
 
   init();
@@ -372,6 +448,7 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { writeActivityState('stopped', 'Cleanup'); } catch {}
+    try { stopCustomFieldPicker('', { logIt: false, restoreStatus: 'Stopped' }); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
@@ -387,6 +464,11 @@
   function tick() {
     if (!state.running) {
       writeActivityState('stopped', 'Stopped');
+      return;
+    }
+    if (state.customFieldPicker) {
+      writeActivityState('paused', 'Custom field picker active');
+      setStatus(`Custom picker: click ${state.customFieldPicker.step === 'header' ? 'header' : 'field'}`);
       return;
     }
     if (state.busy) {
@@ -463,41 +545,58 @@
     log('Starting grab flow');
 
     const submissionNumberEarly = extractSubmissionNumber();
+    const customFieldValues = {};
     if (submissionNumberEarly) log(`Submission Number early: ${submissionNumberEarly}`);
 
     setStatus('Opening Policy Info');
     await goToPolicyInfo();
     await sleep(CFG.afterClickMs);
     const policyInfoData = extractPolicyInfoFields();
-    log(`Policy Info read: ${JSON.stringify(policyInfoData)}`);
+    const policyCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    const mergedPolicyInfoData = {
+      ...policyInfoData,
+      ...policyCustomCapture.updates
+    };
+    Object.assign(customFieldValues, policyCustomCapture.updates);
+    log(`Policy Info read: ${JSON.stringify(mergedPolicyInfoData)}`);
 
     setStatus('Opening Auto Data Prefill');
     await goToAutoDataPrefill();
     await sleep(CFG.afterClickMs);
+    const autoDataPrefillCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    Object.assign(customFieldValues, autoDataPrefillCustomCapture.updates);
     log('Auto Data Prefill visited');
 
     setStatus('Opening Drivers');
     await goToDrivers();
     await sleep(CFG.afterClickMs);
     const driversData = extractDriversFields();
+    const driversCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    Object.assign(customFieldValues, driversCustomCapture.updates);
     log(`Drivers read: ${JSON.stringify(driversData)}`);
 
     setStatus('Opening Vehicles');
     await goToVehicles();
     await sleep(CFG.afterClickMs);
     const vehiclesData = extractVehiclesFields();
+    const vehiclesCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    Object.assign(customFieldValues, vehiclesCustomCapture.updates);
     log(`Vehicles read: ${JSON.stringify(vehiclesData)}`);
 
     setStatus('Opening PA Coverages');
     await goToPACoverages();
     await sleep(CFG.afterClickMs);
     const paCoveragesData = extractPACoveragesFields();
+    const paCoveragesCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    Object.assign(customFieldValues, paCoveragesCustomCapture.updates);
     log(`PA Coverages read: ${JSON.stringify(paCoveragesData)}`);
 
     setStatus('Opening Quote');
     await goToQuote();
     await sleep(CFG.afterClickMs);
     const quoteData = extractQuoteFields(submissionNumberEarly);
+    const quoteCustomCapture = captureCustomFieldUpdatesForCurrentHeader({ logMatches: true, logMissing: true });
+    Object.assign(customFieldValues, quoteCustomCapture.updates);
     log(`Quote read: ${JSON.stringify(quoteData)}`);
 
     if (quoteData['Total Policy Premium'] === 'N/A') {
@@ -517,8 +616,8 @@
       'Total Policy Premium': asRequiredValue(quoteData['Total Policy Premium']),
       'Submission Number (Auto)': asRequiredValue(quoteData['Submission Number (Auto)']),
       'PolicyNumber': '',
-      'PrimaryInsuredName': asRequiredValue(policyInfoData['PrimaryInsuredName']),
-      'SecondaryInsuredName': asRequiredValue(policyInfoData['SecondaryInsuredName']),
+      'PrimaryInsuredName': asRequiredValue(mergedPolicyInfoData['PrimaryInsuredName']),
+      'SecondaryInsuredName': asRequiredValue(mergedPolicyInfoData['SecondaryInsuredName']),
       'Driver1_Name': asRequiredValue(driversData['Driver1_Name']),
       'Driver1_DLLast4': asRequiredValue(driversData['Driver1_DLLast4']),
       'Driver2_Name': asRequiredValue(driversData['Driver2_Name']),
@@ -552,7 +651,8 @@
       'Vehicle4_ModelYear': asRequiredValue(vehiclesData['Vehicle4_ModelYear']),
       'Vehicle4_Make': asRequiredValue(vehiclesData['Vehicle4_Make']),
       'Vehicle4_Model': asRequiredValue(vehiclesData['Vehicle4_Model']),
-      'Vehicle4_VIN': asRequiredValue(vehiclesData['Vehicle4_VIN'])
+      'Vehicle4_VIN': asRequiredValue(vehiclesData['Vehicle4_VIN']),
+      ...customFieldValues
     };
 
     const currentJob = readCurrentJob();
@@ -563,8 +663,8 @@
     const autoSubmissionNumber = asRequiredValue(quoteData['Submission Number (Auto)']);
     const autoTotalPolicyPremium = asRequiredValue(quoteData['Total Policy Premium']);
     const autoQuoteTotalRaw = asRequiredValue(quoteData['Quote_TotalCost_Raw']);
-    const primaryInsuredName = asRequiredValue(policyInfoData['PrimaryInsuredName']);
-    const secondaryInsuredName = asRequiredValue(policyInfoData['SecondaryInsuredName']);
+    const primaryInsuredName = asRequiredValue(mergedPolicyInfoData['PrimaryInsuredName']);
+    const secondaryInsuredName = asRequiredValue(mergedPolicyInfoData['SecondaryInsuredName']);
     const paAllCoverages = asRequiredValue(paCoveragesData['PA_All_Coverages']);
 
     if (currentJob['Name'] && !namesLikelySame(primaryInsuredName, currentJob['Name'])) {
@@ -583,7 +683,8 @@
       quoteTotalCostRaw: autoQuoteTotalRaw,
       drivers: driversList,
       vehicles: vehiclesList,
-      coverages: coveragesList
+      coverages: coveragesList,
+      customFields: { ...customFieldValues }
     };
 
     const payload = {
@@ -607,6 +708,7 @@
         paCoverages: true,
         quote: true
       },
+      customFields: { ...customFieldValues },
 
       'Auto': 'Yes',
       'Total Policy Premium': autoTotalPolicyPremium,
@@ -1354,6 +1456,324 @@
     return docs;
   }
 
+  function getStableClassTokens(el) {
+    return Array.from(el?.classList || [])
+      .filter((token) => /^gw-|^iv360-|^btn-|^ui-|^pc-/.test(token))
+      .slice(0, 4);
+  }
+
+  function buildFieldFingerprint(el) {
+    if (!(el instanceof Element)) return {};
+    return {
+      tag: normalizeText(el.tagName || '').toLowerCase(),
+      id: normalizeText(el.id || ''),
+      name: normalizeText(el.getAttribute('name') || ''),
+      role: normalizeText(el.getAttribute('role') || ''),
+      ariaLabel: normalizeText(el.getAttribute('aria-label') || ''),
+      classTokens: getStableClassTokens(el),
+      textFingerprint: normalizeText((el.innerText || el.textContent || '').slice(0, 160))
+    };
+  }
+
+  function isUniqueSelectorAcrossDocs(selector) {
+    let count = 0;
+    for (const doc of getAccessibleDocs()) {
+      try {
+        count += doc.querySelectorAll(selector).length;
+        if (count > 1) return false;
+      } catch {}
+    }
+    return count === 1;
+  }
+
+  function buildStableSelector(el) {
+    if (!(el instanceof Element)) return '';
+
+    if (el.id) return `#${cssEscape(el.id)}`;
+
+    const name = normalizeText(el.getAttribute('name') || '');
+    if (name) {
+      const selector = `${el.tagName.toLowerCase()}[name="${cssEscapeForAttr(name)}"]`;
+      if (isUniqueSelectorAcrossDocs(selector)) return selector;
+    }
+
+    const role = normalizeText(el.getAttribute('role') || '');
+    const aria = normalizeText(el.getAttribute('aria-label') || '');
+    if (role && aria) {
+      const selector = `${el.tagName.toLowerCase()}[role="${cssEscapeForAttr(role)}"][aria-label="${cssEscapeForAttr(aria)}"]`;
+      if (isUniqueSelectorAcrossDocs(selector)) return selector;
+    }
+
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === 1 && current !== current.ownerDocument?.body && parts.length < 6) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += `#${cssEscape(current.id)}`;
+        parts.unshift(part);
+        break;
+      }
+
+      const classes = getStableClassTokens(current);
+      if (classes.length) part += '.' + classes.map(cssEscape).join('.');
+
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+
+      parts.unshift(part);
+      const selector = parts.join(' > ');
+      if (isUniqueSelectorAcrossDocs(selector)) return selector;
+      current = current.parentElement;
+    }
+
+    return parts.join(' > ');
+  }
+
+  function matchFieldFingerprint(record, el) {
+    if (!(el instanceof Element)) return false;
+    const saved = isPlainObject(record?.fingerprint) ? record.fingerprint : {};
+    const current = buildFieldFingerprint(el);
+
+    if (saved.id && current.id && saved.id === current.id) return true;
+
+    let score = 0;
+    let required = 0;
+    for (const key of ['tag', 'name', 'role', 'ariaLabel', 'textFingerprint']) {
+      if (!saved[key]) continue;
+      required += 1;
+      const left = normalizeText(saved[key]).toLowerCase();
+      const right = normalizeText(current[key]).toLowerCase();
+      if (!left || !right) continue;
+      if (key === 'textFingerprint') {
+        if (left === right || left.includes(right) || right.includes(left)) score += 1;
+      } else if (left === right) {
+        score += 1;
+      }
+    }
+
+    if (Array.isArray(saved.classTokens) && saved.classTokens.length) {
+      required += 1;
+      const currentTokens = new Set(Array.isArray(current.classTokens) ? current.classTokens : []);
+      if (saved.classTokens.every((token) => currentTokens.has(token))) score += 1;
+    }
+
+    if (required === 0) return true;
+    if (required === 1) return score === 1;
+    return score >= 2;
+  }
+
+  function findCustomFieldElement(rule) {
+    const selector = normalizeText(rule?.selector || '');
+    if (!selector) return null;
+
+    for (const doc of getAccessibleDocs()) {
+      let nodes = [];
+      try { nodes = Array.from(doc.querySelectorAll(selector)); } catch {}
+      const visibleNodes = nodes.filter(isVisible);
+      for (const node of visibleNodes) {
+        if (matchFieldFingerprint(rule, node)) return node;
+      }
+      if (visibleNodes.length) return visibleNodes[0];
+      if (nodes.length) return nodes[0];
+    }
+    return null;
+  }
+
+  function captureCustomFieldUpdatesForCurrentHeader(options = {}) {
+    const headerText = normalizeText(options.headerText || getHeaderText());
+    const rules = readCustomFieldRules().filter((rule) => normalizeText(rule.headerText) === headerText);
+    const updates = {};
+    const missing = [];
+
+    for (const rule of rules) {
+      const target = findCustomFieldElement(rule);
+      if (!target) {
+        missing.push(`${rule.fieldName}: target not found`);
+        continue;
+      }
+      const value = readBestValue(target);
+      if (!value) {
+        missing.push(`${rule.fieldName}: blank`);
+        continue;
+      }
+      updates[rule.fieldName] = value;
+    }
+
+    if (options.logMatches && Object.keys(updates).length) {
+      log(`Custom fields (${headerText}): ${JSON.stringify(updates)}`);
+    } else if (options.logMissing && rules.length && missing.length) {
+      log(`Custom fields missing (${headerText}): ${missing.join(' | ')}`);
+    }
+
+    return { headerText, rules, updates, missing };
+  }
+
+  function isPickerUiElement(el) {
+    if (!(el instanceof Element)) return false;
+    if (state.ui?.panel?.contains(el)) return true;
+    if (el === state.customFieldHoverBox) return true;
+    if (state.customFieldHoverBox?.contains?.(el)) return true;
+    return false;
+  }
+
+  function getPickerTargetFromPath(path) {
+    for (const item of path || []) {
+      if (!(item instanceof Element)) continue;
+      if (isPickerUiElement(item)) continue;
+      if (isVisible(item)) return item;
+    }
+    return null;
+  }
+
+  function ensureCustomFieldHoverBox() {
+    if (state.customFieldHoverBox) return;
+    const box = document.createElement('div');
+    box.style.cssText = [
+      'position:fixed',
+      'z-index:2147483647',
+      'pointer-events:none',
+      'border:2px solid rgba(248,113,113,.95)',
+      'background:rgba(252,165,165,.16)',
+      'border-radius:6px',
+      'display:none'
+    ].join(';');
+    document.documentElement.appendChild(box);
+    state.customFieldHoverBox = box;
+  }
+
+  function updateCustomFieldHoverBox(target) {
+    ensureCustomFieldHoverBox();
+    if (!state.customFieldHoverBox) return;
+    if (!(target instanceof Element)) {
+      state.customFieldHoverBox.style.display = 'none';
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    state.customFieldHoverBox.style.display = 'block';
+    state.customFieldHoverBox.style.left = `${rect.left}px`;
+    state.customFieldHoverBox.style.top = `${rect.top}px`;
+    state.customFieldHoverBox.style.width = `${rect.width}px`;
+    state.customFieldHoverBox.style.height = `${rect.height}px`;
+  }
+
+  function updateCustomFieldButtons() {
+    if (!state.ui?.addCustomBtn || !state.ui?.clearCustomBtn) return;
+    const count = readCustomFieldRules().length;
+    state.ui.addCustomBtn.textContent = state.customFieldPicker
+      ? 'CANCEL EXTRA'
+      : `ADD EXTRA${count ? ` (${count})` : ''}`;
+    state.ui.addCustomBtn.style.background = state.customFieldPicker ? '#f59e0b' : '#7c3aed';
+    state.ui.clearCustomBtn.disabled = !!state.customFieldPicker || count === 0;
+    state.ui.clearCustomBtn.style.background = count === 0 ? '#334155' : '#4b5563';
+    state.ui.clearCustomBtn.style.opacity = (!state.customFieldPicker && count > 0) ? '1' : '.75';
+    state.ui.clearCustomBtn.style.cursor = (!state.customFieldPicker && count > 0) ? 'pointer' : 'not-allowed';
+  }
+
+  function stopCustomFieldPicker(message = '', options = {}) {
+    if (!state.customFieldPicker) return;
+    document.removeEventListener('mousemove', state.customFieldPickerMove, true);
+    document.removeEventListener('click', state.customFieldPickerClick, true);
+    document.removeEventListener('keydown', state.customFieldPickerKeydown, true);
+    state.customFieldPickerMove = null;
+    state.customFieldPickerClick = null;
+    state.customFieldPickerKeydown = null;
+    state.customFieldPicker = null;
+    updateCustomFieldHoverBox(null);
+    updateCustomFieldButtons();
+    if (options.logIt !== false && message) log(message);
+    setStatus(options.restoreStatus || (state.running ? 'Waiting for trigger' : 'Stopped'));
+  }
+
+  function saveCustomFieldFromPicker(target) {
+    const selector = buildStableSelector(target);
+    if (!selector) {
+      log('Custom field picker failed: could not build stable selector');
+      return;
+    }
+
+    const headerText = normalizeText(state.customFieldPicker?.headerText || '');
+    const saveAs = normalizeText(window.prompt('Save As?', '') || '');
+    if (!saveAs) {
+      stopCustomFieldPicker('Custom field save canceled');
+      return;
+    }
+
+    const rule = upsertCustomFieldRule({
+      ruleId: buildCustomFieldRuleId(headerText, saveAs),
+      headerText,
+      fieldName: saveAs,
+      selector,
+      fingerprint: buildFieldFingerprint(target),
+      savedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    if (!rule) {
+      stopCustomFieldPicker('Custom field save failed');
+      return;
+    }
+
+    stopCustomFieldPicker(`Custom field saved: ${saveAs} @ ${headerText}`);
+  }
+
+  function startCustomFieldPicker() {
+    if (state.customFieldPicker) {
+      stopCustomFieldPicker('Custom field picker canceled');
+      return;
+    }
+
+    ensureCustomFieldHoverBox();
+    state.customFieldPicker = {
+      step: 'header',
+      headerText: '',
+      previousStatus: state.lastStatus || (state.running ? 'Waiting for trigger' : 'Stopped')
+    };
+
+    state.customFieldPickerMove = (event) => {
+      const target = getPickerTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
+      updateCustomFieldHoverBox(target);
+    };
+    state.customFieldPickerClick = (event) => {
+      const target = getPickerTargetFromPath(event.composedPath ? event.composedPath() : [event.target]);
+      if (!target) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+
+      if (state.customFieldPicker?.step === 'header') {
+        const headerText = normalizeText(target.innerText || target.textContent || '');
+        if (!headerText) {
+          log('Custom field picker: clicked header has no text');
+          return;
+        }
+        state.customFieldPicker.step = 'field';
+        state.customFieldPicker.headerText = headerText;
+        setStatus(`Custom picker: click field for ${headerText}`);
+        log(`Custom field header selected: ${headerText}`);
+        return;
+      }
+
+      saveCustomFieldFromPicker(target);
+    };
+    state.customFieldPickerKeydown = (event) => {
+      if (event.key === 'Escape') {
+        stopCustomFieldPicker('Custom field picker canceled');
+      }
+    };
+
+    document.addEventListener('mousemove', state.customFieldPickerMove, true);
+    document.addEventListener('click', state.customFieldPickerClick, true);
+    document.addEventListener('keydown', state.customFieldPickerKeydown, true);
+    updateCustomFieldButtons();
+    setStatus('Custom picker: click header');
+    log('Custom field picker started: click the page header first, then the value element');
+  }
+
   function resolveFirst(resolvers) {
     for (const fn of resolvers) {
       try {
@@ -1621,6 +2041,10 @@
           <button id="hb-auto-quote-grabber-toggle-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#dc2626;color:#fff;">STOP</button>
           <button id="hb-auto-quote-grabber-copylogs-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff;">COPY LOGS</button>
         </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+          <button id="hb-auto-quote-grabber-addcustom-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#7c3aed;color:#fff;">ADD EXTRA</button>
+          <button id="hb-auto-quote-grabber-clearcustom-v22" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#4b5563;color:#fff;">CLEAR EXTRA</button>
+        </div>
         <div id="hb-auto-quote-grabber-status-v22" style="margin-bottom:8px;padding:6px 8px;border-radius:8px;background:#1f2937;">Waiting...</div>
         <div id="hb-auto-quote-grabber-logs-v22" style="max-height:240px;overflow:auto;background:#0b1220;border:1px solid #243041;border-radius:8px;padding:6px;"></div>
       </div>
@@ -1631,6 +2055,8 @@
     const head = panel.querySelector('#hb-auto-quote-grabber-head-v22');
     const toggleBtn = panel.querySelector('#hb-auto-quote-grabber-toggle-v22');
     const copyLogsBtn = panel.querySelector('#hb-auto-quote-grabber-copylogs-v22');
+    const addCustomBtn = panel.querySelector('#hb-auto-quote-grabber-addcustom-v22');
+    const clearCustomBtn = panel.querySelector('#hb-auto-quote-grabber-clearcustom-v22');
 
     toggleBtn.addEventListener('click', () => {
       state.running = !state.running;
@@ -1640,6 +2066,7 @@
       setStatus(state.running ? 'Running' : 'Stopped');
       state.triggerSince = 0;
       state.doneThisLoad = false;
+      updateCustomFieldButtons();
     });
 
     copyLogsBtn.addEventListener('click', async () => {
@@ -1652,12 +2079,35 @@
       }
     });
 
+    addCustomBtn.addEventListener('click', () => {
+      startCustomFieldPicker();
+    });
+
+    clearCustomBtn.addEventListener('click', () => {
+      if (state.customFieldPicker) {
+        stopCustomFieldPicker('Custom field picker canceled');
+        return;
+      }
+      const count = readCustomFieldRules().length;
+      if (!count) {
+        log('No custom field rules to clear');
+        return;
+      }
+      if (!window.confirm(`Clear ${count} custom field rule${count === 1 ? '' : 's'}?`)) return;
+      clearCustomFieldRules();
+      log(`Cleared ${count} custom field rule${count === 1 ? '' : 's'}`);
+    });
+
     makeDraggable(panel, head);
 
     state.ui = {
+      panel,
+      addCustomBtn,
+      clearCustomBtn,
       status: panel.querySelector('#hb-auto-quote-grabber-status-v22'),
       logs: panel.querySelector('#hb-auto-quote-grabber-logs-v22')
     };
+    updateCustomFieldButtons();
   }
 
   function setStatus(text) {
