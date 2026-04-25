@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.31
+// @version      2.5.32
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.31';
+  const VERSION = '2.5.32';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -219,6 +219,7 @@
     refreshRequiredThisLoad: false,
     activeTicketId: '',
     fatalFallbackInFlight: false,
+    handoffPauseMonitorInterval: null,
     externalWakeTick: 0,
     storageWakeHandler: null,
     pendingStartTimer: 0,
@@ -294,16 +295,22 @@
 
     const handoffPause = readMissingPayloadHandoffPause();
     if (handoffPause) {
-      state.running = false;
-      state.busy = false;
-      state.refreshRequiredThisLoad = false;
-      saveRunning(false);
-      setBootstrapReloadMode('');
-      clearBootstrapReloadToken();
-      syncUi();
-      setStatus('MISSING PAYLOAD HANDOFF PAUSED');
-      log(`Missing payload handoff pause active; launcher stopped for finisher | ${handoffPause.ticketId || 'unknown ticket'}`, 'warn');
-      return;
+      if (!shouldKeepMissingPayloadHandoffPause(handoffPause)) {
+        clearMissingPayloadHandoffPause();
+        log(`Missing payload handoff pause cleared; finisher already completed | ${handoffPause.ticketId || 'unknown ticket'}`, 'ok');
+      } else {
+        state.running = false;
+        state.busy = false;
+        state.refreshRequiredThisLoad = false;
+        saveRunning(false);
+        setBootstrapReloadMode('');
+        clearBootstrapReloadToken();
+        syncUi();
+        setStatus('MISSING PAYLOAD HANDOFF PAUSED');
+        log(`Missing payload handoff pause active; launcher stopped for finisher | ${handoffPause.ticketId || 'unknown ticket'}`, 'warn');
+        startMissingPayloadHandoffMonitor(handoffPause);
+        return;
+      }
     }
 
     if (hasBootstrapReloadToken()) {
@@ -351,6 +358,7 @@
     try { document.removeEventListener('visibilitychange', state.visibilityPersistHandler, true); } catch {}
     try { window.removeEventListener('storage', state.storageWakeHandler, true); } catch {}
     try { clearInterval(state.frontIdleInterval); } catch {}
+    try { clearInterval(state.handoffPauseMonitorInterval); } catch {}
     try { document.removeEventListener('click', state.frontIdleActivityHandler, true); } catch {}
     try { document.removeEventListener('keydown', state.frontIdleActivityHandler, true); } catch {}
     try { document.removeEventListener('input', state.frontIdleActivityHandler, true); } catch {}
@@ -431,10 +439,86 @@
       savedAt: nowIso()
     };
     try { sessionStorage.setItem(SS_KEYS.MISSING_PAYLOAD_HANDOFF_PAUSE, JSON.stringify(payload)); } catch {}
+    return payload;
   }
 
   function clearMissingPayloadHandoffPause() {
     try { sessionStorage.removeItem(SS_KEYS.MISSING_PAYLOAD_HANDOFF_PAUSE); } catch {}
+  }
+
+  function getSignalTimeMs(signal, keys) {
+    for (const key of keys) {
+      const ms = Date.parse(norm(signal?.[key] || ''));
+      if (Number.isFinite(ms)) return ms;
+    }
+    return 0;
+  }
+
+  function signalMatchesPause(signal, pause, timeKeys) {
+    const ticketId = norm(pause?.ticketId || '');
+    if (!ticketId || !signal || signal.ready !== true) return false;
+    const signalId = norm(signal.ticketId || signal.azId || '');
+    if (signalId !== ticketId) return false;
+
+    const pauseMs = Date.parse(norm(pause?.savedAt || ''));
+    const signalMs = getSignalTimeMs(signal, timeKeys);
+    if (!Number.isFinite(pauseMs) || !signalMs) return true;
+    return signalMs >= (pauseMs - 1000);
+  }
+
+  function hasActiveMissingPayloadTriggerForPause(pause) {
+    const ticketId = norm(pause?.ticketId || '');
+    if (!ticketId) return false;
+
+    const trigger = readSharedJson(KEYS.MISSING_PAYLOAD_TRIGGER, null);
+    if (!trigger || trigger.ready !== true) return false;
+    const triggerId = norm(trigger.ticketId || trigger.azId || '');
+    if (triggerId !== ticketId) return false;
+
+    const requestedAtMs = Date.parse(norm(trigger.requestedAt || ''));
+    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) return false;
+    return true;
+  }
+
+  function hasCompletedMissingPayloadHandoff(pause) {
+    if (signalMatchesPause(readFinisherCloseSignal(), pause, ['closedAt', 'requestedAt'])) return true;
+    if (signalMatchesPause(readWorkflowCleanupRequest(), pause, ['requestedAt', 'closedAt'])) return true;
+    return false;
+  }
+
+  function shouldKeepMissingPayloadHandoffPause(pause) {
+    const ticketId = norm(pause?.ticketId || '');
+    if (!ticketId) return false;
+    if (hasCompletedMissingPayloadHandoff(pause)) return false;
+    if (hasActiveMissingPayloadTriggerForPause(pause)) return true;
+
+    const pauseMs = Date.parse(norm(pause?.savedAt || ''));
+    if (Number.isFinite(pauseMs) && (Date.now() - pauseMs) < 15000) return true;
+    return false;
+  }
+
+  function startMissingPayloadHandoffMonitor(pause) {
+    try { clearInterval(state.handoffPauseMonitorInterval); } catch {}
+    state.handoffPauseMonitorInterval = window.setInterval(() => {
+      const currentPause = readMissingPayloadHandoffPause();
+      if (!currentPause || shouldKeepMissingPayloadHandoffPause(currentPause)) return;
+
+      try { clearInterval(state.handoffPauseMonitorInterval); } catch {}
+      state.handoffPauseMonitorInterval = null;
+      clearMissingPayloadHandoffPause();
+      setBootstrapReloadMode('home');
+      setBootstrapReloadToken();
+      state.mode = 'home';
+      state.running = true;
+      saveMode(state.mode);
+      saveRunning(true);
+      syncUi();
+      setStatus('RELOADING AFTER FINISHER');
+      log(`Missing payload handoff finished; reloading for next ticket | ${norm(currentPause.ticketId || pause?.ticketId || '')}`, 'ok');
+      schedulePendingReload(() => {
+        if (!state.destroyed) reloadToPipelineRoot();
+      }, 120);
+    }, 1000);
   }
 
   function armRefreshResumeToken() {
@@ -1463,9 +1547,10 @@
       clearFinisherCloseSignal();
       clearMissingPayloadTrigger();
       publishMissingPayloadTrigger(activeTicketId, `LAUNCHER ERROR: ${message}`);
-      setMissingPayloadHandoffPause(activeTicketId, `LAUNCHER ERROR: ${message}`);
+      const handoffPause = setMissingPayloadHandoffPause(activeTicketId, `LAUNCHER ERROR: ${message}`);
       setStatus('LAUNCHER ERROR HANDED TO FINISHER');
       clearDockHighlight();
+      startMissingPayloadHandoffMonitor(handoffPause);
       stopRun('Launcher error handed to finisher', { manual: true });
     } finally {
       state.fatalFallbackInFlight = false;
@@ -1597,10 +1682,11 @@
           clearFinisherCloseSignal();
           clearMissingPayloadTrigger();
           publishMissingPayloadTrigger(ticketId, 'MAIN/PAYLOAD FAILED');
-          setMissingPayloadHandoffPause(ticketId, 'MAIN/PAYLOAD FAILED');
+          const handoffPause = setMissingPayloadHandoffPause(ticketId, 'MAIN/PAYLOAD FAILED');
           setStatus('MAIN/PAYLOAD FAILED HANDED TO FINISHER');
           clearDockHighlight();
           log(`Launcher stopped after missing Main data; finisher owns failed note/tag/close for ${ticketId}`, 'warn');
+          startMissingPayloadHandoffMonitor(handoffPause);
           stopRun('Missing payload handed to finisher', { manual: true });
           return;
         }
