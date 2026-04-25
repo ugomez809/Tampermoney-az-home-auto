@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.27
+// @version      2.5.28
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.27';
+  const VERSION = '2.5.28';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -547,7 +547,7 @@
     }
 
     const openTicket = getOpenTicketInfo();
-    if (state.busy || isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
+    if (isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
@@ -630,6 +630,19 @@
 
   function writeJson(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function readSession(key, fallback = '') {
+    try {
+      const value = sessionStorage.getItem(key);
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeSession(key, value) {
+    try { sessionStorage.setItem(key, String(value == null ? '' : value)); } catch {}
   }
 
   function clearFinisherCloseSignal() {
@@ -766,7 +779,6 @@
       return false;
     }
 
-    log(`Final Home payload ready for AZ ${finalId}; launcher can refresh`, 'ok');
     return true;
   }
 
@@ -1499,14 +1511,16 @@
   async function waitForTicketClosedByFinisher(ticketId) {
     let lastLogAt = 0;
     let drawerHiddenLogged = false;
+    let finalPayloadReadyLogged = false;
     const waitStartedAt = Date.now();
 
     while (state.running && !state.destroyed) {
       if (consumeFinisherWakeTrigger(ticketId)) {
         return true;
       }
-      if (consumeFinalPayloadReady(ticketId, waitStartedAt)) {
-        return true;
+      if (!finalPayloadReadyLogged && consumeFinalPayloadReady(ticketId, waitStartedAt)) {
+        finalPayloadReadyLogged = true;
+        log(`Final Home payload ready for AZ ${ticketId}; waiting for finisher to fill fields/tag/close`, 'ok');
       }
 
       const info = getOpenTicketInfo();
