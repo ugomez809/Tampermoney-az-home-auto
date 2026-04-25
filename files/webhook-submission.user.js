@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.8
+// @version      1.18.9
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.8';
+  const VERSION = '1.18.9';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -1118,24 +1118,7 @@
       return false;
     }
 
-    const quoteHeader = findQuoteHeader();
-    if (!quoteHeader) {
-      state.quoteSeenAt = 0;
-      return false;
-    }
-
-    if (!state.quoteSeenAt) {
-      state.quoteSeenAt = Date.now();
-      setStatus('Quote found, waiting 5 seconds');
-      return false;
-    }
-
-    const age = Date.now() - state.quoteSeenAt;
-    if (age < CFG.quoteVisibleDelayMs) {
-      setStatus(`Quote stable... ${Math.ceil((CFG.quoteVisibleDelayMs - age) / 1000)}s`);
-      return false;
-    }
-
+    state.quoteSeenAt = 0;
     return true;
   }
 

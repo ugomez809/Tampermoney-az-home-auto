@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.15
+// @version      4.1.16
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.15';
+  const VERSION = '4.1.16';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1133,6 +1133,23 @@
       inner.classList.contains('gw-selected');
   }
 
+  function isQuoteTabSelected() {
+    const inner = findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`));
+    if (!inner || !isVisibleEl(inner)) return false;
+    const parentSelected = normalizeText(inner.parentElement?.getAttribute?.('aria-selected') || '');
+    const innerSelected = normalizeText(inner.getAttribute?.('aria-selected') || '');
+    return parentSelected === 'true' ||
+      innerSelected === 'true' ||
+      inner.classList.contains('gw-focus') ||
+      inner.classList.contains('gw-selected');
+  }
+
+  function isQuoteScreenReady() {
+    return getHeaderText() === 'Quote' ||
+      isQuoteTabSelected() ||
+      !!findByIdInDocs(IDS.autoDiscountLV);
+  }
+
   function hasHomeCoveragesSurface() {
     return !!findByIdInDocs(IDS.coveragesScreen) ||
       !!findByIdInDocs(IDS.mainArea) ||
@@ -1294,6 +1311,11 @@
   }
 
   async function clickQuoteActionToOpenQuote() {
+    if (isQuoteScreenReady()) {
+      log(`Quote screen already ready (${describeNavigationSnapshot(readNavigationSnapshot())})`);
+      return true;
+    }
+
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote action (${attempt}/${CFG.maxQuoteAttempts})`);
       const clickableReady = await waitFor(
@@ -1317,18 +1339,23 @@
       await sleep(CFG.afterQuoteWaitMs);
       const openedOrMoved = await waitFor(
         () => {
-          if (isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote')) return true;
+          if (isQuoteScreenReady() || isSubmissionQuoted()) return true;
           return advancedToSubmissionState(beforeSnapshot, readNavigationSnapshot(), 'quoted') || didHeaderChange(beforeSnapshot, readNavigationSnapshot());
         },
         CFG.quoteTransitionTimeoutMs,
         `Quote action transition (attempt ${attempt})`
       );
       const afterSnapshot = readNavigationSnapshot();
-      const opened = isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote');
+      const opened = isQuoteScreenReady();
 
       if (opened) {
         log(`Quote action opened Quote screen (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
         return true;
+      }
+
+      if (isSubmissionQuoted() || advancedToSubmissionState(beforeSnapshot, afterSnapshot, 'quoted')) {
+        log(`Quote action completed but visible screen is not Quote; falling back to Quote tab (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
+        return false;
       }
 
       if (!openedOrMoved) {
@@ -2107,6 +2134,17 @@
       log('Final Home payload complete');
     }
 
+    if (finalResult.ready) {
+      try {
+        setStatus('Returning to Quote for handoff');
+        await goToQuote();
+        await sleep(CFG.afterClickMs);
+        log(`Final Quote screen ready for handoff (${describeNavigationSnapshot(readNavigationSnapshot())})`);
+      } catch (err) {
+        log(`Final Quote screen handoff navigation failed: ${err?.message || err}`);
+      }
+    }
+
     writeFlowStage('home', 'handoff', targetJob['AZ ID']);
     setStatus(finalResult.ready ? 'Home ready for handoff' : 'Home partial after pass 2');
     state.doneThisLoad = true;
@@ -2217,10 +2255,10 @@
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`)),
         () => findActionByText('Quote')
       ],
-      () => isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote'),
+      () => isQuoteScreenReady(),
       {
         clickLogContext: 'quote tab fallback',
-        movementFn: (before, after) => advancedToSubmissionState(before, after, 'quoted') || didHeaderChange(before, after)
+        movementFn: (before, after) => isQuoteScreenReady() || advancedToSubmissionState(before, after, 'quoted') || didHeaderChange(before, after)
       }
     );
   }
