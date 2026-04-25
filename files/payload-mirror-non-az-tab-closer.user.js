@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.14
+// @version      1.0.15
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.14';
+  const VERSION = '1.0.15';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -46,6 +46,7 @@
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
     lexCloseConsumed: 'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
+    ignoreCloseLease: 'tm_pc_payload_mirror_ignore_close_lease_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
@@ -73,6 +74,8 @@
     tickMs: 400,
     maxSignalAgeMs: 90000,
     closeDelayMs: 5000,
+    ignoreCloseLeaseTtlMs: 8000,
+    ignoreCloseLeaseHeartbeatMs: 1500,
     maxLogLines: 70,
     zIndex: 2147483647,
     panelWidth: 330,
@@ -97,7 +100,9 @@
     closeAttempts: 0,
     closeSignalKey: '',
     logsIntervalTimer: null,
-    tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    lastIgnoreCloseLeaseHeartbeatAt: 0,
+    lastIgnoreCloseSignalKey: ''
   };
 
   init();
@@ -130,12 +135,18 @@
           scheduleImmediateCheck('gm-close');
         });
       } catch {}
+
+      try {
+        GM_addValueChangeListener(GM_KEYS.ignoreCloseLease, () => {
+          scheduleImmediateCheck('gm-ignore-close');
+        });
+      } catch {}
     }
 
     state.tickTimer = setInterval(() => tick(), CFG.tickMs);
     state.logsIntervalTimer = setInterval(logsTick, LOG_TICK_MS);
-    window.addEventListener('beforeunload', persistPanelPos, true);
-    window.addEventListener('pagehide', persistPanelPos, true);
+    window.addEventListener('beforeunload', handlePageUnload, true);
+    window.addEventListener('pagehide', handlePageUnload, true);
     window.addEventListener('resize', keepPanelInView, true);
     window.addEventListener('storage', handleLogClearStorageEvent, true);
     persistLogsThrottled();
@@ -147,10 +158,11 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    try { clearIgnoreCloseLeaseIfOwned(); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
-    try { window.removeEventListener('beforeunload', persistPanelPos, true); } catch {}
-    try { window.removeEventListener('pagehide', persistPanelPos, true); } catch {}
+    try { window.removeEventListener('beforeunload', handlePageUnload, true); } catch {}
+    try { window.removeEventListener('pagehide', handlePageUnload, true); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { state.panel?.remove(); } catch {}
@@ -286,6 +298,11 @@
 
   function setStatus(text) {
     if (state.ui.status) state.ui.status.textContent = text;
+  }
+
+  function handlePageUnload() {
+    clearIgnoreCloseLeaseIfOwned();
+    persistPanelPos();
   }
 
   function buildSignalKey(signal) {
@@ -443,6 +460,114 @@
   function readCloseSignal() {
     const value = readGM(GM_KEYS.closeSignal, null);
     return isPlainObject(value) ? value : null;
+  }
+
+  function readIgnoreCloseLease() {
+    const value = readGM(GM_KEYS.ignoreCloseLease, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function getActiveIgnoreCloseLease() {
+    const lease = readIgnoreCloseLease();
+    if (!isPlainObject(lease)) return null;
+    const ownerTabId = norm(lease.ownerTabId || '');
+    const updatedAt = norm(lease.updatedAt || lease.claimedAt || '');
+    if (!ownerTabId || !updatedAt) return null;
+    const updatedMs = Date.parse(updatedAt);
+    if (!Number.isFinite(updatedMs)) return null;
+    if ((Date.now() - updatedMs) > CFG.ignoreCloseLeaseTtlMs) return null;
+    return lease;
+  }
+
+  function isIgnoreCloseLeaseOwnedByThisTab(lease = null) {
+    const current = isPlainObject(lease) ? lease : getActiveIgnoreCloseLease();
+    return !!current && norm(current.ownerTabId || '') === state.tabId;
+  }
+
+  function claimIgnoreCloseLease() {
+    const lease = {
+      ownerTabId: state.tabId,
+      ownerHost: location.hostname,
+      ownerUrl: location.href,
+      claimedAt: nowIso(),
+      updatedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeGM(GM_KEYS.ignoreCloseLease, lease);
+    state.lastIgnoreCloseLeaseHeartbeatAt = Date.now();
+    return lease;
+  }
+
+  function refreshIgnoreCloseLeaseHeartbeat() {
+    const current = getActiveIgnoreCloseLease();
+    if (!current || norm(current.ownerTabId || '') !== state.tabId) return false;
+    if ((Date.now() - Number(state.lastIgnoreCloseLeaseHeartbeatAt || 0)) < CFG.ignoreCloseLeaseHeartbeatMs) return true;
+    const next = {
+      ...current,
+      ownerHost: location.hostname,
+      ownerUrl: location.href,
+      updatedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    writeGM(GM_KEYS.ignoreCloseLease, next);
+    state.lastIgnoreCloseLeaseHeartbeatAt = Date.now();
+    return true;
+  }
+
+  function clearIgnoreCloseLeaseIfOwned() {
+    const current = readIgnoreCloseLease();
+    if (!current) return false;
+    if (norm(current.ownerTabId || '') !== state.tabId) return false;
+    writeGM(GM_KEYS.ignoreCloseLease, null);
+    return true;
+  }
+
+  function setIgnoreCloseEnabledForThisPage(enabled) {
+    if (enabled) {
+      const previous = getActiveIgnoreCloseLease();
+      const lease = claimIgnoreCloseLease();
+      if (previous && norm(previous.ownerTabId || '') && norm(previous.ownerTabId || '') !== state.tabId) {
+        log(`Ignore close ON for this page load | took over from ${norm(previous.ownerHost || 'another tab') || 'another tab'}`);
+      } else {
+        log('Ignore close ON for this page load');
+      }
+      setStatus('Ignoring shared close until refresh');
+      renderAll();
+      return lease;
+    }
+
+    const cleared = clearIgnoreCloseLeaseIfOwned();
+    if (cleared) {
+      log('Ignore close OFF for this page load');
+    } else {
+      log('Ignore close OFF skipped: this page is not the owner');
+    }
+    setStatus(state.running ? 'Watching for webhook success' : 'Stopped');
+    renderAll();
+    return null;
+  }
+
+  function logIgnoreCloseActive(signal) {
+    const signalKey = buildSignalKey(signal);
+    if (!signalKey || state.lastIgnoreCloseSignalKey === signalKey) return;
+    state.lastIgnoreCloseSignalKey = signalKey;
+    const lease = getActiveIgnoreCloseLease();
+    const ownerHost = norm(lease?.ownerHost || '') || '(unknown)';
+    const ownerUrl = norm(lease?.ownerUrl || '') || '(unknown)';
+    log(`Ignoring close signal until owner page refresh | signalKey=${signalKey} | ownerHost=${ownerHost} | ownerUrl=${ownerUrl}`);
+  }
+
+  function shouldIgnoreCloseForActiveLease(signal = null) {
+    const lease = getActiveIgnoreCloseLease();
+    if (!lease) {
+      state.lastIgnoreCloseSignalKey = '';
+      return false;
+    }
+    logIgnoreCloseActive(signal);
+    setStatus('Ignoring shared close until refresh');
+    return true;
   }
 
   function readLexCloseConsumedSignal() {
@@ -911,6 +1036,7 @@
   function attemptClose(signal = null) {
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
+    if (shouldIgnoreCloseForActiveLease(effectiveSignal)) return;
 
     const signalKey = buildSignalKey(effectiveSignal);
     if (isLexHost()) {
@@ -990,6 +1116,7 @@
 
   function tick(reason = 'tick') {
     if (state.destroyed) return;
+    refreshIgnoreCloseLeaseHeartbeat();
     if (!state.running) {
       setStatus('Stopped');
       renderAll();
@@ -1023,10 +1150,18 @@
       if (Date.now() >= state.countdownEndsAt) {
         publishCloseSignal(state.activeSignal || signal);
         if (closeSignalMatches(state.activeSignal || signal)) {
+          if (shouldIgnoreCloseForActiveLease(state.activeSignal || signal)) {
+            renderAll();
+            return;
+          }
           attemptClose(state.activeSignal || signal);
         }
       }
     } else if (!isAzHost() && isFreshCloseSignal(closeSignal) && !state.closeAttempted) {
+      if (shouldIgnoreCloseForActiveLease(closeSignal)) {
+        renderAll();
+        return;
+      }
       const signalKey = buildSignalKey(closeSignal);
       if (signalKey && state.activeSignalKey !== signalKey) {
         state.activeSignal = {
@@ -1050,8 +1185,13 @@
     } else if (!signal && isAzHost() && mirroredMeta?.azId) {
       setStatus('Mirrored payload available in AZ');
     } else if (!signal) {
-      setStatus('Watching for webhook success');
+      if (!getActiveIgnoreCloseLease()) state.lastIgnoreCloseSignalKey = '';
+      setStatus(getActiveIgnoreCloseLease() ? 'Ignoring shared close until refresh' : 'Watching for webhook success');
     } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
+      if (shouldIgnoreCloseForActiveLease(state.activeSignal || signal)) {
+        renderAll();
+        return;
+      }
       if (isLexHost() && isLexCloseConsumedByOtherTab(state.activeSignal || signal)) {
         state.closeAttempted = true;
         writeSession(SS_KEYS.closeAttempted, '1');
@@ -1093,6 +1233,17 @@
       state.ui.download.style.cursor = canDownload ? 'pointer' : 'not-allowed';
     }
 
+    if (state.ui.ignoreClose) {
+      const lease = getActiveIgnoreCloseLease();
+      const active = !!lease;
+      const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
+      state.ui.ignoreClose.textContent = owned
+        ? 'IGNORE CLOSE ON'
+        : (active ? 'IGNORE CLOSE ACTIVE' : 'IGNORE CLOSE OFF');
+      state.ui.ignoreClose.style.background = owned ? '#b45309' : (active ? '#7c2d12' : '#475569');
+      state.ui.ignoreClose.style.opacity = active && !owned ? '.92' : '1';
+    }
+
     renderLogs();
   }
 
@@ -1132,6 +1283,7 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button id="tm-payload-mirror-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button id="tm-payload-mirror-download" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#1d4ed8;color:#fff;font-weight:800;cursor:pointer;">DOWNLOAD MIRROR</button>
+          <button id="tm-payload-mirror-ignore-close" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">IGNORE CLOSE OFF</button>
         </div>
         <div id="tm-payload-mirror-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching for webhook success</div>
         <div style="display:grid;grid-template-columns:110px 1fr;gap:6px 8px;margin-bottom:10px;">
@@ -1148,6 +1300,7 @@
     state.ui.head = panel.querySelector('#tm-payload-mirror-head');
     state.ui.toggle = panel.querySelector('#tm-payload-mirror-toggle');
     state.ui.download = panel.querySelector('#tm-payload-mirror-download');
+    state.ui.ignoreClose = panel.querySelector('#tm-payload-mirror-ignore-close');
     state.ui.status = panel.querySelector('#tm-payload-mirror-status');
     state.ui.azId = panel.querySelector('#tm-payload-mirror-azid');
     state.ui.mirrored = panel.querySelector('#tm-payload-mirror-mirrored');
@@ -1176,6 +1329,13 @@
     state.ui.download?.addEventListener('click', () => {
       downloadMirrorSnapshot();
       renderAll();
+    });
+
+    state.ui.ignoreClose?.addEventListener('click', () => {
+      const lease = getActiveIgnoreCloseLease();
+      const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
+      setIgnoreCloseEnabledForThisPage(!owned);
+      tick('manual-ignore-close');
     });
   }
 
