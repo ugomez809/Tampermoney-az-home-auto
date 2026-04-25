@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.3
+// @version      1.5.4
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.3';
+  const VERSION = '1.5.4';
   const UI_ID = 'tm-az-apex-gwpc-storage-tools-v153';
   const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v153';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
@@ -671,17 +671,6 @@
 
   function exportLogsTxt() {
     try {
-      if (typeof window.confirm === 'function') {
-        const ok = window.confirm(
-          'Exported logs may contain customer names, addresses, and ticket IDs.\n' +
-          'Do not share the downloaded TXT outside the team.\n\nContinue?'
-        );
-        if (!ok) {
-          toast('Log export cancelled');
-          return;
-        }
-      }
-
       syncSharedCaches();
       const records = collectAllLogRecords();
       const txt = buildLogsTxt(records);

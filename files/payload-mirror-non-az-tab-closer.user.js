@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.15
+// @version      1.0.16
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.15';
+  const VERSION = '1.0.16';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -74,6 +74,7 @@
     tickMs: 400,
     maxSignalAgeMs: 90000,
     closeDelayMs: 5000,
+    samePageCloseMs: 5 * 60 * 1000,
     ignoreCloseLeaseTtlMs: 8000,
     ignoreCloseLeaseHeartbeatMs: 1500,
     maxLogLines: 70,
@@ -102,7 +103,11 @@
     logsIntervalTimer: null,
     tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     lastIgnoreCloseLeaseHeartbeatAt: 0,
-    lastIgnoreCloseSignalKey: ''
+    lastIgnoreCloseSignalKey: '',
+    samePageSignature: '',
+    samePageSinceAt: 0,
+    samePageCloseAttempted: false,
+    samePageLoggedArmed: false
   };
 
   init();
@@ -170,12 +175,16 @@
   }
 
   function loadRunning() {
-    try { return localStorage.getItem(LS_KEYS.running) !== '0'; }
-    catch { return true; }
+    // Close handling should re-arm after refresh. Stop is only for this page session.
+    try { localStorage.removeItem(LS_KEYS.running); } catch {}
+    return true;
   }
 
   function saveRunning(on) {
-    try { localStorage.setItem(LS_KEYS.running, on ? '1' : '0'); } catch {}
+    try {
+      if (on) localStorage.removeItem(LS_KEYS.running);
+      else localStorage.setItem(LS_KEYS.running, '0');
+    } catch {}
   }
 
   function readJson(raw, fallback = null) {
@@ -198,6 +207,28 @@
 
   function norm(value) {
     return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function hashString(value) {
+    let hash = 0;
+    const text = String(value == null ? '' : value);
+    for (let i = 0; i < text.length; i += 1) {
+      hash = ((hash << 5) - hash) + text.charCodeAt(i);
+      hash |= 0;
+    }
+    return `h${Math.abs(hash)}`;
+  }
+
+  function visible(el) {
+    if (!el || !(el instanceof Element)) return false;
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch {
+      return false;
+    }
   }
 
   function nowIso() {
@@ -460,6 +491,108 @@
   function readCloseSignal() {
     const value = readGM(GM_KEYS.closeSignal, null);
     return isPlainObject(value) ? value : null;
+  }
+
+  function getVisibleGuidewireHeader() {
+    const selectors = [
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '.gw-Wizard--Title',
+      '[role="heading"][aria-level="1"]'
+    ];
+    for (const selector of selectors) {
+      try {
+        const nodes = Array.from(document.querySelectorAll(selector));
+        for (const node of nodes) {
+          if (!visible(node)) continue;
+          const text = norm(node.textContent || '');
+          if (text) return text;
+        }
+      } catch {}
+    }
+    return '';
+  }
+
+  function readCurrentAzIdForCloseFallback() {
+    const keys = [
+      'tm_pc_current_job_v1',
+      'tm_pc_webhook_bundle_v1',
+      'tm_pc_home_quote_grab_payload_v1',
+      'tm_pc_auto_quote_grab_payload_v1'
+    ];
+    for (const key of keys) {
+      const value = readLocalJson(key);
+      const data = isPlainObject(value?.data) ? value.data : value;
+      const azId = norm(
+        value?.['AZ ID']
+        || value?.azId
+        || value?.currentJob?.['AZ ID']
+        || data?.['AZ ID']
+        || data?.azId
+        || data?.currentJob?.['AZ ID']
+        || ''
+      );
+      if (azId) return azId;
+    }
+    return norm(state.activeSignal?.azId || readMirroredPayloadMeta()?.azId || '');
+  }
+
+  function getSamePageSignature() {
+    return [
+      location.origin,
+      location.pathname,
+      location.search,
+      location.hash,
+      getVisibleGuidewireHeader() || document.title || ''
+    ].map(norm).join('|');
+  }
+
+  function resetSamePageWatch(signature = '') {
+    state.samePageSignature = signature;
+    state.samePageSinceAt = signature ? Date.now() : 0;
+    state.samePageCloseAttempted = false;
+    state.samePageLoggedArmed = false;
+  }
+
+  function checkGwpcSamePageCloseWatchdog() {
+    if (!isGwpcHost()) return;
+    if (getActiveIgnoreCloseLease()) return;
+    if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
+
+    const signature = getSamePageSignature();
+    if (!signature) {
+      resetSamePageWatch('');
+      return;
+    }
+
+    if (state.samePageSignature !== signature) {
+      resetSamePageWatch(signature);
+      return;
+    }
+
+    const ageMs = Date.now() - Number(state.samePageSinceAt || Date.now());
+    if (!state.samePageLoggedArmed && ageMs >= 1000) {
+      state.samePageLoggedArmed = true;
+      log('GWPC same-page close watchdog armed for 5m');
+    }
+    if (ageMs < CFG.samePageCloseMs) return;
+
+    const signal = {
+      ok: true,
+      azId: readCurrentAzIdForCloseFallback() || 'unknown',
+      postedAt: nowIso(),
+      signalKey: `same-page|${hashString(signature)}|${state.samePageSinceAt}`,
+      source: SCRIPT_NAME,
+      version: VERSION,
+      reason: 'same-page-watchdog'
+    };
+
+    state.samePageCloseAttempted = true;
+    state.activeSignal = signal;
+    state.activeSignalKey = buildSignalKey(signal);
+    log(`GWPC same-page watchdog reached 5m; closing tab | header="${getVisibleGuidewireHeader() || '(unknown)'}" | AZ ${signal.azId}`);
+    attemptClose(signal);
   }
 
   function readIgnoreCloseLease() {
@@ -1204,6 +1337,7 @@
       attemptClose(state.activeSignal || signal);
     }
 
+    checkGwpcSamePageCloseWatchdog();
     renderAll();
   }
 
