@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.30
+// @version      2.5.31
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.30';
+  const VERSION = '2.5.31';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -88,6 +88,7 @@
   const SS_KEYS = {
     BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1',
     BOOTSTRAP_RELOAD_MODE: 'tm_az_stage_runner_bootstrap_reload_mode_v1',
+    MISSING_PAYLOAD_HANDOFF_PAUSE: 'tm_az_stage_runner_missing_payload_handoff_pause_v1',
     LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED: 'tm_az_stage_runner_last_workflow_cleanup_request_handled_v1'
   };
 
@@ -291,6 +292,20 @@
 
     window.__HB_AZ_STAGE_RUNNER_CLEANUP__ = cleanup;
 
+    const handoffPause = readMissingPayloadHandoffPause();
+    if (handoffPause) {
+      state.running = false;
+      state.busy = false;
+      state.refreshRequiredThisLoad = false;
+      saveRunning(false);
+      setBootstrapReloadMode('');
+      clearBootstrapReloadToken();
+      syncUi();
+      setStatus('MISSING PAYLOAD HANDOFF PAUSED');
+      log(`Missing payload handoff pause active; launcher stopped for finisher | ${handoffPause.ticketId || 'unknown ticket'}`, 'warn');
+      return;
+    }
+
     if (hasBootstrapReloadToken()) {
       const restoreMode = consumeBootstrapReloadMode();
       clearBootstrapReloadToken();
@@ -400,10 +415,34 @@
     try { sessionStorage.removeItem(SS_KEYS.BOOTSTRAP_RELOAD_TOKEN); } catch {}
   }
 
+  function readMissingPayloadHandoffPause() {
+    try {
+      const raw = sessionStorage.getItem(SS_KEYS.MISSING_PAYLOAD_HANDOFF_PAUSE);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function setMissingPayloadHandoffPause(ticketId, reason) {
+    const payload = {
+      ticketId: norm(ticketId || ''),
+      reason: norm(reason || ''),
+      savedAt: nowIso()
+    };
+    try { sessionStorage.setItem(SS_KEYS.MISSING_PAYLOAD_HANDOFF_PAUSE, JSON.stringify(payload)); } catch {}
+  }
+
+  function clearMissingPayloadHandoffPause() {
+    try { sessionStorage.removeItem(SS_KEYS.MISSING_PAYLOAD_HANDOFF_PAUSE); } catch {}
+  }
+
   function armRefreshResumeToken() {
-    // Any real page unload in this tab should come back running. Stop is only
-    // for the current live page session, not for the next refresh.
+    // Only active launcher-controlled reloads should resume automatically.
+    // A missing-payload handoff must stay stopped so the finisher can own it.
     if (state.destroyed) return;
+    if (readMissingPayloadHandoffPause()) return;
+    if (!state.running && !state.refreshRequiredThisLoad) return;
     setBootstrapReloadMode(state.mode || 'home');
     setBootstrapReloadToken();
   }
@@ -1330,6 +1369,8 @@
   }
 
   function startRun(isRestore = false) {
+    if (!isRestore) clearMissingPayloadHandoffPause();
+
     if (state.refreshRequiredThisLoad) {
       state.running = false;
       saveRunning(false);
@@ -1422,25 +1463,10 @@
       clearFinisherCloseSignal();
       clearMissingPayloadTrigger();
       publishMissingPayloadTrigger(activeTicketId, `LAUNCHER ERROR: ${message}`);
-      setStatus('WAITING ERROR FINISHER');
+      setMissingPayloadHandoffPause(activeTicketId, `LAUNCHER ERROR: ${message}`);
+      setStatus('LAUNCHER ERROR HANDED TO FINISHER');
       clearDockHighlight();
-
-      const ticketClosed = await waitForTicketClosedByFinisher(activeTicketId, {
-        maxWaitMs: CFG.missingPayloadFinisherMaxWaitMs,
-        timeoutLabel: 'launcher error finisher'
-      });
-
-      if (ticketClosed) {
-        state.processedIds.add(activeTicketId);
-        clearMainPayloadFailure(activeTicketId);
-        clearMissingPayloadTrigger();
-        blockUntilRefresh(activeTicketId);
-        return;
-      }
-
-      setStatus('STOPPED ERROR FINISHER TIMEOUT');
-      log(`Launcher error fallback did not finish within ${Math.round(CFG.missingPayloadFinisherMaxWaitMs / 1000)}s; stopping instead of refreshing`, 'error');
-      stopRun('Launcher error finisher timeout');
+      stopRun('Launcher error handed to finisher', { manual: true });
     } finally {
       state.fatalFallbackInFlight = false;
       if (!state.running) state.busy = false;
@@ -1568,34 +1594,14 @@
           log(`MAIN/PAYLOAD FAILED | ${ticketId}`, 'error');
           const failure = recordMainPayloadFailure(ticketId, 'MAIN/PAYLOAD FAILED');
           log(`Main payload failure count | ${ticketId} | ${failure.count}`, failure.repeated ? 'error' : 'warn');
-          if (failure.repeated) {
-            clearFinisherCloseSignal();
-            clearMissingPayloadTrigger();
-            clearDockHighlight();
-            setStatus('STOPPED REPEATED MAIN/PAYLOAD FAILURE');
-            log(`Repeated MAIN/PAYLOAD failure for ${ticketId}; stopping to prevent refresh loop`, 'error');
-            stopRun('Repeated MAIN/PAYLOAD failure');
-            return;
-          }
           clearFinisherCloseSignal();
           clearMissingPayloadTrigger();
           publishMissingPayloadTrigger(ticketId, 'MAIN/PAYLOAD FAILED');
-          setStatus('WAITING MISSING PAYLOAD FINISHER');
+          setMissingPayloadHandoffPause(ticketId, 'MAIN/PAYLOAD FAILED');
+          setStatus('MAIN/PAYLOAD FAILED HANDED TO FINISHER');
           clearDockHighlight();
-          const ticketClosed = await waitForTicketClosedByFinisher(ticketId, {
-            maxWaitMs: CFG.missingPayloadFinisherMaxWaitMs,
-            timeoutLabel: 'missing payload finisher'
-          });
-          if (ticketClosed) {
-            state.processedIds.add(ticketId);
-            clearMainPayloadFailure(ticketId);
-            clearMissingPayloadTrigger();
-            blockUntilRefresh(ticketId);
-            return;
-          }
-          setStatus('STOPPED MISSING PAYLOAD FINISHER TIMEOUT');
-          log(`Missing payload fallback did not finish within ${Math.round(CFG.missingPayloadFinisherMaxWaitMs / 1000)}s; stopping instead of refreshing`, 'error');
-          stopRun('Missing payload finisher timeout');
+          log(`Launcher stopped after missing Main data; finisher owns failed note/tag/close for ${ticketId}`, 'warn');
+          stopRun('Missing payload handed to finisher', { manual: true });
           return;
         }
 
