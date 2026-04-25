@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.26
+// @version      2.5.27
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.26';
+  const VERSION = '2.5.27';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -1485,9 +1485,8 @@
 
     await foregroundSleep(450);
 
-    const modeSelector = SEL.homeLink;
-    const modeLabel = 'Home link';
-    const modeOk = await clickSelectorWithRetry(modeSelector, modeLabel, 6);
+    const modeLabel = 'Farmers Home Quote';
+    const modeOk = await clickHomeQuoteLinkWithRetry(modeLabel, 8);
     if (!modeOk) return false;
 
     log(`${modeLabel} clicked. Waiting for background/return...`, 'info');
@@ -1619,6 +1618,63 @@
     return false;
   }
 
+  function getQuoteActionText(el) {
+    if (!el) return '';
+
+    const imgAlts = [...el.querySelectorAll?.('img[alt]') || []]
+      .map(img => img.getAttribute('alt'))
+      .filter(Boolean);
+
+    return norm([
+      el.textContent,
+      el.getAttribute?.('title'),
+      el.getAttribute?.('aria-label'),
+      el.getAttribute?.('data-original-title'),
+      el.getAttribute?.('href'),
+      ...imgAlts
+    ].filter(Boolean).join(' '));
+  }
+
+  function scoreHomeQuoteAction(el, quotePane) {
+    const haystack = lower(getQuoteActionText(el));
+    if (!haystack || haystack.includes('auto')) return 0;
+
+    let score = 0;
+    if (haystack.includes('farmers home quote')) score += 120;
+    if (haystack.includes('home quote')) score += 80;
+    if (haystack.includes('farmers home')) score += 60;
+    if (haystack.includes('homeowners quote')) score += 60;
+    if (haystack.includes('home') && haystack.includes('quote')) score += 45;
+    if (quotePane && quotePane.contains(el)) score += 20;
+    if (el.matches?.('a[href], button, [role="button"]')) score += 5;
+
+    return score;
+  }
+
+  function findHomeQuoteAction() {
+    const quotePane = document.querySelector(SEL.quotePane);
+    const roots = [quotePane, getOpenDockRoot(), document].filter(Boolean);
+    const seen = new Set();
+    let best = null;
+
+    for (const root of roots) {
+      const candidates = root.querySelectorAll('a, button, [role="button"], .btn, [onclick]');
+      for (const el of candidates) {
+        if (seen.has(el) || !visible(el)) continue;
+        seen.add(el);
+
+        const score = scoreHomeQuoteAction(el, quotePane);
+        if (score <= 0) continue;
+
+        if (!best || score > best.score) {
+          best = { el, score, text: getQuoteActionText(el) };
+        }
+      }
+    }
+
+    return best;
+  }
+
   async function ensureQuotesAreaReady() {
     const quotesTab = document.querySelector(SEL.quotesTab);
     if (!quotesTab || !visible(quotesTab)) {
@@ -1634,11 +1690,11 @@
       if (!state.running || state.destroyed) return false;
 
       const pane = document.querySelector(SEL.quotePane);
-      const modeLink = document.querySelector(SEL.homeLink);
+      const homeQuoteAction = findHomeQuoteAction();
 
       if (pane && (pane.classList.contains('active') || pane.classList.contains('show') || visible(pane))) {
-        if (modeLink && visible(modeLink)) {
-          log('Quotes area ready', 'ok');
+        if (homeQuoteAction?.el && visible(homeQuoteAction.el)) {
+          log(`Quotes area ready | ${homeQuoteAction.text || 'Home quote action'}`, 'ok');
           return true;
         }
       }
@@ -1651,6 +1707,21 @@
     }
 
     log('Quotes area did not become ready', 'error');
+    return false;
+  }
+
+  async function clickHomeQuoteLinkWithRetry(label, tries = 4) {
+    for (let i = 0; i < tries; i++) {
+      const found = findHomeQuoteAction();
+      if (found?.el && visible(found.el)) {
+        strongClick(found.el);
+        log(`Clicked: ${label}${found.text ? ` | ${found.text}` : ''}`, 'info');
+        return true;
+      }
+      await foregroundSleep(250 + (i * 100));
+    }
+
+    log(`Not found: ${label}`, 'error');
     return false;
   }
 
