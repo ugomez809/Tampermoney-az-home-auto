@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.25
+// @version      2.5.26
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.25';
+  const VERSION = '2.5.26';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -77,7 +77,9 @@
     AZ_CURRENT_JOB: 'tm_az_current_job_v1',
     WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1',
     FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1',
-    MISSING_PAYLOAD_TRIGGER: 'tm_az_missing_payload_fallback_trigger_v1'
+    MISSING_PAYLOAD_TRIGGER: 'tm_az_missing_payload_fallback_trigger_v1',
+    FINAL_PAYLOAD: 'tm_az_gwpc_final_payload_v1',
+    FINAL_READY: 'tm_az_gwpc_final_payload_ready_v1'
   };
 
   const SS_KEYS = {
@@ -262,8 +264,18 @@
 
     state.storageWakeHandler = (event) => {
       if (event?.storageArea !== localStorage) return;
-      if (event.key !== KEYS.FINISHER_CLOSE_SIGNAL && event.key !== KEYS.WORKFLOW_CLEANUP_REQUEST) return;
-      markExternalWake(event.key === KEYS.FINISHER_CLOSE_SIGNAL ? 'finisher-close' : 'workflow-cleanup');
+      if (
+        event.key !== KEYS.FINISHER_CLOSE_SIGNAL
+        && event.key !== KEYS.WORKFLOW_CLEANUP_REQUEST
+        && event.key !== KEYS.FINAL_READY
+        && event.key !== KEYS.FINAL_PAYLOAD
+      ) return;
+      const reason = event.key === KEYS.FINISHER_CLOSE_SIGNAL
+        ? 'finisher-close'
+        : event.key === KEYS.WORKFLOW_CLEANUP_REQUEST
+          ? 'workflow-cleanup'
+          : 'final-home-payload';
+      markExternalWake(reason);
     };
     window.addEventListener('storage', state.storageWakeHandler, true);
 
@@ -603,6 +615,19 @@
     }
   }
 
+  function readSharedJson(key, fallback = null) {
+    const local = readJson(key, undefined);
+    if (local !== undefined && local !== null) return local;
+    try {
+      const value = GM_getValue(key, undefined);
+      if (value === undefined || value === null || value === '') return fallback;
+      if (typeof value === 'string') return JSON.parse(value);
+      return value;
+    } catch {
+      return fallback;
+    }
+  }
+
   function writeJson(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }
@@ -718,6 +743,30 @@
 
     writeSession(SS_KEYS.LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED, requestKey);
     log(`Received workflow cleanup trigger | ${requestId}`, 'ok');
+    return true;
+  }
+
+  function consumeFinalPayloadReady(ticketId, minSignalMs = 0) {
+    const wantedId = norm(ticketId || '');
+    if (!wantedId) return false;
+
+    const ready = readSharedJson(KEYS.FINAL_READY, null);
+    const payload = readSharedJson(KEYS.FINAL_PAYLOAD, null);
+    const finalId = norm(ready?.azId || payload?.azId || '');
+    if (!finalId || finalId !== wantedId) return false;
+
+    const timeCandidates = [
+      ready?.savedAt,
+      ready?.signalPostedAt,
+      payload?.savedAt,
+      payload?.signalPostedAt
+    ].map((value) => Date.parse(norm(value || ''))).filter(Number.isFinite);
+
+    if (minSignalMs && timeCandidates.length && Math.max(...timeCandidates) < (minSignalMs - 2000)) {
+      return false;
+    }
+
+    log(`Final Home payload ready for AZ ${finalId}; launcher can refresh`, 'ok');
     return true;
   }
 
@@ -1451,9 +1500,13 @@
   async function waitForTicketClosedByFinisher(ticketId) {
     let lastLogAt = 0;
     let drawerHiddenLogged = false;
+    const waitStartedAt = Date.now();
 
     while (state.running && !state.destroyed) {
       if (consumeFinisherWakeTrigger(ticketId)) {
+        return true;
+      }
+      if (consumeFinalPayloadReady(ticketId, waitStartedAt)) {
         return true;
       }
 
