@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.16
+// @version      4.1.17
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.16';
+  const VERSION = '4.1.17';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -750,10 +750,15 @@
     next.meta.version = VERSION;
     next.ready = options.ready === true ? true : options.ready === false ? false : next.ready === true;
     next.savedAt = now;
-    next.page = {
-      url: location.href,
-      title: document.title
-    };
+    next.page = isPlainObject(options.page)
+      ? {
+        url: normalizeText(options.page.url || location.href),
+        title: normalizeText(options.page.title || document.title)
+      }
+      : {
+        url: location.href,
+        title: document.title
+      };
 
     localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
 
@@ -2105,6 +2110,27 @@
     if (hasAnyNonEmptyHomeValues(mergedDwellingData)) {
       finalProgressUpdates.earlyDwellingCaptured = true;
     }
+
+    let finalPage = {
+      url: location.href,
+      title: document.title
+    };
+
+    if (finalResult.ready) {
+      try {
+        setStatus('Returning to Quote for handoff');
+        await goToQuote();
+        await sleep(CFG.afterClickMs);
+        finalPage = {
+          url: location.href,
+          title: document.title
+        };
+        log(`Final Quote screen ready for handoff (${describeNavigationSnapshot(readNavigationSnapshot())})`);
+      } catch (err) {
+        log(`Final Quote screen handoff navigation failed: ${err?.message || err}`);
+      }
+    }
+
     const save = saveHomeState(targetJob, {
       rowUpdates: finalResult.row,
       customFields: customFieldUpdates,
@@ -2121,7 +2147,8 @@
         fairPlanCompanionEndorsementDetected: cfpValue === 'YES'
       },
       phase: finalResult.ready ? 'complete' : 'pass2',
-      ready: finalResult.ready
+      ready: finalResult.ready,
+      page: finalPage
     });
 
     if (!save.ok) {
@@ -2132,17 +2159,6 @@
       log(`Final Home payload still missing: ${finalResult.missing.join(', ')}`);
     } else {
       log('Final Home payload complete');
-    }
-
-    if (finalResult.ready) {
-      try {
-        setStatus('Returning to Quote for handoff');
-        await goToQuote();
-        await sleep(CFG.afterClickMs);
-        log(`Final Quote screen ready for handoff (${describeNavigationSnapshot(readNavigationSnapshot())})`);
-      } catch (err) {
-        log(`Final Quote screen handoff navigation failed: ${err?.message || err}`);
-      }
     }
 
     writeFlowStage('home', 'handoff', targetJob['AZ ID']);
