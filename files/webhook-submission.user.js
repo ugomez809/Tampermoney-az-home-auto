@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.6
+// @version      1.18.7
 // @description  Single GWPC sender. Waits for tm_pc_current_job_v1 handoff, only accepts final-ready home-only payload flow, builds a synthetic bundle when needed, then sends one webhook payload while retaining stored payloads for later reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.6';
+  const VERSION = '1.18.7';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -38,6 +38,7 @@
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
+  const WEBHOOK_FATAL_HOLD_KEY = 'tm_pc_webhook_fatal_error_hold_v1';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -81,6 +82,7 @@
     clearLogsBtn: null,
     logLines: [],
     drag: null,
+    fatalOverlay: null,
     savedWebhookUrl: '',
     lastWaitKey: '',
     lastStatus: '',
@@ -128,6 +130,7 @@
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { window.removeEventListener('pagehide', persistWebhookBeforeUnload, true); } catch {}
     try { document.removeEventListener('visibilitychange', onVisibilityChange, true); } catch {}
+    try { removeFatalWebhookOverlay(); } catch {}
     try { state.panel?.remove(); } catch {}
   }
 
@@ -690,6 +693,177 @@
     return payload;
   }
 
+  function readFatalWebhookHold() {
+    let value = null;
+    try { value = safeJsonParse(localStorage.getItem(WEBHOOK_FATAL_HOLD_KEY), null); } catch {}
+    if (isPlainObject(value)) return value;
+    try { value = GM_getValue(WEBHOOK_FATAL_HOLD_KEY, null); } catch { value = null; }
+    return isPlainObject(value) ? value : null;
+  }
+
+  function writeFatalWebhookHold(record) {
+    try { GM_setValue(WEBHOOK_FATAL_HOLD_KEY, record); } catch {}
+    try { localStorage.setItem(WEBHOOK_FATAL_HOLD_KEY, JSON.stringify(record)); } catch {}
+  }
+
+  function clearFatalWebhookHold(azId = '') {
+    const current = readFatalWebhookHold();
+    if (!current) return;
+    const wantedAzId = normalizeText(azId || '');
+    const currentAzId = normalizeText(current.azId || '');
+    if (wantedAzId && currentAzId && wantedAzId !== currentAzId) return;
+    try { GM_setValue(WEBHOOK_FATAL_HOLD_KEY, null); } catch {}
+    try { localStorage.removeItem(WEBHOOK_FATAL_HOLD_KEY); } catch {}
+    removeFatalWebhookOverlay();
+  }
+
+  function makeWebhookHttpError(status, raw) {
+    const statusCode = Number(status || 0);
+    const responseText = String(raw == null ? '' : raw);
+    const snippet = normalizeSpace(responseText).slice(0, 300);
+    const err = new Error(`HTTP ${statusCode}${snippet ? ` | ${snippet}` : ''}`);
+    err.webhookHttpStatus = statusCode;
+    err.responseText = responseText;
+    return err;
+  }
+
+  function isFatalWebhook404(err) {
+    return Number(err?.webhookHttpStatus || err?.status || 0) === 404;
+  }
+
+  function buildFatalWebhookHoldRecord(err, job, endpoint, signature) {
+    return {
+      active: true,
+      kind: 'webhook-http-404',
+      status: 404,
+      error: normalizeText(err?.message || 'HTTP 404'),
+      responseText: String(err?.responseText || '').slice(0, 1200),
+      endpoint: normalizeText(endpoint || ''),
+      azId: normalizeText(job?.['AZ ID'] || ''),
+      submissionNumber: normalizeText(job?.SubmissionNumber || ''),
+      signature: normalizeText(signature || ''),
+      pageUrl: location.href,
+      pageTitle: document.title,
+      createdAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+  }
+
+  function removeFatalWebhookOverlay() {
+    try { state.fatalOverlay?.remove(); } catch {}
+    state.fatalOverlay = null;
+    try { document.getElementById('hb-webhook-fatal-error-overlay')?.remove(); } catch {}
+  }
+
+  function addFatalOverlayLine(parent, label, value) {
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+
+    const strong = document.createElement('strong');
+    strong.textContent = `${label}: `;
+    row.appendChild(strong);
+
+    const span = document.createElement('span');
+    span.textContent = normalizeText(value || '(blank)');
+    row.appendChild(span);
+
+    parent.appendChild(row);
+  }
+
+  function showFatalWebhookOverlay(record) {
+    removeFatalWebhookOverlay();
+
+    const box = document.createElement('div');
+    box.id = 'hb-webhook-fatal-error-overlay';
+    box.setAttribute('data-hb-script-id', SCRIPT_ID);
+    Object.assign(box.style, {
+      position: 'fixed',
+      left: '50%',
+      top: '50%',
+      transform: 'translate(-50%, -50%)',
+      zIndex: String(CFG.zIndex),
+      width: 'min(580px, calc(100vw - 32px))',
+      maxHeight: 'calc(100vh - 48px)',
+      overflow: 'auto',
+      background: '#7f1d1d',
+      color: '#fff',
+      border: '3px solid #fca5a5',
+      borderRadius: '18px',
+      boxShadow: '0 24px 80px rgba(0,0,0,.55)',
+      padding: '18px',
+      font: '14px/1.45 Arial, sans-serif'
+    });
+
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'X';
+    Object.assign(close.style, {
+      position: 'absolute',
+      top: '10px',
+      right: '10px',
+      border: '0',
+      borderRadius: '999px',
+      width: '30px',
+      height: '30px',
+      background: '#fee2e2',
+      color: '#7f1d1d',
+      fontWeight: '900',
+      cursor: 'pointer'
+    });
+    close.addEventListener('click', () => removeFatalWebhookOverlay(), true);
+
+    const title = document.createElement('div');
+    title.textContent = 'Error with webhook';
+    title.style.fontSize = '22px';
+    title.style.fontWeight = '900';
+    title.style.paddingRight = '42px';
+
+    const message = document.createElement('div');
+    message.textContent = 'The webhook returned HTTP 404. This tab will stay open so the payload is not lost.';
+    message.style.marginTop = '8px';
+
+    const pre = document.createElement('pre');
+    pre.textContent = normalizeText(record.responseText || record.error || 'HTTP 404');
+    Object.assign(pre.style, {
+      margin: '12px 0 0',
+      padding: '12px',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      background: 'rgba(0,0,0,.28)',
+      border: '1px solid rgba(255,255,255,.28)',
+      borderRadius: '12px',
+      maxHeight: '220px',
+      overflow: 'auto'
+    });
+
+    box.appendChild(close);
+    box.appendChild(title);
+    box.appendChild(message);
+    addFatalOverlayLine(box, 'AZ ID', record.azId);
+    addFatalOverlayLine(box, 'Submission', record.submissionNumber);
+    addFatalOverlayLine(box, 'Endpoint', record.endpoint);
+    addFatalOverlayLine(box, 'Error', record.error);
+    box.appendChild(pre);
+    document.documentElement.appendChild(box);
+    state.fatalOverlay = box;
+  }
+
+  function handleFatalWebhook404(err, job, endpoint, signature) {
+    const record = buildFatalWebhookHoldRecord(err, job, endpoint, signature);
+    writeFatalWebhookHold(record);
+    showFatalWebhookOverlay(record);
+    clearForceSendRequest();
+    state.running = false;
+    try { sessionStorage.setItem(CFG.stoppedKey, '1'); } catch {}
+    state.busy = false;
+    state.quoteSeenAt = 0;
+    setStatus('Error with webhook - tab held open');
+    writeActivityState('error', `Webhook HTTP 404 | ${record.error}`);
+    renderButtons();
+    log(`Webhook fatal 404 hold active | AZ ${record.azId || '(blank)'} | submission ${record.submissionNumber || '(blank)'} | error="${record.error}"`);
+  }
+
   function isGloballyPaused() {
     try { return localStorage.getItem(GLOBAL_PAUSE_KEY) === '1'; } catch { return false; }
   }
@@ -1053,12 +1227,13 @@
         const json = safeJsonParse(raw, null);
 
         if (res.status < 200 || res.status >= 400) {
-          throw new Error(`HTTP ${res.status}${raw ? ` | ${raw.slice(0, 300)}` : ''}`);
+          throw makeWebhookHttpError(res.status, raw);
         }
         if (json && json.ok === false) {
           throw new Error(json.error || json.message || 'Receiver returned ok:false');
         }
 
+        clearFatalWebhookHold(job['AZ ID']);
         setSentMeta({ signature, sentAt: nowIso(), azId: job['AZ ID'] });
         setPostSuccess(job, signature);
         log('Webhook send success');
@@ -1068,6 +1243,11 @@
         return;
       } catch (err) {
         lastErr = err;
+        if (isFatalWebhook404(err)) {
+          log(`Send attempt failed with fatal HTTP 404: ${err?.message || err}`);
+          handleFatalWebhook404(err, job, endpoint, signature);
+          return;
+        }
         log(`Send attempt failed: ${err?.message || err}`);
       }
     }
@@ -1351,7 +1531,10 @@
       state.running = !state.running;
       if (state.running) sessionStorage.removeItem(CFG.stoppedKey);
       else sessionStorage.setItem(CFG.stoppedKey, '1');
-      if (state.running) clearSentMeta();
+      if (state.running) {
+        clearSentMeta();
+        clearFatalWebhookHold(readCurrentJob()?.['AZ ID'] || '');
+      }
       renderButtons();
       writeActivityState(state.running ? 'idle' : 'stopped', state.running ? 'Running' : 'Stopped');
       setStatus(state.running ? 'Running' : 'Stopped');
@@ -1361,6 +1544,7 @@
     });
 
     state.sendBtn.addEventListener('click', () => {
+      clearFatalWebhookHold(readCurrentJob()?.['AZ ID'] || '');
       requestForceSend('manual-send');
       state.running = true;
       sessionStorage.removeItem(CFG.stoppedKey);

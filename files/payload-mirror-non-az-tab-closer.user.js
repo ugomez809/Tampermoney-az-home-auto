@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.16
+// @version      1.0.17
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.16';
+  const VERSION = '1.0.17';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -47,6 +47,7 @@
     closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
     lexCloseConsumed: 'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
     ignoreCloseLease: 'tm_pc_payload_mirror_ignore_close_lease_v1',
+    webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1'
   };
@@ -104,6 +105,7 @@
     tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     lastIgnoreCloseLeaseHeartbeatAt: 0,
     lastIgnoreCloseSignalKey: '',
+    lastWebhookFatalHoldLogKey: '',
     samePageSignature: '',
     samePageSinceAt: 0,
     samePageCloseAttempted: false,
@@ -538,6 +540,42 @@
     return norm(state.activeSignal?.azId || readMirroredPayloadMeta()?.azId || '');
   }
 
+  function readWebhookFatalHold() {
+    const gmValue = readGM(GM_KEYS.webhookFatalHold, null);
+    if (isPlainObject(gmValue) && gmValue.active === true) return gmValue;
+    const localValue = readLocalJson(GM_KEYS.webhookFatalHold);
+    if (isPlainObject(localValue) && localValue.active === true) return localValue;
+    return null;
+  }
+
+  function getActiveWebhookFatalHold() {
+    if (!isGwpcHost()) return null;
+    const hold = readWebhookFatalHold();
+    if (!hold) return null;
+
+    const holdAzId = norm(hold.azId || '');
+    const currentAzId = readCurrentAzIdForCloseFallback();
+    if (holdAzId && currentAzId && holdAzId !== currentAzId) return null;
+
+    return hold;
+  }
+
+  function shouldHoldOpenForWebhookFatalError() {
+    const hold = getActiveWebhookFatalHold();
+    if (!hold) {
+      state.lastWebhookFatalHoldLogKey = '';
+      return false;
+    }
+
+    const logKey = `${norm(hold.azId || '')}|${norm(hold.createdAt || '')}|${norm(hold.error || '')}`;
+    if (state.lastWebhookFatalHoldLogKey !== logKey) {
+      state.lastWebhookFatalHoldLogKey = logKey;
+      log(`Webhook fatal error hold active; close disabled | AZ ${norm(hold.azId || '(blank)')} | submission ${norm(hold.submissionNumber || '(blank)')} | error="${norm(hold.error || 'HTTP 404')}"`);
+    }
+    setStatus('Webhook error hold - not closing');
+    return true;
+  }
+
   function getSamePageSignature() {
     return [
       location.origin,
@@ -557,6 +595,7 @@
 
   function checkGwpcSamePageCloseWatchdog() {
     if (!isGwpcHost()) return;
+    if (shouldHoldOpenForWebhookFatalError()) return;
     if (getActiveIgnoreCloseLease()) return;
     if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
 
@@ -1169,6 +1208,7 @@
   function attemptClose(signal = null) {
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
+    if (shouldHoldOpenForWebhookFatalError()) return;
     if (shouldIgnoreCloseForActiveLease(effectiveSignal)) return;
 
     const signalKey = buildSignalKey(effectiveSignal);
