@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.8
+// @version      2.3.9
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.8';
+  const VERSION = '2.3.9';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -3830,7 +3830,7 @@
     }
 
     if (state.els.watchPush) {
-      const enabled = state.watchModeEnabled && hasPendingWatchPost() && !state.watchAlertWebhookBusy;
+      const enabled = state.watchModeEnabled && hasPendingWatchPost();
       state.els.watchPush.disabled = !enabled;
       state.els.watchPush.style.background = enabled ? '#991b1b' : '#334155';
       state.els.watchPush.style.color = enabled ? '#fff' : '#cbd5e1';
