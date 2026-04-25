@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.36
+// @version      1.0.37
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.36';
+  const VERSION = '1.0.37';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1895,6 +1895,8 @@
     return {
       label: clickedLabel,
       value,
+      selector: buildStableSelector(optionEl),
+      fingerprint: buildFingerprint(optionEl),
       savedAt: nowIso()
     };
   }
@@ -2062,6 +2064,21 @@
     return getOpenTicketInfo().tags.some((tag) => lower(tag).includes(label) || label.includes(lower(tag)));
   }
 
+  function findTagMenuItemByLabel(label, root = null) {
+    const wanted = lowerTagText(label);
+    if (!wanted) return null;
+    const items = getTagMenuItems(root);
+    for (const item of items) {
+      const text = lowerTagText(item.textContent || '');
+      if (text === wanted) return item;
+    }
+    for (const item of items) {
+      const text = lowerTagText(item.textContent || '');
+      if (text.includes(wanted) || wanted.includes(text)) return item;
+    }
+    return null;
+  }
+
   function resolveStoredTagValue(selectEl, kind, record) {
     if (!(selectEl instanceof HTMLSelectElement) || !isPlainObject(record)) {
       return { value: '', label: cleanTagText(record?.label || '') };
@@ -2112,6 +2129,18 @@
       return false;
     }
 
+    const dropdown = findTagDropdown();
+    if (!(dropdown instanceof Element)) {
+      log('Tag dropdown not found');
+      return false;
+    }
+
+    const dropdownOpen = await tryOpenTagDropdown(dropdown);
+    if (!dropdownOpen) {
+      log('Tag dropdown did not open');
+      return false;
+    }
+
     const selectEl = findTagSelect(form);
     if (!(selectEl instanceof HTMLSelectElement)) {
       log('Tag select not found in tag form');
@@ -2124,7 +2153,17 @@
       return false;
     }
 
-    mergeTagValues(selectEl, [resolved.value]);
+    const exactSavedItem = findSavedElement(record);
+    const menuRoot = getTagDropdownMenu(dropdown) || form;
+    const item = (exactSavedItem instanceof Element && visible(exactSavedItem))
+      ? exactSavedItem
+      : findTagMenuItemByLabel(resolved.label || record.label || '', menuRoot);
+    if (!(item instanceof Element)) {
+      log(`Tag menu item not found for ${resolved.label || record.label || kind}`);
+      return false;
+    }
+
+    strongClick(item);
     log(`Applied tag selection: ${resolved.label || kind}`);
     await sleep(CFG.bigActionDelayMs);
     return true;
