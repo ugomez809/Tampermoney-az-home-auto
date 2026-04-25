@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.7
+// @version      2.3.8
 // @description  Fresh GWPC timeout gatherer. Watches the live Guidewire header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.7';
+  const VERSION = '2.3.8';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -132,7 +132,8 @@
     lastRuntimePersistKey: '',
     pausedAtMs: 0,
     frozenElapsedMs: 0,
-    timeoutDispatchInFlightKey: ''
+    timeoutDispatchInFlightKey: '',
+    selectorSkipLogKeys: new Map()
   };
 
   boot();
@@ -739,7 +740,14 @@
     };
     try {
       localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2));
-      log(`Raised webhook send signal for ${String(context.product || '').toUpperCase()} ${event.triggerType || 'event'}`);
+      if (event.triggerType === 'selector') {
+        log(
+          `Raised webhook send signal for ${String(context.product || '').toUpperCase()} selector | ` +
+          `rule=${getRuleLogLabel(event)} | sentError=${quoteLogValue(event.errorText || '', 280)}`
+        );
+      } else {
+        log(`Raised webhook send signal for ${String(context.product || '').toUpperCase()} ${event.triggerType || 'event'}`);
+      }
       return true;
     } catch (err) {
       log(`Failed to raise webhook send signal: ${err?.message || err}`);
@@ -755,6 +763,114 @@
 
   function clearWaitLog() {
     state.lastWaitLogKey = '';
+  }
+
+  function quoteLogValue(value, maxChars = 320) {
+    return JSON.stringify(truncateText(normalizeText(value || ''), maxChars));
+  }
+
+  function getRuleLogLabel(ruleLike) {
+    return normalizeText(ruleLike?.label || ruleLike?.errorName || ruleLike?.savedErrorText || ruleLike?.selectorRuleId || 'Saved selector rule');
+  }
+
+  function getVisibleElementLogText(el, maxChars = 320) {
+    if (!(el instanceof Element)) return '';
+    return truncateText(normalizeText(el.innerText || el.textContent || ''), maxChars);
+  }
+
+  function buildElementLogMeta(el) {
+    if (!(el instanceof Element)) {
+      return {
+        tag: '',
+        id: '',
+        className: '',
+        text: '',
+        summary: '(none)'
+      };
+    }
+
+    const tag = String(el.tagName || '').toLowerCase();
+    const id = normalizeText(el.id || '');
+    const className = truncateText(normalizeText(Array.from(el.classList || []).join(' ')), 160);
+    const text = getVisibleElementLogText(el, 320);
+    const summary = [
+      tag || '(unknown)',
+      id ? `#${id}` : '',
+      className ? `.${className.split(/\s+/).filter(Boolean).join('.')}` : ''
+    ].join('');
+
+    return {
+      tag,
+      id,
+      className,
+      text,
+      summary: summary || '(none)'
+    };
+  }
+
+  function selectorFailurePriority(reason) {
+    const normalized = normalizeText(reason).toLowerCase();
+    if (!normalized) return 0;
+    if (normalized === 'text fingerprint not found on visible element') return 100;
+    if (normalized === 'visible element text empty') return 90;
+    if (normalized === 'fingerprint score mismatch') return 80;
+    if (normalized === 'candidate not visible') return 60;
+    if (normalized === 'selector found no elements') return 40;
+    if (normalized === 'selector missing') return 30;
+    if (normalized === 'selector query failed') return 20;
+    return 10;
+  }
+
+  function pickBetterSelectorFailure(current, next) {
+    if (!next) return current || null;
+    if (!current) return next;
+    return selectorFailurePriority(next.reason) >= selectorFailurePriority(current.reason) ? next : current;
+  }
+
+  function logSelectorRuleSkipped(context, rule, matchInfo) {
+    const header = normalizeText(context?.header || state.current.header || '');
+    const baseKey = [
+      normalizeText(rule?.ruleId || ''),
+      header
+    ].join('|');
+    const reason = normalizeText(matchInfo?.reason || 'no visible element matched selector');
+    const nextPriority = selectorFailurePriority(reason);
+    const lastPriority = Number(state.selectorSkipLogKeys.get(baseKey) || 0);
+    if (lastPriority >= nextPriority) return;
+    state.selectorSkipLogKeys.set(baseKey, nextPriority);
+
+    const ruleLabel = getRuleLogLabel(rule);
+    const product = normalizeText(context?.product || state.current.product || '');
+    const stage = normalizeText(context?.productLabel || state.current.productLabel || '');
+    const azId = normalizeText(context?.job?.['AZ ID'] || state.current.azId || '');
+    const submission = normalizeText(context?.submission || state.current.submission || '');
+    const selector = normalizeText(rule?.selector || '');
+
+    log(
+      `Selector rule skipped | ${ruleLabel} | ${reason} | ` +
+      `ruleId=${normalizeText(rule?.ruleId || '')} | selector=${quoteLogValue(selector, 260)} | header=${quoteLogValue(header, 120)} | ` +
+      `product=${quoteLogValue(product, 60)} | stage=${quoteLogValue(stage, 120)} | AZ ID=${quoteLogValue(azId, 80)} | submission=${quoteLogValue(submission, 80)}`
+    );
+  }
+
+  function logSelectorRuleMatchReady(context, rule, matchInfo) {
+    const ruleLabel = getRuleLogLabel(rule);
+    const meta = buildElementLogMeta(matchInfo?.element);
+    const sentError = normalizeText(rule?.savedErrorText || rule?.errorText || '');
+    const header = normalizeText(context?.header || '');
+    const product = normalizeText(context?.product || '');
+    const stage = normalizeText(context?.productLabel || '');
+    const azId = normalizeText(context?.job?.['AZ ID'] || '');
+    const submission = normalizeText(context?.submission || '');
+    const selector = normalizeText(rule?.selector || '');
+
+    log(
+      `Selector rule matched | ruleId=${normalizeText(rule?.ruleId || '')} | label=${quoteLogValue(ruleLabel, 160)} | ` +
+      `sentError=${quoteLogValue(sentError, 280)} | selector=${quoteLogValue(selector, 260)} | ` +
+      `matchedTag=${quoteLogValue(meta.tag, 80)} | matchedClass=${quoteLogValue(meta.className, 160)} | matchedId=${quoteLogValue(meta.id, 120)} | ` +
+      `matchedText=${quoteLogValue(meta.text, 320)} | header=${quoteLogValue(header, 120)} | ` +
+      `product=${quoteLogValue(product, 60)} | stage=${quoteLogValue(stage, 120)} | AZ ID=${quoteLogValue(azId, 80)} | submission=${quoteLogValue(submission, 80)}`
+    );
   }
 
   function setStatus(text) {
@@ -1691,8 +1807,10 @@
     };
   }
 
-  function buildSelectorEvent(context, rule, matchEl) {
+  function buildSelectorEvent(context, rule, matchInfo) {
     const savedErrorText = normalizeText(rule.savedErrorText || rule.errorText || '');
+    const matchedElement = matchInfo?.element instanceof Element ? matchInfo.element : null;
+    const matchedText = normalizeText(matchInfo?.matchedText || getVisibleElementLogText(matchedElement, 600));
     const eventId = createEventId();
     const dedupeKey = [
       'selector',
@@ -1722,8 +1840,8 @@
       detectedAt: nowIso(),
       source: SCRIPT_NAME,
       sourceVersion: VERSION,
-      capturedElementHtml: truncateText(matchEl?.outerHTML || '', 4000),
-      capturedText: truncateText(matchEl?.innerText || matchEl?.textContent || '', 600),
+      capturedElementHtml: truncateText(matchedElement?.outerHTML || '', 4000),
+      capturedText: truncateText(matchedText, 600),
       page: {
         url: location.href,
         title: document.title
@@ -1757,7 +1875,15 @@
     try {
       saveEventToBundle(context.product, context.job, event);
       rememberDispatchedEvent(event);
-      log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to bundle`);
+      if (event.triggerType === 'selector') {
+        log(
+          `Saved ${context.product.toUpperCase()} selector event to bundle | ` +
+          `rule=${getRuleLogLabel(event)} | sentError=${quoteLogValue(event.errorText || '', 280)} | ` +
+          `matchedText=${quoteLogValue(event.capturedText || '', 320)}`
+        );
+      } else {
+        log(`Saved ${context.product.toUpperCase()} ${event.triggerType} event to bundle`);
+      }
       raiseWebhookSendSignal(event, context);
       setStatus(state.running ? 'Watching header' : 'Stopped');
       renderAll();
@@ -3249,7 +3375,24 @@
   }
 
   function matchRuleToElement(rule, el) {
-    if (!(el instanceof Element) || isScriptUiElement(el) || !isVisible(el)) return false;
+    const meta = buildElementLogMeta(el);
+    const fail = (reason) => ({
+      ok: false,
+      reason,
+      element: el instanceof Element ? el : null,
+      matchedText: meta.text,
+      elementTag: meta.tag,
+      elementId: meta.id,
+      elementClass: meta.className
+    });
+
+    if (!(el instanceof Element)) return fail('candidate is not an element');
+    if (isScriptUiElement(el)) return fail('candidate is script UI');
+    if (!isVisible(el)) return fail('candidate not visible');
+
+    const matchedText = getVisibleElementLogText(el, 600);
+    if (!matchedText) return fail('visible element text empty');
+
     const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
     const current = buildElementFingerprint(el);
 
@@ -3288,43 +3431,117 @@
       required += 1;
       textRequired = true;
       const savedText = normalizeText(fingerprint.textFingerprint);
-      const currentText = normalizeText(current.textFingerprint);
-      if (savedText && currentText && (currentText.includes(savedText) || savedText.includes(currentText))) {
+      const currentText = normalizeText(matchedText || current.textFingerprint);
+      if (savedText && currentText && currentText.includes(savedText)) {
         score += 1;
         textMatches = true;
       }
     }
 
-    if (textRequired && !textMatches) return false;
-    if (required === 0) return false;
-    if (required === 1) return score === 1;
-    return score === required || (required >= 3 && score >= (required - 1));
+    if (textRequired && !textMatches) return fail('text fingerprint not found on visible element');
+    if (required === 0) return fail('fingerprint empty');
+
+    let ok = false;
+    if (textRequired) {
+      if (required === 1) ok = score === 1;
+      else if (required <= 3) ok = score === required;
+      else ok = score >= (required - 1);
+    } else if (required === 1) {
+      ok = score === 1;
+    } else {
+      ok = score === required || (required >= 3 && score >= (required - 1));
+    }
+
+    if (!ok) return fail('fingerprint score mismatch');
+
+    return {
+      ok: true,
+      reason: '',
+      element: el,
+      matchedText,
+      elementTag: meta.tag,
+      elementId: meta.id,
+      elementClass: meta.className
+    };
   }
 
   function findRuleMatch(rule) {
     const selector = normalizeText(rule.selector || '');
-    if (!selector) return null;
+    if (!selector) {
+      return {
+        ok: false,
+        reason: 'selector missing',
+        selector,
+        element: null,
+        matchedText: '',
+        elementTag: '',
+        elementId: '',
+        elementClass: ''
+      };
+    }
 
+    let bestFailure = null;
+    let sawNodes = false;
     for (const doc of getAllDocs()) {
       let nodes = [];
-      try { nodes = Array.from(doc.querySelectorAll(selector)); } catch {}
+      try {
+        nodes = Array.from(doc.querySelectorAll(selector));
+      } catch {
+        bestFailure = pickBetterSelectorFailure(bestFailure, {
+          ok: false,
+          reason: 'selector query failed',
+          selector,
+          element: null,
+          matchedText: '',
+          elementTag: '',
+          elementId: '',
+          elementClass: ''
+        });
+        continue;
+      }
+      if (nodes.length) sawNodes = true;
       for (const node of nodes) {
-        if (matchRuleToElement(rule, node)) return node;
+        const result = matchRuleToElement(rule, node);
+        if (result.ok) {
+          return {
+            ...result,
+            selector
+          };
+        }
+        bestFailure = pickBetterSelectorFailure(bestFailure, {
+          ...result,
+          selector
+        });
       }
     }
-    return null;
+
+    return bestFailure || {
+      ok: false,
+      reason: sawNodes ? 'no visible element matched selector' : 'selector found no elements',
+      selector,
+      element: null,
+      matchedText: '',
+      elementTag: '',
+      elementId: '',
+      elementClass: ''
+    };
   }
 
   function processSelectorMatches() {
     if (!savedSelectorRulesEnabled()) return;
     const context = buildEventContext();
     if (!context.ok) return;
+    if (!context.product || !context.productLabel) return;
 
     for (const rule of getSelectorRules()) {
       const dedupeKey = ['selector', context.job['AZ ID'], context.product, normalizeText(rule.ruleId || '')].join('|');
       if (hasSentOrPendingDedupe(dedupeKey)) continue;
       const match = findRuleMatch(rule);
-      if (!match) continue;
+      if (!match?.ok) {
+        logSelectorRuleSkipped(context, rule, match);
+        continue;
+      }
+      logSelectorRuleMatchReady(context, rule, match);
       const event = buildSelectorEvent(context, rule, match);
       dispatchEvent(event);
       return;
