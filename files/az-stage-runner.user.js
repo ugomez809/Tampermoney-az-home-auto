@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.23
+// @version      2.5.24
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.23';
+  const VERSION = '2.5.24';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -530,6 +530,16 @@
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
+      state.frontIdleLastSignature = getFrontIdleSignature();
+      return;
+    }
+
+    const openTicket = getOpenTicketInfo();
+    if (state.busy || isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      state.frontIdleLastActivityAt = Date.now();
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
     }
