@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.14
+// @version      4.1.15
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.14';
+  const VERSION = '4.1.15';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -66,7 +66,8 @@
     tabNudgeSettleMs: 2500,
     afterRequoteSettleMs: 4000,
     afterAutoDiscountBeforeQuoteMs: 5000,
-    navigationMoveTimeoutMs: 3500
+    navigationMoveTimeoutMs: 3500,
+    coveragesWarningStallMs: 60000
   };
 
   const SEL = {
@@ -161,6 +162,9 @@
     lastStatus: '',
     activityState: 'idle',
     activityMessage: 'Background gatherer armed',
+    coveragesWarningSignature: '',
+    coveragesWarningSinceMs: 0,
+    coveragesRetryBlockedUntilMs: 0,
     customFieldPicker: null,
     customFieldHoverBox: null,
     customFieldPickerMove: null,
@@ -927,6 +931,9 @@
     state.activeHandoffRequestedAt = '';
     state.announcedSkipReason = '';
     state.autoDiscountChosenThisLoad = false;
+    state.coveragesWarningSignature = '';
+    state.coveragesWarningSinceMs = 0;
+    state.coveragesRetryBlockedUntilMs = 0;
   }
 
   function tick() {
@@ -994,6 +1001,14 @@
       return;
     }
 
+    if (maybeHandleCoveragesWarningRecovery(currentJob, homeState)) {
+      if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
+        state.lastSnapshotTick = state.tickCount;
+        logHomeSnapshot(currentJob, homeState);
+      }
+      return;
+    }
+
     if (!homeState.pass1Ready && !isOnCoverageEditPage()) {
       setWaiting('Monitoring for Home Coverages pass 1');
       if (state.tickCount - state.lastSnapshotTick >= SNAPSHOT_EVERY_TICKS) {
@@ -1003,21 +1018,7 @@
       return;
     }
 
-    state.flowStartedThisLoad = true;
-    state.busy = true;
-    writeActivityState('working', `Running Home gather for AZ ${currentJob['AZ ID']}`);
-    log(`Starting background Home flow for AZ ID ${currentJob['AZ ID']} (phase=${homeState.pass1Ready ? 'pass2/final' : 'pass1'})`);
-    runGrab({ currentJob })
-      .catch((err) => {
-        log(`Background flow failed: ${err?.message || err}`);
-        writeActivityState('error', err?.message || 'Background flow failed');
-        setStatus('Failed');
-        state.flowStartedThisLoad = false;
-        log('Background flow unlocked for same-tab retry');
-      })
-      .finally(() => {
-        state.busy = false;
-      });
+    startHomeFlow(currentJob, `phase=${homeState.pass1Ready ? 'pass2/final' : 'pass1'}`);
   }
 
   function hasVisibleExactLabel(labelText) {
@@ -1061,15 +1062,21 @@
     } catch { return null; }
   }
 
-  function getHeaderText() {
-    const headerNode = findInDocs((doc) => {
-      const nodes = doc.querySelectorAll('.gw-TitleBar--title, .gw-TitleBar--Title, .gw-Wizard--Title');
+  function findVisibleNodeInDocs(selector) {
+    return findInDocs((doc) => {
+      const nodes = doc.querySelectorAll(selector);
       for (const el of nodes) {
         if (isVisibleEl(el)) return el;
       }
       return null;
     });
-    return normalizeText(headerNode?.textContent || '');
+  }
+
+  function getHeaderText() {
+    const titleBarNode = findVisibleNodeInDocs('.gw-TitleBar--title, .gw-TitleBar--Title');
+    if (titleBarNode) return normalizeText(titleBarNode.textContent || '');
+    const wizardNode = findVisibleNodeInDocs('.gw-Wizard--Title');
+    return normalizeText(wizardNode?.textContent || '');
   }
 
   function headerStillCoverages() {
@@ -1115,11 +1122,29 @@
     return !!afterState && afterState === wantedState && beforeState !== wantedState;
   }
 
+  function isCoveragesTabSelected() {
+    const inner = findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.coveragesTab)} > div.gw-action--inner`));
+    if (!inner || !isVisibleEl(inner)) return false;
+    const parentSelected = normalizeText(inner.parentElement?.getAttribute?.('aria-selected') || '');
+    const innerSelected = normalizeText(inner.getAttribute?.('aria-selected') || '');
+    return parentSelected === 'true' ||
+      innerSelected === 'true' ||
+      inner.classList.contains('gw-focus') ||
+      inner.classList.contains('gw-selected');
+  }
+
+  function hasHomeCoveragesSurface() {
+    return !!findByIdInDocs(IDS.coveragesScreen) ||
+      !!findByIdInDocs(IDS.mainArea) ||
+      !!findByIdInDocs(IDS.pricingTable) ||
+      !!findEditAllTarget() ||
+      !!queryFirstVisible(SEL.stdAllPerils);
+  }
+
   function isOnCoverageEditPage() {
-    return getHeaderText() === IDS.coveragesHeader &&
-      !!byId(IDS.coveragesScreen) &&
-      !!byId(IDS.mainArea) &&
-      hasVisibleExactLabel('Homeowners');
+    if (!hasVisibleExactLabel('Homeowners')) return false;
+    if (!hasHomeCoveragesSurface()) return false;
+    return getHeaderText() === IDS.coveragesHeader || isCoveragesTabSelected();
   }
 
   function cssAttrEscape(value) {
@@ -1389,6 +1414,131 @@
       .toLowerCase()
       .replace(/[^a-z0-9$+]+/g, ' ')
       .trim();
+  }
+
+  function coverageWarningFieldSnapshot() {
+    return [
+      getSelectedText(queryFirstVisible(SEL.stdAllPerils)),
+      getSelectedText(queryFirstVisible(SEL.enhAllPerils)),
+      getSelectedText(queryFirstVisible(SEL.enhSplitWater)),
+      getSelectedText(queryFirstVisible(SEL.enhSeparateStructures)),
+      getSelectedText(queryFirstVisible(SEL.enhPersonalPropertyLimit)),
+      getSelectedText(queryFirstVisible(SEL.enhPersonalLiability)),
+      getSelectedText(queryFirstVisible(SEL.enhExtendedReplacementSelect)),
+      queryFirstVisible(SEL.enhExtendedReplacementCheckbox)?.checked ? 'extended:on' : 'extended:off',
+      queryFirstVisible(SEL.personalInjuryCheckbox)?.checked ? 'injury:on' : 'injury:off',
+      findEditAllTarget() ? 'mode:view' : 'mode:edit',
+      normalizeMoneyText(getTextById(IDS.standardPrice)),
+      normalizeMoneyText(getTextById(IDS.enhancePrice)),
+      normalizeText(extractSubmissionNumber()),
+      normalizeText(getSubmissionStateLabel()),
+      normalizeText(getHeaderText())
+    ]
+      .map((part) => normalizeText(part))
+      .filter(Boolean)
+      .join(' | ');
+  }
+
+  function getCoveragesWarningContext(homeState = null) {
+    const warningText = getCoveragesRetryWarningText();
+    if (!warningText) return { active: false, warningText: '', signature: '' };
+
+    const stateToUse = homeState || normalizeHomeState(readCurrentJob());
+    if (stateToUse.ready === true || stateToUse.pass1Ready === true) {
+      return { active: false, warningText: '', signature: '' };
+    }
+
+    if (!isOnCoverageEditPage()) {
+      return { active: false, warningText: '', signature: '' };
+    }
+
+    const signature = normalizeCoveragesWarningSignature([
+      warningText,
+      coverageWarningFieldSnapshot()
+    ].join(' | '));
+
+    return {
+      active: !!signature,
+      warningText,
+      signature
+    };
+  }
+
+  function clearCoveragesWarningWatch() {
+    state.coveragesWarningSignature = '';
+    state.coveragesWarningSinceMs = 0;
+    state.coveragesRetryBlockedUntilMs = 0;
+  }
+
+  function syncCoveragesWarningWatch(context) {
+    if (!context?.active) {
+      clearCoveragesWarningWatch();
+      return;
+    }
+
+    if (state.coveragesWarningSignature !== context.signature) {
+      state.coveragesWarningSignature = context.signature;
+      state.coveragesWarningSinceMs = Date.now();
+      state.coveragesRetryBlockedUntilMs = 0;
+      log(`Coverages deductible warning detected: ${context.warningText}`);
+    }
+  }
+
+  function armCoveragesWarningRetryBlock(context, reason = '') {
+    if (!context?.active) return;
+    syncCoveragesWarningWatch(context);
+    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
+    log(`Coverages retry blocked for 60s after stalled warning${reason ? `: ${reason}` : ''}`);
+  }
+
+  function maybeHandleCoveragesWarningRecovery(currentJob, homeState) {
+    const context = getCoveragesWarningContext(homeState);
+    if (!context.active) {
+      clearCoveragesWarningWatch();
+      return false;
+    }
+
+    syncCoveragesWarningWatch(context);
+
+    if (state.coveragesRetryBlockedUntilMs > Date.now()) {
+      setWaiting('Deductible warning stalled on Coverages; waiting 60s before re-running Edit All -> Quote');
+      announceSkipReason('coverages warning retry blocked');
+      return true;
+    }
+
+    if (Date.now() - state.coveragesWarningSinceMs < CFG.coveragesWarningStallMs) {
+      return false;
+    }
+
+    state.coveragesWarningSinceMs = Date.now();
+    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
+    log(`Coverages warning unchanged for 60s; re-running Edit All -> Quote | ${context.warningText}`);
+    startHomeFlow(currentJob, 'coverages warning recovery');
+    return true;
+  }
+
+  function startHomeFlow(currentJob, phaseLabel = '') {
+    state.flowStartedThisLoad = true;
+    state.busy = true;
+    state.lastWaitReason = '';
+    writeActivityState('working', `Running Home gather for AZ ${currentJob['AZ ID']}`);
+    log(`Starting background Home flow for AZ ID ${currentJob['AZ ID']} (${phaseLabel || 'background'})`);
+    runGrab({ currentJob })
+      .catch((err) => {
+        const message = err?.message || String(err || 'Background flow failed');
+        const warningContext = getCoveragesWarningContext(normalizeHomeState(readCurrentJob()));
+        log(`Background flow failed: ${message}`);
+        writeActivityState('error', message || 'Background flow failed');
+        setStatus('Failed');
+        state.flowStartedThisLoad = false;
+        if (warningContext.active) {
+          armCoveragesWarningRetryBlock(warningContext, message);
+        }
+        log('Background flow unlocked for same-tab retry');
+      })
+      .finally(() => {
+        state.busy = false;
+      });
   }
 
   async function clickQuoteUntilTransition() {
