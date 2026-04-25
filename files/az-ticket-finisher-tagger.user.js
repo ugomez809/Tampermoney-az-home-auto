@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.35
+// @version      1.0.36
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.35';
+  const VERSION = '1.0.36';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -43,6 +43,7 @@
     autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
     azCurrentJob: 'tm_az_current_job_v1',
     currentJob: 'tm_pc_current_job_v1',
+    missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
     fieldTargets: 'tm_az_ticket_finisher_field_targets_v1',
     tagTargets: 'tm_az_ticket_finisher_tag_targets_v1',
     runs: 'tm_az_ticket_finisher_runs_v1'
@@ -152,6 +153,7 @@
     waitingTicketMismatchKey: '',
     waitingTicketMismatchSince: 0,
     waitingTicketMismatchTriggeredKey: '',
+    lastMissingPayloadTriggerLogKey: '',
     frontSession: 1,
     wasFrontActive: isFrontActive(),
     completedFrontRunKeys: new Set(),
@@ -265,6 +267,71 @@
     } catch {
       return fallback;
     }
+  }
+
+  function clearMissingPayloadTrigger(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    const current = readMissingPayloadTrigger();
+    const currentId = norm(current?.ticketId || current?.azId || '');
+    if (wantedId && currentId && currentId !== wantedId) return;
+    try { localStorage.removeItem(GM_KEYS.missingPayloadTrigger); } catch {}
+    try { GM_setValue(GM_KEYS.missingPayloadTrigger, null); } catch {}
+  }
+
+  function chooseNewerSignal(localSignal, gmSignal) {
+    const localOk = isPlainObject(localSignal) && norm(localSignal.ticketId || localSignal.azId || '');
+    const gmOk = isPlainObject(gmSignal) && norm(gmSignal.ticketId || gmSignal.azId || '');
+    if (localOk && !gmOk) return localSignal;
+    if (!localOk && gmOk) return gmSignal;
+    if (!localOk && !gmOk) return null;
+
+    const localMs = Date.parse(norm(localSignal.requestedAt || ''));
+    const gmMs = Date.parse(norm(gmSignal.requestedAt || ''));
+    if (Number.isFinite(localMs) && Number.isFinite(gmMs) && localMs !== gmMs) {
+      return localMs > gmMs ? localSignal : gmSignal;
+    }
+    return localSignal;
+  }
+
+  function readMissingPayloadTrigger() {
+    const local = readLocalOnly(GM_KEYS.missingPayloadTrigger, null);
+    const gm = readGmOnly(GM_KEYS.missingPayloadTrigger, null);
+    return chooseNewerSignal(local, gm);
+  }
+
+  function buildMissingPayloadTriggerKey(signal) {
+    return `${norm(signal?.ticketId || signal?.azId || '')}|${norm(signal?.requestedAt || '')}`;
+  }
+
+  function getActiveMissingPayloadTrigger(openTicketId = '') {
+    const signal = readMissingPayloadTrigger();
+    if (!isPlainObject(signal) || signal.ready !== true) {
+      state.lastMissingPayloadTriggerLogKey = '';
+      return null;
+    }
+
+    const ticketId = norm(signal.ticketId || signal.azId || '');
+    if (!ticketId) {
+      clearMissingPayloadTrigger();
+      state.lastMissingPayloadTriggerLogKey = '';
+      return null;
+    }
+
+    const requestedMs = Date.parse(norm(signal.requestedAt || ''));
+    if (Number.isFinite(requestedMs) && (Date.now() - requestedMs) > (10 * 60 * 1000)) {
+      clearMissingPayloadTrigger(ticketId);
+      state.lastMissingPayloadTriggerLogKey = '';
+      return null;
+    }
+
+    const openId = norm(openTicketId || '');
+    if (openId && openId !== ticketId) return null;
+
+    return {
+      ...signal,
+      ticketId,
+      triggerKey: buildMissingPayloadTriggerKey(signal)
+    };
   }
 
   function requestWorkflowCleanup(azId) {
@@ -2355,7 +2422,7 @@
             await maybeClickTagApplyButton();
             runRecord.tagAppliedAt = nowIso();
             saveRunRecord(runs, data.azId, runRecord);
-            log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}${data.missingPayloadFallback ? ' (missing payload)' : ''}`);
+            log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}${data.missingPayloadFallback ? ' (missing payload)' : ''} | AZ ${data.azId}`);
           } else {
             log('Tag selection failed');
           }
@@ -2385,6 +2452,7 @@
         markFrontRunCompleted(runTicketId || data.azId);
         sendTicketClosedSignal(data.azId);
         requestWorkflowCleanup(data.azId);
+        clearMissingPayloadTrigger(data.azId);
         clearFinalPayloadHandoff(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
@@ -2413,12 +2481,23 @@
     }
 
     const openTicket = getOpenTicketInfo();
-    const finalPayload = getFinalPayload();
-    const mismatchWait = getWaitingTicketMismatchState(openTicket.ticketId, finalPayload?.azId || '');
+    const missingPayloadTrigger = getActiveMissingPayloadTrigger(openTicket.ticketId);
+    const finalPayload = missingPayloadTrigger ? null : getFinalPayload();
+    const mismatchWait = missingPayloadTrigger
+      ? { active: false, ready: false }
+      : getWaitingTicketMismatchState(openTicket.ticketId, finalPayload?.azId || '');
     let workflowPayload = finalPayload;
-    let fallbackTicketId = !finalPayload && !!openTicket.ticketId ? openTicket.ticketId : '';
+    let fallbackTicketId = missingPayloadTrigger
+      ? (missingPayloadTrigger.ticketId || openTicket.ticketId)
+      : (!finalPayload && !!openTicket.ticketId ? openTicket.ticketId : '');
 
-    if (mismatchWait.active && !mismatchWait.ready) {
+    if (missingPayloadTrigger) {
+      resetWaitingTicketMismatch();
+      if (state.lastMissingPayloadTriggerLogKey !== missingPayloadTrigger.triggerKey) {
+        state.lastMissingPayloadTriggerLogKey = missingPayloadTrigger.triggerKey;
+        log(`Direct missing payload fallback trigger received | AZ ${missingPayloadTrigger.ticketId} | reason=${norm(missingPayloadTrigger.reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED'}`);
+      }
+    } else if (mismatchWait.active && !mismatchWait.ready) {
       const remainingSeconds = Math.max(1, Math.ceil(mismatchWait.remainingMs / 1000));
       const targetLabel = mismatchWait.targetTicketId ? `ticket ${mismatchWait.targetTicketId}` : 'mirrored payload';
       setStatus(`Waiting for ${targetLabel} (${remainingSeconds}s to missing payload)`);
@@ -2426,7 +2505,7 @@
       return;
     }
 
-    if (mismatchWait.ready) {
+    if (!missingPayloadTrigger && mismatchWait.ready) {
       workflowPayload = null;
       fallbackTicketId = mismatchWait.openTicketId;
       if (state.waitingTicketMismatchTriggeredKey !== mismatchWait.key) {
@@ -2436,7 +2515,7 @@
           : 'without a mirrored payload';
         log(`Ticket ${mismatchWait.openTicketId} stayed open for 20s ${reason}; starting missing payload fallback`);
       }
-    } else if (!openTicket.ticketId || (finalPayload && openTicket.ticketId === norm(finalPayload.azId || ''))) {
+    } else if (!missingPayloadTrigger && (!openTicket.ticketId || (finalPayload && openTicket.ticketId === norm(finalPayload.azId || '')))) {
       resetWaitingTicketMismatch();
     }
 
@@ -2479,7 +2558,11 @@
       return;
     }
 
-    const payloadKey = workflowPayload?.payloadKey || `missing-payload|${fallbackTicketId || openTicket.ticketId}`;
+    const payloadKey = workflowPayload?.payloadKey || (
+      missingPayloadTrigger
+        ? `missing-payload-trigger|${missingPayloadTrigger.triggerKey}`
+        : `missing-payload|${fallbackTicketId || openTicket.ticketId}`
+    );
     const shouldRun = state.forceRunRequested || !completedThisFrontSession;
     if (shouldRun) {
       state.lastPayloadSeenKey = payloadKey;

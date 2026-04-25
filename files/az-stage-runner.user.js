@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.19
+// @version      2.5.20
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.19';
+  const VERSION = '2.5.20';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -76,7 +76,8 @@
     CURRENT_JOB: 'tm_pc_current_job_v1',
     AZ_CURRENT_JOB: 'tm_az_current_job_v1',
     WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1',
-    FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1'
+    FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1',
+    MISSING_PAYLOAD_TRIGGER: 'tm_az_missing_payload_fallback_trigger_v1'
   };
 
   const SS_KEYS = {
@@ -145,6 +146,7 @@
     'tm_az_ticket_finisher_runs_v1',
     KEYS.WORKFLOW_CLEANUP_REQUEST,
     KEYS.FINISHER_CLOSE_SIGNAL,
+    KEYS.MISSING_PAYLOAD_TRIGGER,
     'tm_shared_cache_az_payload_v1',
     'tm_shared_cache_apex_payload_v1',
     'tm_shared_cache_apex_ready_v1',
@@ -584,6 +586,35 @@
     try {
       GM_deleteValue(KEYS.FINISHER_CLOSE_SIGNAL);
     } catch {}
+  }
+
+  function clearMissingPayloadTrigger() {
+    try {
+      localStorage.removeItem(KEYS.MISSING_PAYLOAD_TRIGGER);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.MISSING_PAYLOAD_TRIGGER);
+    } catch {}
+  }
+
+  function publishMissingPayloadTrigger(ticketId, reason = 'MAIN/PAYLOAD FAILED') {
+    const cleanTicketId = norm(ticketId || '');
+    if (!cleanTicketId) return false;
+
+    const trigger = {
+      ready: true,
+      ticketId: cleanTicketId,
+      azId: cleanTicketId,
+      reason: norm(reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED',
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+
+    try { localStorage.setItem(KEYS.MISSING_PAYLOAD_TRIGGER, JSON.stringify(trigger)); } catch {}
+    try { GM_setValue(KEYS.MISSING_PAYLOAD_TRIGGER, trigger); } catch {}
+    log(`Triggered missing payload fallback | ${cleanTicketId} | ${trigger.reason}`, 'warn');
+    return true;
   }
 
   function readFinisherCloseSignal() {
@@ -1241,6 +1272,9 @@
     markFrontIdleActivity();
     state.frontIdleLastSignature = getFrontIdleSignature();
     log(`Refresh required before next ticket${cleanTicketId ? ` | ${cleanTicketId}` : ''}`, 'warn');
+    schedulePendingReload(() => {
+      if (!state.destroyed) reloadToPipelineRoot();
+    }, 120);
   }
 
   async function runLoop() {
@@ -1321,7 +1355,17 @@
         if (!ready) {
           highlightCard(card, 'error');
           log(`MAIN/PAYLOAD FAILED | ${ticketId}`, 'error');
-          stopRun('MAIN/PAYLOAD FAILED');
+          clearFinisherCloseSignal();
+          clearMissingPayloadTrigger();
+          publishMissingPayloadTrigger(ticketId, 'MAIN/PAYLOAD FAILED');
+          setStatus('WAITING MISSING PAYLOAD FINISHER');
+          clearDockHighlight();
+          const ticketClosed = await waitForTicketClosedByFinisher(ticketId);
+          if (ticketClosed) {
+            state.processedIds.add(ticketId);
+            clearMissingPayloadTrigger();
+          }
+          blockUntilRefresh(ticketId);
           return;
         }
 
@@ -1344,6 +1388,7 @@
         if (!ticketClosed) return;
 
         state.processedIds.add(ticketId);
+        clearMissingPayloadTrigger();
         clearDockHighlight();
         blockUntilRefresh(ticketId);
         return;

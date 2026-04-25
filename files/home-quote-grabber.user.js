@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.11
+// @version      4.1.12
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.11';
+  const VERSION = '4.1.12';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -65,7 +65,8 @@
     tabNudgeCooldownMs: 1500,
     tabNudgeSettleMs: 2500,
     afterRequoteSettleMs: 4000,
-    afterAutoDiscountBeforeQuoteMs: 5000
+    afterAutoDiscountBeforeQuoteMs: 5000,
+    navigationMoveTimeoutMs: 3500
   };
 
   const SEL = {
@@ -1061,14 +1062,57 @@
   }
 
   function getHeaderText() {
-    const nodes = Array.from(document.querySelectorAll('.gw-TitleBar--title'));
-    const el = nodes.find(isVisibleEl) || null;
-    return normalizeText(el?.textContent || '');
+    const headerNode = findInDocs((doc) => {
+      const nodes = doc.querySelectorAll('.gw-TitleBar--title, .gw-TitleBar--Title, .gw-Wizard--Title');
+      for (const el of nodes) {
+        if (isVisibleEl(el)) return el;
+      }
+      return null;
+    });
+    return normalizeText(headerNode?.textContent || '');
   }
 
   function headerStillCoverages() {
-    const titles = Array.from(document.querySelectorAll('.gw-TitleBar--title')).filter(isVisibleEl);
-    return titles.some((t) => normalizeText(t.textContent || '') === IDS.coveragesHeader);
+    return getHeaderText() === IDS.coveragesHeader;
+  }
+
+  function getSubmissionStateLabel() {
+    if (hasVisibleExactLabel('Submission (Quoted)')) return 'quoted';
+    if (hasVisibleExactLabel('Submission (Draft)')) return 'draft';
+    return '';
+  }
+
+  function isSubmissionDraft() {
+    return getSubmissionStateLabel() === 'draft';
+  }
+
+  function isSubmissionQuoted() {
+    return getSubmissionStateLabel() === 'quoted';
+  }
+
+  function readNavigationSnapshot() {
+    return {
+      header: getHeaderText(),
+      submissionState: getSubmissionStateLabel()
+    };
+  }
+
+  function describeNavigationSnapshot(snapshot) {
+    const header = normalizeText(snapshot?.header || '') || '(none)';
+    const submissionState = normalizeText(snapshot?.submissionState || '') || 'unknown';
+    return `header="${header}" | submission=${submissionState}`;
+  }
+
+  function didHeaderChange(before, after) {
+    const beforeHeader = normalizeText(before?.header || '');
+    const afterHeader = normalizeText(after?.header || '');
+    return !!afterHeader && beforeHeader !== afterHeader;
+  }
+
+  function advancedToSubmissionState(before, after, wantedState) {
+    const beforeState = normalizeText(before?.submissionState || '');
+    const afterState = normalizeText(after?.submissionState || '');
+    return !!afterState && afterState === wantedState && beforeState !== wantedState;
   }
 
   function isOnCoverageEditPage() {
@@ -1238,6 +1282,7 @@
         continue;
       }
 
+      const beforeSnapshot = readNavigationSnapshot();
       const clicked = clickQuoteOnce();
       if (!clicked) {
         await sleep(CFG.betweenQuoteAttemptsMs);
@@ -1245,18 +1290,27 @@
       }
 
       await sleep(CFG.afterQuoteWaitMs);
-      const opened = await waitFor(
-        () => !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote'),
+      const openedOrMoved = await waitFor(
+        () => {
+          if (isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote')) return true;
+          return advancedToSubmissionState(beforeSnapshot, readNavigationSnapshot(), 'quoted') || didHeaderChange(beforeSnapshot, readNavigationSnapshot());
+        },
         CFG.quoteTransitionTimeoutMs,
         `Quote action transition (attempt ${attempt})`
       );
+      const afterSnapshot = readNavigationSnapshot();
+      const opened = isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote');
 
       if (opened) {
-        log('Quote action opened Quote screen');
+        log(`Quote action opened Quote screen (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
         return true;
       }
 
-      log(`Quote action did not open Quote screen on attempt ${attempt}`);
+      if (!openedOrMoved) {
+        log(`Quote action did not move page on attempt ${attempt} (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
+      } else {
+        log(`Quote action moved but Quote screen is still not ready on attempt ${attempt} (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
+      }
       if (attempt < CFG.maxQuoteAttempts) await sleep(CFG.betweenQuoteAttemptsMs);
     }
 
@@ -1335,6 +1389,7 @@
       setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
       const baselineWarningText = getCoveragesRetryWarningText();
       const baselineWarningSig = normalizeCoveragesWarningSignature(baselineWarningText);
+      const beforeSnapshot = readNavigationSnapshot();
       if (baselineWarningText) {
         log(`Pre-existing Coverages warning before Quote attempt ${attempt}: ${baselineWarningText}`);
       }
@@ -1346,7 +1401,9 @@
       await sleep(CFG.afterQuoteWaitMs);
       const transitionOrWarning = await waitFor(
         () => {
+          const afterSnapshot = readNavigationSnapshot();
           if (!headerStillCoverages()) return true;
+          if (advancedToSubmissionState(beforeSnapshot, afterSnapshot, 'quoted')) return true;
           const currentWarningText = getCoveragesRetryWarningText();
           const currentWarningSig = normalizeCoveragesWarningSignature(currentWarningText);
           return !!currentWarningSig && currentWarningSig !== baselineWarningSig;
@@ -1354,12 +1411,17 @@
         CFG.quoteTransitionTimeoutMs,
         `Quote transition (attempt ${attempt})`
       );
+      const afterSnapshot = readNavigationSnapshot();
       const warningText = getCoveragesRetryWarningText();
       const warningSig = normalizeCoveragesWarningSignature(warningText);
       const warningChanged = !!warningSig && warningSig !== baselineWarningSig;
-      const movedOff = transitionOrWarning && !headerStillCoverages();
+      const movedOff = transitionOrWarning && (
+        !headerStillCoverages() ||
+        advancedToSubmissionState(beforeSnapshot, afterSnapshot, 'quoted') ||
+        isSubmissionQuoted()
+      );
       if (movedOff) {
-        log('Quote succeeded (moved off Coverages)');
+        log(`Quote succeeded (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
         return { ok: true, needsCoverageReapply: false, warningText: '' };
       }
       if (warningChanged) {
@@ -1369,7 +1431,7 @@
       if (warningText) {
         log(`Coverages warning still visible after Quote attempt ${attempt}: ${warningText}`);
       }
-      log(`Still on Coverages after Quote attempt ${attempt}`);
+      log(`Still on Coverages after Quote attempt ${attempt} (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
       if (attempt < CFG.maxQuoteAttempts) {
         setStatus(`Waiting to retry Quote (${attempt}/${CFG.maxQuoteAttempts})`);
         await sleep(CFG.betweenQuoteAttemptsMs);
@@ -1933,7 +1995,10 @@
         () => findActionByExactText(LABELS.editQuote),
         () => findActionByText(LABELS.editQuote)
       ],
-      () => !!findAutoDiscountControl() || (!findQuotedTriggerElement() && (!!findByIdInDocs(IDS.name) || !!findByIdInDocs(IDS.mailingAddress)))
+      () => !!findAutoDiscountControl() || (isSubmissionDraft() && (!!findByIdInDocs(IDS.name) || !!findByIdInDocs(IDS.mailingAddress))),
+      {
+        movementFn: (before, after) => advancedToSubmissionState(before, after, 'draft') || didHeaderChange(before, after)
+      }
     );
   }
 
@@ -1985,7 +2050,10 @@
         () => findInDocs((doc) => doc.querySelector(`#${cssEscape(IDS.quoteTab)} > div.gw-action--inner`)),
         () => findActionByText('Quote')
       ],
-      () => !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote')
+      () => isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote'),
+      {
+        movementFn: (before, after) => advancedToSubmissionState(before, after, 'quoted') || didHeaderChange(before, after)
+      }
     );
   }
 
@@ -2017,38 +2085,62 @@
     return null;
   }
 
-  async function navigateToTab(name, resolvers, readyFn) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
+  async function navigateToTab(name, resolvers, readyFn, options = {}) {
+    const attempts = Number(options.attempts) > 0 ? Number(options.attempts) : 4;
+    const moveTimeoutMs = Number(options.moveTimeoutMs) > 0 ? Number(options.moveTimeoutMs) : CFG.navigationMoveTimeoutMs;
+    const movementFn = typeof options.movementFn === 'function'
+      ? options.movementFn
+      : ((before, after) => didHeaderChange(before, after));
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const currentSnapshot = readNavigationSnapshot();
+      if (readyFn()) {
+        log(`${name} already ready (${describeNavigationSnapshot(currentSnapshot)})`);
+        return;
+      }
+
       const raw = resolveFirst(resolvers);
       if (!raw) {
-        log(`${name} tab not found, attempt ${attempt}/3`);
+        log(`${name} tab not found, attempt ${attempt}/${attempts}`);
         await sleep(500);
         continue;
       }
 
       const target = resolveClickableTab(raw);
       if (!target) {
-        log(`${name} tab resolved target is disabled/unclickable (raw=${describeElement(raw)}), attempt ${attempt}/3`);
+        log(`${name} tab resolved target is disabled/unclickable (raw=${describeElement(raw)}), attempt ${attempt}/${attempts}`);
         await sleep(500);
         continue;
       }
 
-      log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/3`);
-      const headerBefore = getHeaderText();
+      const beforeSnapshot = readNavigationSnapshot();
+      log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/${attempts} | ${describeNavigationSnapshot(beforeSnapshot)}`);
       strongClick(target);
 
-      const ok = await waitFor(readyFn, CFG.waitTimeoutMs, `${name} readiness`);
+      const movedOrReady = await waitFor(
+        () => {
+          if (readyFn()) return true;
+          return movementFn(beforeSnapshot, readNavigationSnapshot());
+        },
+        moveTimeoutMs,
+        `${name} movement`
+      );
+      const afterMoveSnapshot = readNavigationSnapshot();
+
+      if (!movedOrReady) {
+        log(`${name} click did not move page (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterMoveSnapshot)}), repeating ${name} step`);
+        await sleep(500);
+        continue;
+      }
+
+      const ok = readyFn() || await waitFor(readyFn, CFG.waitTimeoutMs, `${name} readiness`);
+      const afterReadySnapshot = readNavigationSnapshot();
       if (ok) {
-        const headerAfter = getHeaderText();
-        if (headerBefore && headerAfter && headerBefore === headerAfter && headerBefore !== name) {
-          log(`${name} ready (but header unchanged: "${headerBefore}")`);
-        } else {
-          log(`${name} ready (header "${headerBefore}" -> "${headerAfter}")`);
-        }
+        log(`${name} ready (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterReadySnapshot)})`);
         return;
       }
 
-      log(`${name} did not become ready after click`);
+      log(`${name} moved but target is still not ready (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterReadySnapshot)}), repeating ${name} step`);
     }
 
     throw new Error(`Could not open ${name}`);

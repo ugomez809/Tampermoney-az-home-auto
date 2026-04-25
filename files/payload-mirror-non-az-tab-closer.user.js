@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.18
+// @version      1.0.19
 // @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.18';
+  const VERSION = '1.0.19';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -81,7 +81,7 @@
     closeDelayMs: 5000,
     samePageCloseMs: 5 * 60 * 1000,
     tabHeartbeatMs: 5000,
-    apexWakeMissingMs: 10 * 60 * 1000,
+    apexWakeMissingMs: 2 * 60 * 1000,
     apexWakeOpenMs: 20000,
     apexWakeCooldownMs: 60000,
     apexWakeUrls: [
@@ -626,12 +626,9 @@
     saveTabHeartbeats(heartbeats);
   }
 
-  function getLastNonAzHeartbeatMs(heartbeats = null) {
+  function getLastHeartbeatMsForKind(kind, heartbeats = null) {
     const value = isPlainObject(heartbeats) ? heartbeats : readTabHeartbeats();
-    return Math.max(
-      parseTimeMs(value?.lex?.updatedAt),
-      parseTimeMs(value?.gwpc?.updatedAt)
-    );
+    return parseTimeMs(value?.[kind]?.updatedAt);
   }
 
   function readApexWakeState() {
@@ -747,10 +744,11 @@
     }
 
     const heartbeats = readTabHeartbeats();
-    const lastNonAzMs = getLastNonAzHeartbeatMs(heartbeats);
+    const lastLexMs = getLastHeartbeatMsForKind('lex', heartbeats);
+    const lastGwpcMs = getLastHeartbeatMsForKind('gwpc', heartbeats);
     const wakeState = readApexWakeState();
 
-    if (lastNonAzMs && (Date.now() - lastNonAzMs) < CFG.apexWakeMissingMs) {
+    if (lastLexMs && (Date.now() - lastLexMs) < CFG.apexWakeMissingMs) {
       if (norm(wakeState.missingSinceAt || '')) {
         saveApexWakeState({
           ...wakeState,
@@ -760,13 +758,13 @@
           version: VERSION
         });
       }
-      state.apexWakeStatus = `Healthy ${formatAge(Date.now() - lastNonAzMs)} ago`;
+      state.apexWakeStatus = `LEX healthy ${formatAge(Date.now() - lastLexMs)} ago`;
       state.lastApexWakeLogKey = '';
       return;
     }
 
     let missingSinceMs = parseTimeMs(wakeState.missingSinceAt);
-    const derivedMissingSinceMs = Math.max(lastNonAzMs || missingSinceMs || Date.now(), Number(state.apexWakeMonitorStartedAt || 0));
+    const derivedMissingSinceMs = Math.max(lastLexMs || missingSinceMs || Date.now(), Number(state.apexWakeMonitorStartedAt || 0));
     if (!missingSinceMs || Math.abs(missingSinceMs - derivedMissingSinceMs) > 1000) {
       missingSinceMs = derivedMissingSinceMs;
       saveApexWakeState({
@@ -779,26 +777,29 @@
 
     const missingMs = Date.now() - missingSinceMs;
     const remainingMs = Math.max(0, CFG.apexWakeMissingMs - missingMs);
+    const gwpcTail = lastGwpcMs
+      ? ` | GWPC healthy ${formatAge(Date.now() - lastGwpcMs)} ago`
+      : ' | GWPC missing';
     if (remainingMs > 0) {
-      state.apexWakeStatus = `Missing, wake in ${formatAge(remainingMs)}`;
+      state.apexWakeStatus = `LEX missing, wake in ${formatAge(remainingMs)}${gwpcTail}`;
       return;
     }
 
     if (isWakeStateActive(wakeState)) {
-      state.apexWakeStatus = 'Wake already active';
+      state.apexWakeStatus = `Wake already active${gwpcTail}`;
       return;
     }
 
     const lastWakeMs = parseTimeMs(wakeState.lastWakeAt || wakeState.wakeStartedAt);
     if (lastWakeMs && (Date.now() - lastWakeMs) < CFG.apexWakeCooldownMs) {
-      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - (Date.now() - lastWakeMs))}`;
+      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - (Date.now() - lastWakeMs))}${gwpcTail}`;
       return;
     }
 
     const logKey = `missing-${Math.floor(missingSinceMs / 1000)}`;
     if (state.lastApexWakeLogKey !== logKey) {
       state.lastApexWakeLogKey = logKey;
-      log('No APEX/LEX or GWPC heartbeat for 10m; opening APEX wake tab');
+      log('No APEX/LEX heartbeat for 2m; opening APEX wake tab');
     }
     openApexWakeTab();
   }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.4
+// @version      1.5.6
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC payload/storage to TXT, mirrors key payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,9 +21,9 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.4';
-  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v153';
-  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v153';
+  const VERSION = '1.5.6';
+  const UI_ID = 'tm-az-apex-gwpc-storage-tools-v156';
+  const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v156';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   // Log-export feature: any tracked-prefix key ending in _logs_v1 is a
   // per-script rolling log buffer written by individual scripts so this
@@ -74,7 +74,9 @@
 
   const CFG = {
     syncMs: 1500,
-    maxCleanupRequestAgeMs: 120000
+    maxCleanupRequestAgeMs: 120000,
+    defaultReportHours: 8,
+    maxReportHours: 48
   };
 
   const state = {
@@ -104,6 +106,7 @@
     'tm_pc_payload_mirror_close_attempted_v1',
     'tm_az_gwpc_final_payload_v1',
     'tm_az_gwpc_final_payload_ready_v1',
+    'tm_az_missing_payload_fallback_trigger_v1',
     'tm_pc_header_timeout_runtime_v2',
     'tm_pc_header_timeout_sent_events_v2',
     'tm_pc_flow_stage_v1'
@@ -155,6 +158,25 @@
       pad(d.getHours()),
       pad(d.getMinutes()),
       pad(d.getSeconds())
+    ].join('');
+  }
+
+  function formatLocalDateTime(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return '(invalid date)';
+    const pad = (n) => String(n).padStart(2, '0');
+    return [
+      date.getFullYear(),
+      '-',
+      pad(date.getMonth() + 1),
+      '-',
+      pad(date.getDate()),
+      ' ',
+      pad(date.getHours()),
+      ':',
+      pad(date.getMinutes()),
+      ':',
+      pad(date.getSeconds())
     ].join('');
   }
 
@@ -669,6 +691,212 @@
     return parts.join('\n');
   }
 
+  function promptReportHours() {
+    const raw = window.prompt(
+      `Export a merged timeline report for the last how many hours?\n` +
+      `Enter a number between 1 and ${CFG.maxReportHours}.`,
+      String(CFG.defaultReportHours)
+    );
+    if (raw == null) return null;
+    const hours = Number(String(raw).trim());
+    if (!Number.isFinite(hours) || hours <= 0) {
+      toast('Report cancelled: invalid hour value');
+      return null;
+    }
+    return Math.min(CFG.maxReportHours, Math.max(1, hours));
+  }
+
+  function getOriginShortLabel(origin) {
+    const value = String(origin || '');
+    if (value.includes('agencyzoom.com')) return 'AZ';
+    if (value.includes('lightning.force.com')) return 'APEX';
+    if (value.includes('policycenter')) return 'GWPC';
+    return value || 'UNKNOWN';
+  }
+
+  function parseTimedLogLine(rawLine, anchorUpdatedAt) {
+    const line = String(rawLine || '');
+    const match = line.match(/^\[(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)\]\s*(.*)$/i);
+    if (!match) return null;
+
+    const anchor = new Date(anchorUpdatedAt || Date.now());
+    if (!Number.isFinite(anchor.getTime())) return null;
+
+    let hours = Number(match[1]) % 12;
+    if (String(match[4] || '').toUpperCase() === 'PM') hours += 12;
+
+    const dated = new Date(anchor);
+    dated.setHours(hours, Number(match[2]), Number(match[3]), 0);
+
+    if ((dated.getTime() - anchor.getTime()) > (12 * 60 * 60 * 1000)) {
+      dated.setDate(dated.getDate() - 1);
+    }
+
+    return {
+      at: dated,
+      message: match[5] || '',
+      rawLine: line
+    };
+  }
+
+  function collectTimedLogEvents(records, windowStartMs, windowEndMs) {
+    const events = [];
+
+    for (const record of records) {
+      const value = record.value || {};
+      const lines = Array.isArray(value.lines) ? [...value.lines].reverse() : [];
+      for (const line of lines) {
+        const parsed = parseTimedLogLine(line, value.updatedAt);
+        if (!parsed) continue;
+        const atMs = parsed.at.getTime();
+        if (!Number.isFinite(atMs)) continue;
+        if (atMs < windowStartMs || atMs > windowEndMs) continue;
+        events.push({
+          at: parsed.at,
+          atMs,
+          rawLine: parsed.rawLine,
+          message: parsed.message,
+          key: record.key,
+          source: record.source,
+          script: value.script || '(unknown script)',
+          version: value.version || '?',
+          origin: value.origin || '(unknown)',
+          updatedAt: value.updatedAt || ''
+        });
+      }
+    }
+
+    return events.sort((a, b) => {
+      if (a.atMs !== b.atMs) return a.atMs - b.atMs;
+      const oa = originRank(a.origin);
+      const ob = originRank(b.origin);
+      if (oa !== ob) return oa - ob;
+      return String(a.script).localeCompare(String(b.script));
+    });
+  }
+
+  function extractAzIdFromOutcomeMessage(message) {
+    const text = String(message || '');
+    const tagged = text.match(/\bAZ\s+(\d+)\b/i);
+    if (tagged) return tagged[1];
+    return '';
+  }
+
+  function summarizeOutcomeCounts(events) {
+    const successIds = new Set();
+    const failedIds = new Set();
+    let successWithoutId = 0;
+    let failedWithoutId = 0;
+
+    for (const event of events) {
+      const text = String(event.message || event.rawLine || '');
+      const azId = extractAzIdFromOutcomeMessage(text);
+
+      if (/Applied tag:\s*Successful Quote/i.test(text)) {
+        if (azId) successIds.add(azId);
+        else successWithoutId += 1;
+      }
+
+      if (/Applied tag:\s*Failed Quote/i.test(text)) {
+        if (azId) failedIds.add(azId);
+        else failedWithoutId += 1;
+      }
+    }
+
+    return {
+      success: successIds.size + successWithoutId,
+      failed: failedIds.size + failedWithoutId
+    };
+  }
+
+  function buildRecentReportTxt(records, hoursBack) {
+    const now = new Date();
+    const windowEndMs = now.getTime();
+    const windowStartMs = windowEndMs - (hoursBack * 60 * 60 * 1000);
+    const events = collectTimedLogEvents(records, windowStartMs, windowEndMs);
+    const outcomes = summarizeOutcomeCounts(events);
+    const grouped = new Map();
+    const scriptCounts = new Map();
+
+    for (const event of events) {
+      if (!grouped.has(event.key)) grouped.set(event.key, []);
+      grouped.get(event.key).push(event);
+
+      const summaryKey = `${event.script}||${event.origin}`;
+      const current = scriptCounts.get(summaryKey) || {
+        script: event.script,
+        origin: event.origin,
+        count: 0
+      };
+      current.count += 1;
+      scriptCounts.set(summaryKey, current);
+    }
+
+    const parts = [];
+    parts.push('AZ + APEX + GWPC TIMELINE REPORT');
+    parts.push('');
+    parts.push('WARNING: This file may contain customer names, addresses, ticket IDs,');
+    parts.push('and other sensitive data from operator logs. Do NOT share outside the team.');
+    parts.push('');
+    parts.push(`EXPORTED AT: ${now.toISOString()}`);
+    parts.push(`EXPORTED FROM: ${location.origin}`);
+    parts.push(`WINDOW HOURS: ${hoursBack}`);
+    parts.push(`WINDOW START: ${new Date(windowStartMs).toISOString()}`);
+    parts.push(`WINDOW END: ${now.toISOString()}`);
+    parts.push(`SCRIPTS SCANNED: ${records.length}`);
+    parts.push(`SCRIPTS WITH EVENTS: ${grouped.size}`);
+    parts.push(`EVENTS IN WINDOW: ${events.length}`);
+    parts.push(`SUCCESS COUNT: ${outcomes.success}`);
+    parts.push(`FAIL COUNT: ${outcomes.failed}`);
+    parts.push('');
+
+    if (!events.length) {
+      parts.push('(no timed log lines were found in the selected window)');
+      return parts.join('\n');
+    }
+
+    parts.push('=== SCRIPT SUMMARY ===');
+    parts.push('');
+    for (const entry of Array.from(scriptCounts.values()).sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return String(a.script).localeCompare(String(b.script));
+    })) {
+      parts.push(`${String(entry.count).padStart(4, ' ')} | ${getOriginShortLabel(entry.origin)} | ${entry.script}`);
+    }
+    parts.push('');
+    parts.push('=== MERGED TIMELINE ===');
+    parts.push('');
+
+    for (const event of events) {
+      parts.push(
+        `${formatLocalDateTime(event.at)} | ${getOriginShortLabel(event.origin)} | ${event.script} | ${event.rawLine}`
+      );
+    }
+
+    parts.push('');
+    parts.push('=== SOURCE WINDOWS ===');
+    parts.push('');
+
+    for (const record of records) {
+      const recordEvents = grouped.get(record.key);
+      if (!recordEvents || !recordEvents.length) continue;
+
+      const value = record.value || {};
+      parts.push('==============================');
+      parts.push(`${value.script || '(unknown script)'} v${value.version || '?'}`);
+      parts.push(`Origin:  ${value.origin || '(unknown)'}`);
+      parts.push(`Updated: ${value.updatedAt || '(unknown)'}`);
+      parts.push(`Source:  ${record.source}`);
+      parts.push(`Key:     ${record.key}`);
+      parts.push(`Lines:   ${recordEvents.length}`);
+      parts.push('==============================');
+      for (const event of recordEvents) parts.push(event.rawLine);
+      parts.push('');
+    }
+
+    return parts.join('\n');
+  }
+
   function exportLogsTxt() {
     try {
       syncSharedCaches();
@@ -691,6 +919,34 @@
     } catch (err) {
       console.error('[AZ+APEX+GWPC Storage Tools] Log export failed:', err);
       toast('Log export failed');
+    }
+  }
+
+  function exportRecentReportTxt() {
+    try {
+      const hoursBack = promptReportHours();
+      if (hoursBack == null) return;
+
+      syncSharedCaches();
+      const records = collectAllLogRecords();
+      const txt = buildRecentReportTxt(records, hoursBack);
+      const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+      const fileName = `az-apex-gwpc-report_${String(hoursBack).replace(/[^\d.]+/g, '_')}h_${location.host.replace(/[^\w.-]+/g, '_')}_${safeNowStamp()}.txt`;
+
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 1000);
+
+      toast(`Report exported for the last ${hoursBack} hour${hoursBack === 1 ? '' : 's'}`);
+    } catch (err) {
+      console.error('[AZ+APEX+GWPC Storage Tools] Timeline report export failed:', err);
+      toast('Timeline report export failed');
     }
   }
 
@@ -958,6 +1214,13 @@
       exportLogsTxt
     );
 
+    const reportExportBtn = makeButton(
+      'REPORT',
+      'Prompt for a last-N-hours merged AZ + APEX + GWPC timeline report',
+      '#0f766e',
+      exportRecentReportTxt
+    );
+
     const logsClearBtn = makeButton(
       'CLEAR LOGS',
       'Empty the log buffers of every running script across all three origins',
@@ -968,6 +1231,7 @@
     wrap.appendChild(exportBtn);
     wrap.appendChild(clearBtn);
     wrap.appendChild(logsExportBtn);
+    wrap.appendChild(reportExportBtn);
     wrap.appendChild(logsClearBtn);
     document.body.appendChild(wrap);
   }
