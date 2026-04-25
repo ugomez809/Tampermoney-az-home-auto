@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.46
+// @version      1.0.47
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.46';
+  const VERSION = '1.0.47';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -120,6 +120,7 @@
     closeRetryMs: 700,
     closeAttempts: 4,
     stalePayloadSlackMs: 1500,
+    payloadMismatchFailMs: 20 * 1000,
     maxLogLines: 90,
     zIndex: 2147483647,
     panelWidth: 360,
@@ -602,14 +603,21 @@
       log(`Open ticket ${openId} is waiting for final Home payload for this ticket; current mirrored payload is for ${targetId}`);
     }
 
+    const elapsedMs = Math.max(0, now - state.waitingTicketMismatchSince);
+    const ready = elapsedMs >= CFG.payloadMismatchFailMs;
+    if (ready && state.waitingTicketMismatchTriggeredKey !== key) {
+      state.waitingTicketMismatchTriggeredKey = key;
+      log(`Payload mismatch held for ${Math.round(elapsedMs / 1000)}s; running failed path for open ticket ${openId} instead of mirrored ticket ${targetId}`);
+    }
+
     return {
       active: true,
-      ready: false,
+      ready,
       key,
       openTicketId: openId,
       targetTicketId: targetId,
-      elapsedMs: Math.max(0, now - state.waitingTicketMismatchSince),
-      remainingMs: 0
+      elapsedMs,
+      remainingMs: Math.max(0, CFG.payloadMismatchFailMs - elapsedMs)
     };
   }
 
@@ -2619,6 +2627,7 @@
       ? { active: false, ready: false }
       : getWaitingTicketMismatchState(openTicket.ticketId, finalPayload?.azId || '');
     let workflowPayload = finalPayload;
+    let mismatchMissingPayloadTriggerKey = '';
     let fallbackTicketId = missingPayloadTrigger
       ? (missingPayloadTrigger.ticketId || openTicket.ticketId)
       : (state.forceRunRequested && !finalPayload && !!openTicket.ticketId ? openTicket.ticketId : '');
@@ -2631,9 +2640,13 @@
       }
     } else if (mismatchWait.active && !mismatchWait.ready) {
       const targetLabel = mismatchWait.targetTicketId ? `ticket ${mismatchWait.targetTicketId}` : 'final Home payload';
-      setStatus(`Waiting for final Home payload (${targetLabel} currently mirrored)`);
+      setStatus(`Waiting for matching Home payload (${targetLabel} currently mirrored; ${Math.ceil(mismatchWait.remainingMs / 1000)}s before failed path)`);
       renderAll();
       return;
+    } else if (mismatchWait.active && mismatchWait.ready) {
+      workflowPayload = null;
+      fallbackTicketId = mismatchWait.openTicketId || openTicket.ticketId;
+      mismatchMissingPayloadTriggerKey = `payload-mismatch|${fallbackTicketId}|mirrored-${mismatchWait.targetTicketId}|front-session-${state.frontSession}`;
     }
 
     if (!missingPayloadTrigger && (!openTicket.ticketId || (finalPayload && openTicket.ticketId === norm(finalPayload.azId || '')))) {
@@ -2645,7 +2658,7 @@
 
     state.activeAzId = effectiveAzId;
 
-    if (fallbackMissingPayload && !missingPayloadTrigger && !state.forceRunRequested && effectiveAzId) {
+    if (fallbackMissingPayload && !missingPayloadTrigger && !mismatchMissingPayloadTriggerKey && !state.forceRunRequested && effectiveAzId) {
       const runRecord = computeRunRecord(readRuns(), effectiveAzId);
       if (runRecord.completedAt) {
         resetWaitingTicketMismatch();
@@ -2664,7 +2677,7 @@
       return;
     }
 
-    if (!workflowPayload && !missingPayloadTrigger && !state.forceRunRequested) {
+    if (!workflowPayload && !fallbackMissingPayload && !missingPayloadTrigger && !state.forceRunRequested) {
       setStatus(openTicket.ticketId ? 'Waiting for final Home payload' : 'Waiting for open ticket');
       renderAll();
       return;
@@ -2710,7 +2723,7 @@
         finalPayload: workflowPayload,
         fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : '',
         runTicketId: currentFrontRunTicketId,
-        missingPayloadTriggerKey: missingPayloadTrigger?.triggerKey || ''
+        missingPayloadTriggerKey: missingPayloadTrigger?.triggerKey || mismatchMissingPayloadTriggerKey || ''
       }).catch((err) => {
         log(`Workflow failed: ${err?.message || err}`);
         setStatus('Workflow failed');

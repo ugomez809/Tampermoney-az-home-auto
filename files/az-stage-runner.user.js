@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.32
+// @version      2.5.33
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.32';
+  const VERSION = '2.5.33';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -51,6 +51,7 @@
     waitForHideAfterQuoteMs: 10000,
     ticketClosePollMs: 1200,
     ticketCloseLogEveryMs: 8000,
+    payloadMismatchFailMs: 20 * 1000,
     missingPayloadFinisherMaxWaitMs: 90 * 1000,
     maxMainPayloadFailureAttempts: 1,
     nextRunAfterCloseMs: 3000,
@@ -1707,7 +1708,7 @@
           return;
         }
 
-        const ticketClosed = await waitForTicketClosedByFinisher(ticketId);
+        const ticketClosed = await waitForTicketClosedByFinisher(ticketId, { card });
         if (!ticketClosed) return;
 
         state.processedIds.add(ticketId);
@@ -1748,6 +1749,7 @@
     let lastLogAt = 0;
     let drawerHiddenLogged = false;
     let finalPayloadReadyLogged = false;
+    let mismatchFallbackSent = false;
     const waitStartedAt = Date.now();
     const maxWaitMs = Math.max(0, Number(options.maxWaitMs || 0));
     const timeoutLabel = norm(options.timeoutLabel || 'finisher');
@@ -1764,6 +1766,19 @@
       if (!finalPayloadReadyLogged && consumeFinalPayloadReady(ticketId, waitStartedAt)) {
         finalPayloadReadyLogged = true;
         log(`Final Home payload ready for AZ ${ticketId}; waiting for finisher to fill fields/tag/close`, 'ok');
+      }
+
+      if (!finalPayloadReadyLogged && !mismatchFallbackSent && (Date.now() - waitStartedAt) >= CFG.payloadMismatchFailMs) {
+        mismatchFallbackSent = true;
+        clearFinisherCloseSignal();
+        clearMissingPayloadTrigger();
+        publishMissingPayloadTrigger(ticketId, 'PAYLOAD DOES NOT MATCH AFTER 20 SECONDS');
+        log(`No matching final Home payload after 20s; failed path owns ticket ${ticketId}`, 'warn');
+
+        if (options.card instanceof Element && (!isTicketDrawerOpen() || String(getOpenTicketInfo().ticketId || '') !== String(ticketId))) {
+          const reopened = await openCard(options.card, ticketId);
+          log(reopened ? `Reopened ticket for failed path | ${ticketId}` : `Could not reopen ticket for failed path | ${ticketId}`, reopened ? 'ok' : 'error');
+        }
       }
 
       const info = getOpenTicketInfo();
@@ -2071,7 +2086,7 @@
       await closeTicket();
       await foregroundSleep(CFG.gapMs);
     }
-    if (currentOpen && currentOpen === ticketId) return true;
+    if (currentOpen && currentOpen === ticketId && isTicketDrawerOpen()) return true;
     if (isTicketDrawerOpen()) return true;
 
     const link = card.querySelector(SEL.customerLink);
