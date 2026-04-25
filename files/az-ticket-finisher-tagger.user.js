@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.42
+// @version      1.0.43
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.42';
+  const VERSION = '1.0.43';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -2348,7 +2348,8 @@
       forceRun = false,
       finalPayload = null,
       fallbackTicketId = '',
-      runTicketId = ''
+      runTicketId = '',
+      missingPayloadTriggerKey = ''
     } = options;
 
     const data = finalPayload
@@ -2391,6 +2392,19 @@
     const normalizedFields = getNormalizedWorkflowFields(data.fields);
     const fieldSignature = JSON.stringify(normalizedFields);
     const hasFieldValues = Object.keys(normalizedFields).length > 0;
+    const missingPayloadRunKey = data.missingPayloadFallback
+      ? norm(missingPayloadTriggerKey || `missing-payload|${data.azId}|${data.sources.home || ''}`)
+      : '';
+    const mustRunMissingPayloadNote = !!(
+      data.missingPayloadFallback
+      && missingPayloadRunKey
+      && norm(runRecord.missingPayloadNoteTriggerKey || '') !== missingPayloadRunKey
+    );
+    const mustRunMissingPayloadTag = !!(
+      data.missingPayloadFallback
+      && missingPayloadRunKey
+      && norm(runRecord.missingPayloadTagTriggerKey || '') !== missingPayloadRunKey
+    );
     if (!forceRun && runRecord.completedAt) {
       log(`Previous completion found for AZ ${data.azId}; rerunning for front session ${state.frontSession}`);
     }
@@ -2427,15 +2441,18 @@
         log('Main fields already match current payload, skipping field fill');
       }
 
-      if (forceRun || !runRecord.noteSavedAt) {
+      if (forceRun || mustRunMissingPayloadNote || !runRecord.noteSavedAt) {
         if (data.missingPayloadFallback) {
-          log('Note data | Skipped missing payload');
+          log(`Note data | Missing payload failure${mustRunMissingPayloadNote ? ' | forcing failed note for current trigger' : ''}`);
         } else {
           log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'}`);
         }
         const noteOk = await addPinnedNote(data.note.text);
         if (noteOk) {
           runRecord.noteSavedAt = nowIso();
+          if (data.missingPayloadFallback && missingPayloadRunKey) {
+            runRecord.missingPayloadNoteTriggerKey = missingPayloadRunKey;
+          }
           saveRunRecord(runs, data.azId, runRecord);
           log('Pinned note saved');
         } else {
@@ -2445,7 +2462,7 @@
         log('Pinned note already saved for this AZ ID, skipping note step');
       }
 
-      if (forceRun || !runRecord.tagAppliedAt) {
+      if (forceRun || mustRunMissingPayloadTag || !runRecord.tagAppliedAt) {
         const tagForm = await openTagPanel();
         if (tagForm) {
           const targetKey = data.chooseSuccessfulTag ? 'successfulTag' : 'failedTag';
@@ -2453,6 +2470,9 @@
           if (tagOk) {
             await maybeClickTagApplyButton();
             runRecord.tagAppliedAt = nowIso();
+            if (data.missingPayloadFallback && missingPayloadRunKey) {
+              runRecord.missingPayloadTagTriggerKey = missingPayloadRunKey;
+            }
             saveRunRecord(runs, data.azId, runRecord);
             log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}${data.missingPayloadFallback ? ' (missing payload)' : ''} | AZ ${data.azId}`);
           } else {
@@ -2463,7 +2483,18 @@
         log('Tag already applied for this AZ ID, skipping tag step');
       }
 
-      if (runRecord.fieldsUpdatedAt && runRecord.noteSavedAt && runRecord.tagAppliedAt) {
+      const noteComplete = !!runRecord.noteSavedAt && (
+        !data.missingPayloadFallback
+        || !missingPayloadRunKey
+        || norm(runRecord.missingPayloadNoteTriggerKey || '') === missingPayloadRunKey
+      );
+      const tagComplete = !!runRecord.tagAppliedAt && (
+        !data.missingPayloadFallback
+        || !missingPayloadRunKey
+        || norm(runRecord.missingPayloadTagTriggerKey || '') === missingPayloadRunKey
+      );
+
+      if (runRecord.fieldsUpdatedAt && noteComplete && tagComplete) {
         setStatus('Closing ticket');
         await sleep(CFG.actionSettleMs);
 
@@ -2479,7 +2510,10 @@
         delete runRecord.closeFailedAt;
         runRecord.completedAt = nowIso();
         runRecord.payloadSavedAt = data.payloadSavedAt;
-        if (data.missingPayloadFallback) runRecord.missingPayloadFallback = true;
+        if (data.missingPayloadFallback) {
+          runRecord.missingPayloadFallback = true;
+          if (missingPayloadRunKey) runRecord.missingPayloadCompletedTriggerKey = missingPayloadRunKey;
+        }
         saveRunRecord(runs, data.azId, runRecord);
         markFrontRunCompleted(runTicketId || data.azId);
         sendTicketClosedSignal(data.azId);
@@ -2609,7 +2643,8 @@
         forceRun: state.forceRunRequested,
         finalPayload: workflowPayload,
         fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : '',
-        runTicketId: currentFrontRunTicketId
+        runTicketId: currentFrontRunTicketId,
+        missingPayloadTriggerKey: missingPayloadTrigger?.triggerKey || ''
       }).catch((err) => {
         log(`Workflow failed: ${err?.message || err}`);
         setStatus('Workflow failed');
