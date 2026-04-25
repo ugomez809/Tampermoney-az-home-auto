@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.37
+// @version      1.0.38
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.37';
+  const VERSION = '1.0.38';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -2064,6 +2064,14 @@
     return getOpenTicketInfo().tags.some((tag) => lower(tag).includes(label) || label.includes(lower(tag)));
   }
 
+  function getOpenTicketTagLabels() {
+    return Array.from(new Set(
+      (getOpenTicketInfo().tags || [])
+        .map((tag) => cleanTagText(tag))
+        .filter(Boolean)
+    ));
+  }
+
   function findTagMenuItemByLabel(label, root = null) {
     const wanted = lowerTagText(label);
     if (!wanted) return null;
@@ -2079,9 +2087,71 @@
     return null;
   }
 
+  function resolveTagValuesByLabels(selectEl, labels) {
+    const values = [];
+    const missingLabels = [];
+    const seen = new Set();
+    for (const label of Array.isArray(labels) ? labels : []) {
+      const cleanLabel = cleanTagText(label);
+      if (!cleanLabel) continue;
+      const value = valueForExactTagLabel(selectEl, cleanLabel);
+      if (!value) {
+        missingLabels.push(cleanLabel);
+        continue;
+      }
+      if (seen.has(value)) continue;
+      seen.add(value);
+      values.push(value);
+    }
+    return { values, missingLabels };
+  }
+
+  function setSelectedTagValues(selectEl, values) {
+    if (!(selectEl instanceof HTMLSelectElement)) return false;
+    const wanted = Array.from(new Set((values || []).map((value) => norm(value)).filter(Boolean)));
+    const wantedSet = new Set(wanted);
+    const current = getSelectedTagValues(selectEl);
+    const currentSet = new Set(current);
+    const changed = currentSet.size !== wantedSet.size || wanted.some((value) => !currentSet.has(value));
+
+    for (const option of Array.from(selectEl.options || [])) {
+      const value = norm(option.value || '');
+      if (!value) continue;
+      option.selected = wantedSet.has(value);
+    }
+
+    try {
+      const $ = window.jQuery || window.$;
+      if ($ && typeof $.fn?.selectpicker === 'function') {
+        $(selectEl).selectpicker('val', wanted);
+      }
+    } catch {}
+
+    selectEl.dispatchEvent(new Event('input', { bubbles: true }));
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    refreshTagSelectpicker(selectEl);
+    return changed;
+  }
+
   function resolveStoredTagValue(selectEl, kind, record) {
     if (!(selectEl instanceof HTMLSelectElement) || !isPlainObject(record)) {
       return { value: '', label: cleanTagText(record?.label || '') };
+    }
+
+    const label = cleanTagText(record.label || '');
+    if (label) {
+      const resolvedValue = valueForExactTagLabel(selectEl, label);
+      if (resolvedValue) {
+        const targets = getTagTargets();
+        targets[kind] = {
+          ...record,
+          label,
+          value: resolvedValue,
+          savedAt: record.savedAt || nowIso()
+        };
+        saveTargets(GM_KEYS.tagTargets, targets);
+        return { value: resolvedValue, label };
+      }
     }
 
     const directValue = norm(record.value || '');
@@ -2092,22 +2162,7 @@
       };
     }
 
-    const label = cleanTagText(record.label || '');
-    if (!label) return { value: '', label: '' };
-
-    const resolvedValue = valueForExactTagLabel(selectEl, label);
-    if (!resolvedValue) return { value: '', label };
-
-    const targets = getTagTargets();
-    targets[kind] = {
-      ...record,
-      label,
-      value: resolvedValue,
-      savedAt: record.savedAt || nowIso()
-    };
-    saveTargets(GM_KEYS.tagTargets, targets);
-
-    return { value: resolvedValue, label };
+    return { value: '', label };
   }
 
   async function applyStoredTagTarget(kind, tagForm = null) {
@@ -2153,17 +2208,21 @@
       return false;
     }
 
-    const exactSavedItem = findSavedElement(record);
-    const menuRoot = getTagDropdownMenu(dropdown) || form;
-    const item = (exactSavedItem instanceof Element && visible(exactSavedItem))
-      ? exactSavedItem
-      : findTagMenuItemByLabel(resolved.label || record.label || '', menuRoot);
-    if (!(item instanceof Element)) {
-      log(`Tag menu item not found for ${resolved.label || record.label || kind}`);
-      return false;
+    const openTagLabels = getOpenTicketTagLabels();
+    const preserveInfo = resolveTagValuesByLabels(
+      selectEl,
+      openTagLabels.filter((label) => lowerTagText(label) !== lowerTagText(resolved.label || record.label || ''))
+    );
+    if (preserveInfo.missingLabels.length) {
+      log(`Could not map current ticket tags in selector: ${preserveInfo.missingLabels.join(', ')}`);
     }
 
-    strongClick(item);
+    const nextValues = [
+      ...getSelectedTagValues(selectEl),
+      ...preserveInfo.values,
+      resolved.value
+    ];
+    setSelectedTagValues(selectEl, nextValues);
     log(`Applied tag selection: ${resolved.label || kind}`);
     await sleep(CFG.bigActionDelayMs);
     return true;
