@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.44
+// @version      1.0.45
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.44';
+  const VERSION = '1.0.45';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -869,6 +869,20 @@
 
   function getTagTargets() {
     return readTargets(GM_KEYS.tagTargets);
+  }
+
+  function getTagTargetSignature(kind) {
+    const record = getTagTargets()[kind];
+    if (!isPlainObject(record)) return `${kind}|`;
+    const label = lowerTagText(record.label || '');
+    const value = norm(record.value || '');
+    return `${kind}|${label || value}`;
+  }
+
+  function runRecordMatchesTagTarget(record, kind, signature) {
+    if (!isPlainObject(record) || !record.tagAppliedAt) return false;
+    return norm(record.tagTargetKey || '') === kind
+      && norm(record.tagTargetSignature || '') === signature;
   }
 
   function hasAllFieldTargets() {
@@ -2038,7 +2052,7 @@
   function maybeTagAlreadyPresent(targetRecord) {
     const label = lowerTagText(targetRecord?.label || '');
     if (!label) return false;
-    return getOpenTicketInfo().tags.some((tag) => lower(tag).includes(label) || label.includes(lower(tag)));
+    return getOpenTicketInfo().tags.some((tag) => lowerTagText(tag) === label);
   }
 
   function getOpenTicketTagLabels() {
@@ -2435,6 +2449,9 @@
     const normalizedFields = getNormalizedWorkflowFields(data.fields);
     const fieldSignature = JSON.stringify(normalizedFields);
     const hasFieldValues = Object.keys(normalizedFields).length > 0;
+    const targetKey = data.chooseSuccessfulTag ? 'successfulTag' : 'failedTag';
+    const targetSignature = getTagTargetSignature(targetKey);
+    const targetLabel = data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote';
     const missingPayloadRunKey = data.missingPayloadFallback
       ? norm(missingPayloadTriggerKey || `missing-payload|${data.azId}|${data.sources.home || ''}`)
       : '';
@@ -2448,6 +2465,8 @@
       && missingPayloadRunKey
       && norm(runRecord.missingPayloadTagTriggerKey || '') !== missingPayloadRunKey
     );
+    const tagMatchesCurrentTarget = runRecordMatchesTagTarget(runRecord, targetKey, targetSignature);
+    const mustRunCurrentTag = forceRun || mustRunMissingPayloadTag || !tagMatchesCurrentTarget;
     if (!forceRun && runRecord.completedAt) {
       log(`Previous completion found for AZ ${data.azId}; rerunning for front session ${state.frontSession}`);
     }
@@ -2505,25 +2524,29 @@
         log('Pinned note already saved for this AZ ID, skipping note step');
       }
 
-      if (forceRun || mustRunMissingPayloadTag || !runRecord.tagAppliedAt) {
+      if (mustRunCurrentTag) {
+        if (runRecord.tagAppliedAt && !tagMatchesCurrentTarget && !mustRunMissingPayloadTag) {
+          log(`Stored tag state is stale for AZ ${data.azId}; applying ${targetLabel}`);
+        }
         const tagForm = await openTagPanel();
         if (tagForm) {
-          const targetKey = data.chooseSuccessfulTag ? 'successfulTag' : 'failedTag';
           const tagOk = await applyStoredTagTarget(targetKey, tagForm);
           if (tagOk) {
             await maybeClickTagApplyButton();
             runRecord.tagAppliedAt = nowIso();
+            runRecord.tagTargetKey = targetKey;
+            runRecord.tagTargetSignature = targetSignature;
             if (data.missingPayloadFallback && missingPayloadRunKey) {
               runRecord.missingPayloadTagTriggerKey = missingPayloadRunKey;
             }
             saveRunRecord(runs, data.azId, runRecord);
-            log(`Applied tag: ${data.chooseSuccessfulTag ? 'Successful Quote' : 'Failed Quote'}${data.missingPayloadFallback ? ' (missing payload)' : ''} | AZ ${data.azId}`);
+            log(`Applied tag: ${targetLabel}${data.missingPayloadFallback ? ' (missing payload)' : ''} | AZ ${data.azId}`);
           } else {
             log('Tag selection failed');
           }
         }
       } else {
-        log('Tag already applied for this AZ ID, skipping tag step');
+        log(`Tag already applied for this AZ ID and current result (${targetLabel}), skipping tag step`);
       }
 
       const noteComplete = !!runRecord.noteSavedAt && (
@@ -2531,7 +2554,7 @@
         || !missingPayloadRunKey
         || norm(runRecord.missingPayloadNoteTriggerKey || '') === missingPayloadRunKey
       );
-      const tagComplete = !!runRecord.tagAppliedAt && (
+      const tagComplete = runRecordMatchesTagTarget(runRecord, targetKey, targetSignature) && (
         !data.missingPayloadFallback
         || !missingPayloadRunKey
         || norm(runRecord.missingPayloadTagTriggerKey || '') === missingPayloadRunKey
