@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.17
+// @version      2.5.18
 // @description  Auto-start AZ stage runner. Defaults to Home when needed, always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, blocks further ticket work until reload, reloads after 40s of meaningful inactivity while frontmost back into Home+Running, and lets Stop cancel pending starts/reloads immediately.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.17';
+  const VERSION = '2.5.18';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -384,22 +384,35 @@
     try { if (state.pendingReloadTimer) clearTimeout(state.pendingReloadTimer); } catch {}
     state.pendingStartTimer = 0;
     state.pendingReloadTimer = 0;
+    syncUi();
+  }
+
+  function resetFrontIdleReloadState() {
+    state.frontIdleFrontSinceAt = 0;
+    state.frontIdleArmedLogged = false;
+    state.frontIdleReloadPending = false;
+    state.frontIdleLastActivityAt = Date.now();
+    state.frontIdleLastSignature = getFrontIdleSignature();
   }
 
   function schedulePendingStart(fn, delay = 0) {
     try { if (state.pendingStartTimer) clearTimeout(state.pendingStartTimer); } catch {}
     state.pendingStartTimer = window.setTimeout(() => {
       state.pendingStartTimer = 0;
+      syncUi();
       fn();
     }, delay);
+    syncUi();
   }
 
   function schedulePendingReload(fn, delay = 120) {
     try { if (state.pendingReloadTimer) clearTimeout(state.pendingReloadTimer); } catch {}
     state.pendingReloadTimer = window.setTimeout(() => {
       state.pendingReloadTimer = 0;
+      syncUi();
       fn();
     }, delay);
+    syncUi();
   }
 
   // Every automatic reload must land on the clean pipeline URL. A plain
@@ -1014,6 +1027,12 @@
       }
       #hb-az-stage-runner-start[data-running="1"]{ background:#991b1b; }
       #hb-az-stage-runner-start[data-running="0"]{ background:#166534; }
+      #hb-az-stage-runner-stop{ background:#991b1b; }
+      #hb-az-stage-runner-mini button:disabled{
+        opacity:.65;
+        cursor:not-allowed;
+        filter:none;
+      }
       #hb-az-stage-runner-status{
         font-weight:700;
         color:#93c5fd;
@@ -1063,6 +1082,7 @@
           <button type="button" id="hb-az-stage-runner-auto">Auto</button>
           <button type="button" id="hb-az-stage-runner-home">Home</button>
           <button type="button" id="hb-az-stage-runner-start" data-running="0">Start</button>
+          <button type="button" id="hb-az-stage-runner-stop">Stop</button>
         </div>
         <div id="hb-az-stage-runner-status">STOPPED</div>
         <div id="hb-az-stage-runner-meta">
@@ -1081,6 +1101,7 @@
     state.ui.auto = panel.querySelector('#hb-az-stage-runner-auto');
     state.ui.home = panel.querySelector('#hb-az-stage-runner-home');
     state.ui.start = panel.querySelector('#hb-az-stage-runner-start');
+    state.ui.stop = panel.querySelector('#hb-az-stage-runner-stop');
     state.ui.status = panel.querySelector('#hb-az-stage-runner-status');
     state.ui.mode = panel.querySelector('#hb-az-stage-runner-mode');
     state.ui.page = panel.querySelector('#hb-az-stage-runner-page');
@@ -1106,18 +1127,28 @@
     });
 
     state.ui.start?.addEventListener('click', () => {
-      if (state.running) stopRun('Stopped', { manual: true });
-      else startRun(false);
+      if (state.running || state.busy || state.pendingStartTimer || state.pendingReloadTimer) return;
+      startRun(false);
+    });
+
+    state.ui.stop?.addEventListener('click', () => {
+      stopRun('Stopped', { manual: true });
     });
   }
 
   function syncUi() {
     if (!state.ui.root) return;
 
+    const hasPendingTimers = !!state.pendingStartTimer || !!state.pendingReloadTimer;
+    const canStart = !state.running && !state.busy && !hasPendingTimers;
+    const canStop = state.running || state.busy || hasPendingTimers || state.refreshRequiredThisLoad || state.frontIdleReloadPending;
+
     state.ui.auto.dataset.active = state.mode === 'auto' ? '1' : '0';
     state.ui.home.dataset.active = state.mode === 'home' ? '1' : '0';
     state.ui.start.dataset.running = state.running ? '1' : '0';
-    state.ui.start.textContent = state.running ? 'Stop' : 'Start';
+    state.ui.start.textContent = 'Start';
+    state.ui.start.disabled = !canStart;
+    state.ui.stop.disabled = !canStop;
     state.ui.mode.textContent = state.mode ? state.mode.toUpperCase() : '—';
   }
 
@@ -1179,6 +1210,7 @@
 
   function stopRun(reason = 'Stopped', { manual = false } = {}) {
     clearPendingActionTimers();
+    resetFrontIdleReloadState();
     if (manual) {
       state.refreshRequiredThisLoad = false;
       setBootstrapReloadMode('');
