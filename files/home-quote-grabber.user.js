@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.12
+// @version      4.1.13
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.12';
+  const VERSION = '4.1.13';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1283,7 +1283,7 @@
       }
 
       const beforeSnapshot = readNavigationSnapshot();
-      const clicked = clickQuoteOnce();
+      const clicked = clickQuoteOnce(`quote action attempt ${attempt}/${CFG.maxQuoteAttempts}`, beforeSnapshot);
       if (!clicked) {
         await sleep(CFG.betweenQuoteAttemptsMs);
         continue;
@@ -1340,12 +1340,19 @@
     return null;
   }
 
-  function clickQuoteOnce() {
+  function logQuoteButtonClick(context, target, snapshot = null) {
+    const parts = [`QUOTE BUTTON CLICKED | ${normalizeText(context || 'Quote')}`];
+    if (snapshot) parts.push(describeNavigationSnapshot(snapshot));
+    if (target) parts.push(describeElement(target));
+    log(parts.join(' | '));
+  }
+
+  function clickQuoteOnce(context = 'quote click', snapshot = null) {
     if (quoteRecentlyClicked()) return false;
     const target = getClickableQuoteTarget();
     if (target && strongClick(target)) {
       markQuoteClicked();
-      log('Quote clicked');
+      logQuoteButtonClick(context, target, snapshot);
       return true;
     }
     const candidates = findQuoteCandidates();
@@ -1393,7 +1400,7 @@
       if (baselineWarningText) {
         log(`Pre-existing Coverages warning before Quote attempt ${attempt}: ${baselineWarningText}`);
       }
-      const clicked = clickQuoteOnce();
+      const clicked = clickQuoteOnce(`coverages quote attempt ${attempt}/${CFG.maxQuoteAttempts}`, beforeSnapshot);
       if (!clicked) {
         await sleep(CFG.betweenQuoteAttemptsMs);
         continue;
@@ -2052,6 +2059,7 @@
       ],
       () => isSubmissionQuoted() || !!findByIdInDocs(IDS.autoDiscountLV) || isTitleLike('Quote'),
       {
+        clickLogContext: 'quote tab fallback',
         movementFn: (before, after) => advancedToSubmissionState(before, after, 'quoted') || didHeaderChange(before, after)
       }
     );
@@ -2088,6 +2096,7 @@
   async function navigateToTab(name, resolvers, readyFn, options = {}) {
     const attempts = Number(options.attempts) > 0 ? Number(options.attempts) : 4;
     const moveTimeoutMs = Number(options.moveTimeoutMs) > 0 ? Number(options.moveTimeoutMs) : CFG.navigationMoveTimeoutMs;
+    const clickLogContext = normalizeText(options.clickLogContext || '');
     const movementFn = typeof options.movementFn === 'function'
       ? options.movementFn
       : ((before, after) => didHeaderChange(before, after));
@@ -2115,7 +2124,10 @@
 
       const beforeSnapshot = readNavigationSnapshot();
       log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/${attempts} | ${describeNavigationSnapshot(beforeSnapshot)}`);
-      strongClick(target);
+      const clicked = strongClick(target);
+      if (clicked && clickLogContext) {
+        logQuoteButtonClick(`${clickLogContext} attempt ${attempt}/${attempts}`, target, beforeSnapshot);
+      }
 
       const movedOrReady = await waitFor(
         () => {

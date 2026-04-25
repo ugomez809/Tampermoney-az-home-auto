@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Auto Quote Extractor
 // @namespace    homebot.auto-quote-grabber
-// @version      2.9.7
+// @version      2.9.8
 // @description  Shared-payload AUTO gatherer. Uses stronger tab navigation to click Policy Info, Auto Data Prefill, Drivers, Vehicles, PA Coverages, and Quote. Starts from auto/quote_grabber or from the live Quote screen fallback, reads insured names + drivers + vehicles + PA coverages + quote fields, and saves AUTO payload + bundle data without sending.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -20,7 +20,7 @@
   try { window.__AUTO_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Auto Quote Extractor';
-  const VERSION = '2.9.7';
+  const VERSION = '2.9.8';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_auto_quote_grabber_logs_v1';
@@ -921,11 +921,15 @@
         () => findTabActionByVisibleLabel('Quote'),
         () => findActionByText('Quote')
       ],
-      () => isQuoteReady()
+      () => isQuoteReady(),
+      {
+        clickLogContext: 'auto quote navigation'
+      }
     );
   }
 
-  async function navigateToTab(name, resolvers, readyFn) {
+  async function navigateToTab(name, resolvers, readyFn, options = {}) {
+    const clickLogContext = normalizeText(options.clickLogContext || '');
     if (readyFn()) {
       log(`${name} already ready`);
       return;
@@ -949,7 +953,10 @@
 
       const headerBefore = getHeaderText();
       log(`Clicking ${name} ${describeElement(target)} attempt ${attempt}/${CFG.maxTabAttempts}`);
-      strongClick(target);
+      const clicked = strongClick(target);
+      if (clicked && clickLogContext) {
+        logQuoteButtonClick(`${clickLogContext} attempt ${attempt}/${CFG.maxTabAttempts}`, target, headerBefore);
+      }
 
       const ok = await waitFor(readyFn, CFG.waitTimeoutMs, `${name} readiness`);
       if (ok) {
@@ -1830,6 +1837,13 @@
     try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
     return true;
+  }
+
+  function logQuoteButtonClick(context, target, headerBefore = '') {
+    const parts = [`QUOTE BUTTON CLICKED | ${normalizeText(context || 'Quote')}`];
+    if (headerBefore) parts.push(`header="${headerBefore}"`);
+    if (target) parts.push(describeElement(target));
+    log(parts.join(' | '));
   }
 
   function describeElement(el) {
