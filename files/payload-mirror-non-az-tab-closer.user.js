@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.21
+// @version      1.0.22
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.21';
+  const VERSION = '1.0.22';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -51,7 +51,11 @@
     webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
     tabHeartbeats: 'tm_payload_mirror_tab_heartbeats_v1',
     apexWakeState: 'tm_payload_mirror_apex_wake_state_v1',
-    homePayload: 'tm_pc_home_quote_grab_payload_v1'
+    homePayload: 'tm_pc_home_quote_grab_payload_v1',
+    missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
+    azCurrentJob: 'tm_az_current_job_v1',
+    currentJob: 'tm_pc_current_job_v1',
+    sharedJob: 'tm_shared_az_job_v1'
   };
 
   const LS_KEYS = {
@@ -128,7 +132,8 @@
     samePageSignature: '',
     samePageSinceAt: 0,
     samePageCloseAttempted: false,
-    samePageLoggedArmed: false
+    samePageLoggedArmed: false,
+    lexSnagHandledKey: ''
   };
 
   init();
@@ -582,6 +587,134 @@
       if (azId) return azId;
     }
     return norm(state.activeSignal?.azId || readMirroredPayloadMeta()?.azId || '');
+  }
+
+  function extractAzIdFromJobValue(value) {
+    if (!isPlainObject(value)) return '';
+    const data = isPlainObject(value.data) ? value.data : value;
+    return norm(
+      value?.['AZ ID']
+      || value?.azId
+      || value?.ticketId
+      || value?.currentJob?.['AZ ID']
+      || value?.currentJob?.azId
+      || value?.currentJob?.ticketId
+      || value?.az?.['AZ ID']
+      || value?.az?.azId
+      || value?.az?.ticketId
+      || data?.['AZ ID']
+      || data?.azId
+      || data?.ticketId
+      || data?.currentJob?.['AZ ID']
+      || data?.currentJob?.azId
+      || data?.currentJob?.ticketId
+      || ''
+    );
+  }
+
+  function readCurrentAzIdForLexFailure() {
+    const keys = [
+      GM_KEYS.azCurrentJob,
+      GM_KEYS.sharedJob,
+      GM_KEYS.currentJob
+    ];
+
+    for (const key of keys) {
+      const azId = extractAzIdFromJobValue(readGM(key, null));
+      if (azId) return azId;
+    }
+
+    for (const key of keys) {
+      const azId = extractAzIdFromJobValue(readLocalJson(key));
+      if (azId) return azId;
+    }
+
+    return '';
+  }
+
+  function findLexSnagMessage() {
+    if (!isLexHost()) return null;
+    const selectors = [
+      'h1[title]',
+      'h2[title]',
+      'h3[title]',
+      '.slds-card__header-title[title]',
+      '.slds-truncate[title]',
+      'h1',
+      'h2',
+      'h3'
+    ];
+
+    for (const selector of selectors) {
+      let nodes = [];
+      try { nodes = Array.from(document.querySelectorAll(selector)); } catch {}
+      for (const node of nodes) {
+        if (!visible(node)) continue;
+        const text = norm(node.getAttribute('title') || node.textContent || '');
+        if (/^we hit a snag\.?$/i.test(text) || /we hit a snag\./i.test(text)) return node;
+      }
+    }
+    return null;
+  }
+
+  function publishMissingPayloadTrigger(ticketId, reason = 'APEX/LEX HIT A SNAG') {
+    const cleanTicketId = norm(ticketId || '');
+    if (!cleanTicketId) return false;
+
+    const trigger = {
+      ready: true,
+      ticketId: cleanTicketId,
+      azId: cleanTicketId,
+      reason: norm(reason || 'APEX/LEX HIT A SNAG') || 'APEX/LEX HIT A SNAG',
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+
+    try { localStorage.setItem(GM_KEYS.missingPayloadTrigger, JSON.stringify(trigger)); } catch {}
+    writeGM(GM_KEYS.missingPayloadTrigger, trigger);
+    log(`Triggered missing payload fallback from LEX snag | ${cleanTicketId} | ${trigger.reason}`);
+    return true;
+  }
+
+  function closeLexTabAfterSnag(azId = '') {
+    state.closeAttempted = true;
+    writeSession(SS_KEYS.closeAttempted, '1');
+    state.closeAttempts += 1;
+
+    log(`LEX snag detected. Closing tab${azId ? ` | AZ ${azId}` : ''} (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
+    setStatus('LEX snag -> failed path');
+    tryCloseCurrentTab();
+
+    setTimeout(() => {
+      if (state.destroyed || window.closed) return;
+      if (state.closeAttempts < CFG.maxCloseAttempts) {
+        closeLexTabAfterSnag(azId);
+        return;
+      }
+      log('Close blocked by browser after LEX snag');
+      setStatus('Close blocked');
+    }, CFG.closeRetryMs);
+  }
+
+  function checkLexSnagFailure() {
+    const snag = findLexSnagMessage();
+    if (!snag) return false;
+
+    const azId = readCurrentAzIdForLexFailure();
+    const snagText = norm(snag.getAttribute('title') || snag.textContent || 'We hit a snag.');
+    const handledKey = `${azId || '(missing)'}|${snagText}`;
+    if (state.lexSnagHandledKey === handledKey) return false;
+    state.lexSnagHandledKey = handledKey;
+
+    if (azId) {
+      publishMissingPayloadTrigger(azId, 'APEX/LEX HIT A SNAG');
+    } else {
+      log('LEX snag detected, but no current AZ ID was available; closing tab without fallback trigger');
+    }
+
+    closeLexTabAfterSnag(azId);
+    return true;
   }
 
   function getHeartbeatKind() {
@@ -1521,6 +1654,10 @@
     writeTabHeartbeat();
     closeOwnedApexWakeTabIfReady();
     refreshIgnoreCloseLeaseHeartbeat();
+    if (checkLexSnagFailure()) {
+      renderAll();
+      return;
+    }
     if (!state.running) {
       setStatus('Stopped');
       renderAll();
