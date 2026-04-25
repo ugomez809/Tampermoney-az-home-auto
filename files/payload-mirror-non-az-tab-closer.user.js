@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.20
+// @version      1.0.21
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.20';
+  const VERSION = '1.0.21';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -76,6 +76,7 @@
   const CFG = {
     tickMs: 400,
     maxSignalAgeMs: 90000,
+    closeSignalMaxAgeMs: 20000,
     closeDelayMs: 5000,
     samePageCloseMs: 5 * 60 * 1000,
     tabHeartbeatMs: 5000,
@@ -97,6 +98,7 @@
 
   const state = {
     destroyed: false,
+    tabStartedAt: Date.now(),
     running: loadRunning(),
     logs: [],
     panel: null,
@@ -1019,7 +1021,8 @@
     if (!azId || !postedAt) return false;
     const postedMs = Date.parse(postedAt);
     if (!Number.isFinite(postedMs)) return false;
-    return (Date.now() - postedMs) <= CFG.maxSignalAgeMs;
+    if (postedMs + 1000 < state.tabStartedAt) return false;
+    return (Date.now() - postedMs) <= CFG.closeSignalMaxAgeMs;
   }
 
   function isLexCloseConsumedForSignal(signal) {
