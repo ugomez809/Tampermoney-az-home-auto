@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.49
+// @version      1.0.50
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.49';
+  const VERSION = '1.0.50';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -2614,6 +2614,28 @@
     return isPlainObject(runs[azId]) ? deepClone(runs[azId]) : {};
   }
 
+  function getRunRecordProgressMs(record) {
+    if (!isPlainObject(record)) return 0;
+    const keys = ['fieldsUpdatedAt', 'noteSavedAt', 'tagAppliedAt', 'closeBlockedAt', 'closeFailedAt', 'completedAt'];
+    let newest = 0;
+    for (const key of keys) {
+      const ms = Date.parse(norm(record[key] || ''));
+      if (Number.isFinite(ms) && ms > newest) newest = ms;
+    }
+    return newest;
+  }
+
+  function hasRunRecordProgress(record) {
+    return getRunRecordProgressMs(record) > 0;
+  }
+
+  function isRunRecordFromCurrentOpen(record, azId) {
+    const cleanAzId = norm(azId || '');
+    const openedMs = state.openTicketId === cleanAzId ? Number(state.openTicketOpenedAt || 0) : 0;
+    const progressMs = getRunRecordProgressMs(record);
+    return !!(openedMs && progressMs && progressMs >= (openedMs - 1000));
+  }
+
   function saveRunRecord(runs, azId, record) {
     runs[azId] = deepClone(record);
     saveRuns(runs);
@@ -2807,7 +2829,13 @@
     }
 
     const runs = readRuns();
-    const runRecord = computeRunRecord(runs, data.azId);
+    const priorRunRecord = computeRunRecord(runs, data.azId);
+    const runRecord = isRunRecordFromCurrentOpen(priorRunRecord, data.azId) ? priorRunRecord : {};
+    if (!forceRun && hasRunRecordProgress(priorRunRecord) && runRecord !== priorRunRecord) {
+      log(`Previous run history found for AZ ${data.azId}; ignoring stored dedupe and running fresh`);
+    } else if (!forceRun && hasRunRecordProgress(runRecord)) {
+      log(`Continuing current open-ticket finisher attempt for AZ ${data.azId}; old dedupe still ignored`);
+    }
     const normalizedFields = getNormalizedWorkflowFields(data.fields);
     const fieldSignature = JSON.stringify(normalizedFields);
     const hasFieldValues = Object.keys(normalizedFields).length > 0;
@@ -2829,10 +2857,6 @@
     );
     const tagMatchesCurrentTarget = runRecordMatchesTagTarget(runRecord, targetKey, targetSignature);
     const mustRunCurrentTag = forceRun || mustRunMissingPayloadTag || !tagMatchesCurrentTarget;
-    if (!forceRun && runRecord.completedAt) {
-      log(`Previous completion found for AZ ${data.azId}; rerunning for front session ${state.frontSession}`);
-    }
-
     state.busy = true;
     renderAll();
     setStatus(forceRun ? 'Force running' : 'Running finisher');
@@ -3054,18 +3078,6 @@
 
     state.activeAzId = effectiveAzId;
 
-    if (fallbackMissingPayload && !missingPayloadTrigger && !mismatchMissingPayloadTriggerKey && !state.forceRunRequested && effectiveAzId) {
-      const runRecord = computeRunRecord(readRuns(), effectiveAzId);
-      if (runRecord.completedAt) {
-        resetWaitingTicketMismatch();
-        markFrontRunCompleted(openTicket.ticketId || effectiveAzId);
-        setStatus('Completed earlier');
-        log(`Skipping missing payload fallback for AZ ${effectiveAzId}; previous completion already exists`);
-        renderAll();
-        return;
-      }
-    }
-
     if (!openTicket.ticketId && !finalPayload) {
       resetWaitingTicketMismatch();
       setStatus('Waiting for open ticket');
@@ -3101,9 +3113,7 @@
     const currentFrontRunTicketId = norm(openTicket.ticketId || effectiveAzId || '');
     const completedThisFrontSession = hasCompletedFrontRun(currentFrontRunTicketId);
     if (completedThisFrontSession && !state.forceRunRequested) {
-      setStatus('Completed for current front session');
-      renderAll();
-      return;
+      log(`Current front-session completion exists for ${currentFrontRunTicketId}; ignoring dedupe because rerun-on-open is enabled`);
     }
 
     const payloadKey = workflowPayload?.payloadKey || (
@@ -3111,7 +3121,7 @@
         ? `missing-payload-trigger|${missingPayloadTrigger.triggerKey}`
         : `missing-payload|${fallbackTicketId || openTicket.ticketId}`
     );
-    const shouldRun = state.forceRunRequested || !completedThisFrontSession;
+    const shouldRun = true;
     if (shouldRun) {
       state.lastPayloadSeenKey = payloadKey;
       runWorkflow({
