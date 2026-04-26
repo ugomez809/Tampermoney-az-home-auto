@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.7
-// @description  V1.7 selectors/flow with a rebuilt simple tick loop. Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and force-closes the tab after one minute.
+// @version      1.8.8
+// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and uses a safe close guard after handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.7';
+  const VERSION = '1.8.8';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -40,6 +40,8 @@
     forceClosePollMs: 1000,
     forceCloseRetryMs: 900,
     maxCloseAttempts: 4,
+    allowBlankCloseFallback: false,
+    closeAfterContinueOnlyWhenHidden: true,
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
@@ -70,6 +72,7 @@
     forceCloseTriggered: false,
     forceCloseAttempts: 0,
     forceCloseTimer: null,
+    closeSkippedAfterContinue: false,
     logs: [],
     logsIntervalTimer: null
   };
@@ -82,7 +85,16 @@
     return Date.now();
   }
 
-  function tryCloseCurrentTab() {
+  function isFrontVisibleTab() {
+    try {
+      return document.visibilityState !== 'hidden' && document.hasFocus();
+    } catch {
+      return true;
+    }
+  }
+
+  function tryCloseCurrentTab(options = {}) {
+    const allowBlankFallback = options.allowBlankFallback === true;
     const wasClosed = !!window.closed;
     try { window.close(); } catch {}
     if (window.closed || wasClosed) return;
@@ -98,6 +110,8 @@
     try { window.top?.close?.(); } catch {}
     if (window.closed) return;
 
+    if (!allowBlankFallback) return;
+
     setTimeout(() => {
       if (window.closed) return;
       try { location.replace('about:blank'); } catch {}
@@ -107,7 +121,15 @@
     }, 350);
   }
 
-  function triggerForceClose(reason = '') {
+  function triggerForceClose(reason = '', options = {}) {
+    if (options.requireHidden === true && isFrontVisibleTab()) {
+      if (!state.closeSkippedAfterContinue) {
+        state.closeSkippedAfterContinue = true;
+        log(options.skipReason || 'Close skipped because APEX is still the front tab.');
+      }
+      return;
+    }
+
     if (!state.forceCloseTriggered) {
       state.forceCloseTriggered = true;
       if (reason) log(reason);
@@ -115,13 +137,13 @@
 
     state.forceCloseAttempts += 1;
     log(`Force-close attempt ${state.forceCloseAttempts}/${CFG.maxCloseAttempts}`);
-    tryCloseCurrentTab();
+    tryCloseCurrentTab({ allowBlankFallback: options.allowBlankFallback === true });
 
     if (state.forceCloseAttempts >= CFG.maxCloseAttempts) return;
 
     setTimeout(() => {
       if (window.closed) return;
-      triggerForceClose('');
+      triggerForceClose('', options);
     }, CFG.forceCloseRetryMs);
   }
 
@@ -961,9 +983,13 @@
       markDoneThisLoad();
       setStatus('Done this load');
       try { clearInterval(state.tickTimer); } catch {}
-      log(`Waiting ${Math.ceil(CFG.afterContinueBeforeCloseMs / 1000)} seconds before closing APEX tab...`);
+      log(`Waiting ${Math.ceil(CFG.afterContinueBeforeCloseMs / 1000)} seconds before safe APEX close check...`);
       await sleep(CFG.afterContinueBeforeCloseMs);
-      triggerForceClose('Continue New Quote clicked. Closing APEX tab.');
+      triggerForceClose('Continue New Quote clicked. Closing APEX tab.', {
+        requireHidden: CFG.closeAfterContinueOnlyWhenHidden,
+        allowBlankFallback: CFG.allowBlankCloseFallback,
+        skipReason: 'Close skipped: APEX is still the front tab after Continue New Quote, so leaving it open instead of closing/blanking the active page.'
+      });
     } catch (err) {
       log(`Error: ${err?.message || err}`);
       setStatus('Error');
