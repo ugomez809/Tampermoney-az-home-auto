@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.12
+// @version      2.3.13
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.12';
+  const VERSION = '2.3.13';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -132,7 +132,8 @@
     pausedAtMs: 0,
     frozenElapsedMs: 0,
     timeoutDispatchInFlightKey: '',
-    selectorSkipLogKeys: new Map()
+    selectorSkipLogKeys: new Map(),
+    last360ValueLogKeys: new Set()
   };
 
   boot();
@@ -3495,76 +3496,93 @@
     return /360\s*value|360-value|360value|div360value|iv360|rule_360value_frame/.test(haystack);
   }
 
-  function get360ValueMarkerMatchText(doc, el, matchedSelector) {
-    const directText = getVisibleElementLogText(el, 600);
-    if (directText) return directText;
+  function log360ValueOnce(kind, message) {
+    const key = [
+      kind,
+      state.current.azId,
+      state.current.submission,
+      state.current.header
+    ].map(normalizeText).join('|');
+    if (state.last360ValueLogKeys.has(key)) return;
+    state.last360ValueLogKeys.add(key);
+    log(message);
+  }
 
-    const continueEl = queryAllDeep(doc, '#iv360-continue, button, [role="button"], a')
-      .find((node) => normalizeText(node?.textContent || node?.getAttribute?.('title') || '').toLowerCase() === 'continue');
-    const continueText = continueEl ? normalizeText(continueEl.textContent || continueEl.getAttribute?.('title') || 'Continue') : '';
+  function build360ValueRuleFailure(selector, reason, element = null, matchedText = '') {
+    const meta = buildElementLogMeta(element);
+    return {
+      ok: false,
+      reason,
+      selector,
+      element: element instanceof Element ? element : null,
+      matchedText: normalizeText(matchedText || meta.text || ''),
+      elementTag: meta.tag,
+      elementId: meta.id,
+      elementClass: meta.className
+    };
+  }
 
-    let initFound = false;
-    for (const script of queryAllDeep(doc, 'script')) {
-      const scriptText = normalizeText(script.textContent || '');
-      if (/_360Value\.init/i.test(scriptText) && /div360Value/i.test(scriptText)) {
-        initFound = true;
-        break;
-      }
+  function find360ValueResultsMarker(doc) {
+    const marker = queryAllDeep(doc, '#iv360-results, #iv360-ercValue, #iv360-finish')[0];
+    if (marker) return marker;
+
+    const bodyText = normalizeText(doc?.body?.innerText || doc?.body?.textContent || '');
+    if (/estimated reconstruction cost/i.test(bodyText)) {
+      return doc.body || doc.documentElement || null;
     }
+    return null;
+  }
 
-    return [
-      '360Value detected',
-      matchedSelector ? `selector ${matchedSelector}` : '',
-      continueText ? `text ${continueText}` : '',
-      initFound ? '_360Value.init elementId div360Value' : ''
-    ].filter(Boolean).join(' | ');
+  function find360ValueContinueMarker(doc) {
+    return queryAllDeep(doc, '#iv360-continue')[0] || null;
+  }
+
+  function get360ValueContinueMatchText(el) {
+    const directText = getVisibleElementLogText(el, 600);
+    return normalizeText(directText || el?.textContent || el?.getAttribute?.('title') || 'Continue') || 'Continue';
   }
 
   function find360ValueDocumentMatch(rule, selector) {
     if (!is360ValueRule(rule, selector)) return null;
 
-    const markerSelectors = [
-      '#div360Value',
-      'iv360-valuation',
-      '#iv360-continue'
-    ];
-
+    let continueMarker = null;
     for (const doc of getAllDocs()) {
-      for (const markerSelector of markerSelectors) {
-        const node = queryAllDeep(doc, markerSelector)[0];
-        if (!node) continue;
-        const meta = buildElementLogMeta(node);
-        return {
-          ok: true,
-          reason: '',
+      const resultsMarker = find360ValueResultsMarker(doc);
+      if (resultsMarker) {
+        log360ValueOnce('results-suppressed', '360Value Results page detected — close suppressed');
+        log360ValueOnce('rule-skipped-results', '360Value rule skipped because completed results page is present');
+        return build360ValueRuleFailure(
           selector,
-          element: node,
-          matchedText: get360ValueMarkerMatchText(doc, node, markerSelector),
-          elementTag: meta.tag,
-          elementId: meta.id,
-          elementClass: meta.className
-        };
+          '360Value rule skipped because completed results page is present',
+          resultsMarker,
+          '360Value Results page detected'
+        );
       }
 
-      for (const script of queryAllDeep(doc, 'script')) {
-        const scriptText = normalizeText(script.textContent || '');
-        if (!/_360Value\.init/i.test(scriptText) || !/div360Value/i.test(scriptText)) continue;
-        const fallbackElement = doc.body || doc.documentElement;
-        const meta = buildElementLogMeta(fallbackElement);
-        return {
-          ok: true,
-          reason: '',
-          selector,
-          element: fallbackElement,
-          matchedText: '360Value detected | _360Value.init elementId div360Value',
-          elementTag: meta.tag,
-          elementId: meta.id,
-          elementClass: meta.className
-        };
-      }
+      if (!continueMarker) continueMarker = find360ValueContinueMarker(doc);
     }
 
-    return null;
+    if (!continueMarker) {
+      return build360ValueRuleFailure(
+        selector,
+        '360Value Continue page not detected',
+        null,
+        ''
+      );
+    }
+
+    log360ValueOnce('bad-continue', '360Value bad/stuck Continue page detected');
+    const meta = buildElementLogMeta(continueMarker);
+    return {
+      ok: true,
+      reason: '',
+      selector,
+      element: continueMarker,
+      matchedText: get360ValueContinueMatchText(continueMarker),
+      elementTag: meta.tag,
+      elementId: meta.id,
+      elementClass: meta.className
+    };
   }
 
   function findRuleMatch(rule) {
@@ -3583,7 +3601,7 @@
     }
 
     const special360Match = find360ValueDocumentMatch(rule, selector);
-    if (special360Match?.ok) return special360Match;
+    if (special360Match) return special360Match;
 
     let bestFailure = null;
     let sawNodes = false;
