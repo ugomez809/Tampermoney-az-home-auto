@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.8
-// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once only. Runs once per page load and uses a safe close guard after handoff.
+// @version      1.8.9
+// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once with a manual-like click, then use a safe close guard after handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.8';
+  const VERSION = '1.8.9';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -792,15 +792,41 @@
       'button, a, [role="button"], input[type="button"], input[type="submit"], [tabindex]',
       scope
     );
+    const matches = [];
 
     for (const el of clickableCandidates) {
       if (!isVisible(el) || isDisabled(el)) continue;
       const label = getLabel(el);
-      if (/^Continue New Quote$/i.test(label)) return el;
-      if (/\bContinue New Quote\b/i.test(label)) return el;
+      if (!/\bContinue New Quote\b/i.test(label)) continue;
+
+      const rect = el.getBoundingClientRect();
+      const exact = /^Continue New Quote$/i.test(label) ? 1000 : 0;
+      const isButton = el.matches('button, input[type="button"], input[type="submit"]') ? 300 : 0;
+      const isRoleButton = el.getAttribute('role') === 'button' ? 200 : 0;
+      const hasSldsButton = el.classList?.contains('slds-button') ? 100 : 0;
+      const areaPenalty = Math.min(250, Math.round((rect.width * rect.height) / 1000));
+      matches.push({
+        el,
+        score: exact + isButton + isRoleButton + hasSldsButton - areaPenalty
+      });
     }
 
-    return null;
+    matches.sort((a, b) => b.score - a.score);
+    return matches[0]?.el || null;
+  }
+
+  function describeClickTarget(el) {
+    if (!el || !(el instanceof Element)) return '(none)';
+    const rect = el.getBoundingClientRect();
+    const classes = Array.from(el.classList || []).slice(0, 5).join('.');
+    return [
+      String(el.tagName || '').toLowerCase(),
+      el.id ? `#${el.id}` : '',
+      classes ? `.${classes}` : '',
+      `role=${el.getAttribute('role') || ''}`,
+      `label="${getLabel(el)}"`,
+      `rect=${Math.round(rect.width)}x${Math.round(rect.height)}`
+    ].filter(Boolean).join(' ');
   }
 
   function getElementClickSignature(el) {
@@ -876,6 +902,46 @@
       button: 0
     };
 
+    try { el.dispatchEvent(new PointerEvent('pointerdown', pointerInit)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', mouseInit)); } catch {}
+    try { el.dispatchEvent(new PointerEvent('pointerup', pointerInit)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', mouseInit)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('click', mouseInit)); } catch {}
+
+    return true;
+  }
+
+  function manualLikeClickOnce(el, reason = '') {
+    if (!el) return false;
+    if (shouldBlockDuplicateElementClick(el, reason)) return false;
+
+    const { clientX, clientY } = prepareForClick(el);
+
+    const mouseInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0
+    };
+
+    const pointerInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+      clientX,
+      clientY,
+      button: 0
+    };
+
+    try { el.dispatchEvent(new PointerEvent('pointerover', pointerInit)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseover', mouseInit)); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousemove', mouseInit)); } catch {}
     try { el.dispatchEvent(new PointerEvent('pointerdown', pointerInit)); } catch {}
     try { el.dispatchEvent(new MouseEvent('mousedown', mouseInit)); } catch {}
     try { el.dispatchEvent(new PointerEvent('pointerup', pointerInit)); } catch {}
@@ -969,8 +1035,8 @@
         return;
       }
 
-      log(`Clicking Continue New Quote: ${getLabel(continueBtn) || continueBtn.tagName}`);
-      const continueClicked = nativeClickOnce(continueBtn, 'Continue New Quote');
+      log(`Clicking Continue New Quote target: ${describeClickTarget(continueBtn)}`);
+      const continueClicked = manualLikeClickOnce(continueBtn, 'Continue New Quote');
 
       if (!continueClicked) {
         log(`Continue click was blocked/skipped for: ${quoteKey}`);
