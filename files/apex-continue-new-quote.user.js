@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.9
-// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait, then click Continue New Quote once with a manual-like click, then use a safe close guard after handoff.
+// @version      1.8.10
+// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait for Continue New Quote readiness, then confirm handoff before safe close.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.9';
+  const VERSION = '1.8.10';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -45,9 +45,14 @@
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
-    afterResidenceBeforeContinueMs: 1000,
+    afterResidenceBeforeContinueMs: 3000,
     afterContinueClickMs: 1200,
     afterContinueBeforeCloseMs: 5000,
+    continueReadyTimeoutMs: 20000,
+    continueReadyStableMs: 1800,
+    continueHandoffTimeoutMs: 20000,
+    continueRetryDelayMs: 1200,
+    continueClickAttempts: 3,
 
     residenceRadioAttempts: 3,
     maxLogLines: 16,
@@ -815,6 +820,178 @@
     return matches[0]?.el || null;
   }
 
+  function hasVisibleLoadingIndicator(scope = document) {
+    const candidates = deepQueryAll([
+      'lightning-spinner',
+      '.slds-spinner',
+      '.slds-spinner_container',
+      '[role="status"][class*="spinner"]',
+      '[aria-busy="true"]'
+    ].join(','), scope);
+
+    return candidates.some(el => {
+      if (!isVisible(el)) return false;
+      if (el.closest?.('#hb-apex-continue-panel')) return false;
+      return true;
+    });
+  }
+
+  function isContinueButtonReady(el) {
+    if (!el || !isVisible(el) || isDisabled(el)) return false;
+    if (el.closest?.('[aria-busy="true"], .slds-is-loading')) return false;
+
+    const scope = getQuoteModal() || document;
+    if (hasVisibleLoadingIndicator(scope)) return false;
+
+    return true;
+  }
+
+  async function waitForContinueButtonReady() {
+    const startedAt = now();
+    let stableSince = 0;
+    let lastSig = '';
+
+    while (now() - startedAt < CFG.continueReadyTimeoutMs) {
+      const btn = getContinueButton();
+
+      if (!btn) {
+        stableSince = 0;
+        lastSig = '';
+        logWait('Waiting for Continue New Quote button...');
+        await sleep(CFG.waitIntervalMs);
+        continue;
+      }
+
+      const sig = getElementClickSignature(btn);
+      if (!isContinueButtonReady(btn)) {
+        stableSince = 0;
+        lastSig = sig;
+        logWait('Waiting for Continue New Quote to finish loading/enabling...');
+        await sleep(CFG.waitIntervalMs);
+        continue;
+      }
+
+      if (sig !== lastSig) {
+        lastSig = sig;
+        stableSince = now();
+      }
+
+      if (stableSince && now() - stableSince >= CFG.continueReadyStableMs) {
+        return btn;
+      }
+
+      logWait('Continue New Quote is ready; waiting for it to stay stable...');
+      await sleep(CFG.waitIntervalMs);
+    }
+
+    return getContinueButton();
+  }
+
+  function getCenterHitElement(el) {
+    if (!el) return null;
+    const { clientX, clientY } = prepareForClick(el);
+    const doc = el.ownerDocument || document;
+    try {
+      return doc.elementFromPoint(clientX, clientY);
+    } catch {
+      return null;
+    }
+  }
+
+  function uniqueElements(elements) {
+    const out = [];
+    const seen = new WeakSet();
+
+    for (const el of elements) {
+      if (!el || !(el instanceof Element)) continue;
+      if (seen.has(el)) continue;
+      seen.add(el);
+      out.push(el);
+    }
+
+    return out;
+  }
+
+  function getContinueClickTargets(btn) {
+    const hit = getCenterHitElement(btn);
+    const hitHost = getClickableHost(hit);
+    const hitButton = findAncestorAcrossRoots(hit, el => {
+      if (!(el instanceof Element)) return false;
+      return el.matches('button, a, [role="button"], input[type="button"], input[type="submit"]');
+    });
+
+    return uniqueElements([
+      hitButton,
+      hitHost,
+      btn,
+      hit
+    ]).filter(el => isVisible(el) && !isDisabled(el));
+  }
+
+  async function waitForContinueHandoff(startUrl) {
+    const startedAt = now();
+
+    while (now() - startedAt < CFG.continueHandoffTimeoutMs) {
+      if (document.visibilityState === 'hidden') {
+        return 'APEX moved to background';
+      }
+
+      if (location.href !== startUrl) {
+        return 'APEX URL changed';
+      }
+
+      const header = getQuoteHeader();
+      if (!header && !hasVisibleLoadingIndicator(document)) {
+        return 'Personal Lines Quote modal closed';
+      }
+
+      await sleep(CFG.waitIntervalMs);
+    }
+
+    return '';
+  }
+
+  async function clickContinueNewQuote(quoteKey) {
+    const startUrl = location.href;
+
+    for (let attempt = 1; attempt <= CFG.continueClickAttempts; attempt++) {
+      const continueBtn = await waitForContinueButtonReady();
+      if (!continueBtn) {
+        log('Continue New Quote button missing.');
+        return false;
+      }
+
+      const targets = getContinueClickTargets(continueBtn);
+      const target = targets[Math.min(attempt - 1, Math.max(0, targets.length - 1))] || continueBtn;
+      const reason = `Continue New Quote attempt ${attempt}/${CFG.continueClickAttempts}`;
+
+      log(`Clicking ${reason}: ${describeClickTarget(target)}`);
+
+      const clicked =
+        attempt === CFG.continueClickAttempts
+          ? nativeClickOnce(target, reason, { allowRepeat: true })
+          : manualLikeClickOnce(target, reason, { allowRepeat: true });
+
+      if (!clicked) {
+        log(`Continue click was blocked/skipped for: ${quoteKey}`);
+        await sleep(CFG.continueRetryDelayMs);
+        continue;
+      }
+
+      const handoff = await waitForContinueHandoff(startUrl);
+      if (handoff) {
+        log(`Continue New Quote handoff confirmed: ${handoff}`);
+        return true;
+      }
+
+      log(`Continue New Quote did not hand off after attempt ${attempt}; retrying if possible.`);
+      await sleep(CFG.continueRetryDelayMs);
+    }
+
+    log(`Continue New Quote never confirmed handoff for: ${quoteKey}`);
+    return false;
+  }
+
   function describeClickTarget(el) {
     if (!el || !(el instanceof Element)) return '(none)';
     const rect = el.getBoundingClientRect();
@@ -911,9 +1088,9 @@
     return true;
   }
 
-  function manualLikeClickOnce(el, reason = '') {
+  function manualLikeClickOnce(el, reason = '', options = {}) {
     if (!el) return false;
-    if (shouldBlockDuplicateElementClick(el, reason)) return false;
+    if (options.allowRepeat !== true && shouldBlockDuplicateElementClick(el, reason)) return false;
 
     const { clientX, clientY } = prepareForClick(el);
 
@@ -951,9 +1128,9 @@
     return true;
   }
 
-  function nativeClickOnce(el, reason = '') {
+  function nativeClickOnce(el, reason = '', options = {}) {
     if (!el) return false;
-    if (shouldBlockDuplicateElementClick(el, reason)) return false;
+    if (options.allowRepeat !== true && shouldBlockDuplicateElementClick(el, reason)) return false;
 
     prepareForClick(el);
 
@@ -1025,21 +1202,12 @@
         return;
       }
 
-      log('Waiting 1 second after Residence Address click...');
+      log(`Waiting ${Math.ceil(CFG.afterResidenceBeforeContinueMs / 1000)} seconds before Continue New Quote readiness check...`);
       await sleep(CFG.afterResidenceBeforeContinueMs);
 
-      const continueBtn = getContinueButton();
-      if (!continueBtn) {
-        log('Continue New Quote button missing.');
-        setStatus('Running');
-        return;
-      }
-
-      log(`Clicking Continue New Quote target: ${describeClickTarget(continueBtn)}`);
-      const continueClicked = manualLikeClickOnce(continueBtn, 'Continue New Quote');
+      const continueClicked = await clickContinueNewQuote(quoteKey);
 
       if (!continueClicked) {
-        log(`Continue click was blocked/skipped for: ${quoteKey}`);
         setStatus('Running');
         return;
       }
