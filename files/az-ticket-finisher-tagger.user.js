@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.47
+// @version      1.0.48
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.47';
+  const VERSION = '1.0.48';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -121,6 +121,9 @@
     closeAttempts: 4,
     stalePayloadSlackMs: 1500,
     payloadMismatchFailMs: 20 * 1000,
+    minTicketOpenBeforeCloseMs: 5000,
+    minMainClickBeforeCloseMs: 5000,
+    launcherDataMissingFailMs: 20 * 1000,
     maxLogLines: 90,
     zIndex: 2147483647,
     panelWidth: 360,
@@ -151,7 +154,19 @@
     waitingTicketMismatchKey: '',
     waitingTicketMismatchSince: 0,
     waitingTicketMismatchTriggeredKey: '',
+    launcherDataMissingKey: '',
+    launcherDataMissingSince: 0,
+    launcherDataMissingTriggeredKey: '',
+    rejectedFinalPayloadKey: '',
+    rejectedFinalPayloadSince: 0,
+    rejectedFinalPayloadReason: '',
+    rejectedFinalPayloadTriggeredKey: '',
+    lastFinalPayloadRejectLogKey: '',
     lastMissingPayloadTriggerLogKey: '',
+    openTicketId: '',
+    openTicketOpenedAt: 0,
+    lastMainClickedTicketId: '',
+    lastMainClickedAt: 0,
     frontSession: 1,
     wasFrontActive: isFrontActive(),
     completedFrontRunKeys: new Set(),
@@ -576,6 +591,30 @@
     state.waitingTicketMismatchTriggeredKey = '';
   }
 
+  function resetLauncherDataMissing() {
+    state.launcherDataMissingKey = '';
+    state.launcherDataMissingSince = 0;
+    state.launcherDataMissingTriggeredKey = '';
+  }
+
+  function updateOpenTicketTracking(openTicket) {
+    const openId = norm(openTicket?.ticketId || '');
+    if (!openId) {
+      state.openTicketId = '';
+      state.openTicketOpenedAt = 0;
+      resetLauncherDataMissing();
+      return;
+    }
+
+    if (state.openTicketId !== openId) {
+      state.openTicketId = openId;
+      state.openTicketOpenedAt = Date.now();
+      resetWaitingTicketMismatch();
+      resetLauncherDataMissing();
+      log(`Open ticket tracked | ${openId}`);
+    }
+  }
+
   function getWaitingTicketMismatchState(openTicketId, targetTicketId) {
     const openId = norm(openTicketId || '');
     const targetId = norm(targetTicketId || '');
@@ -618,6 +657,70 @@
       targetTicketId: targetId,
       elapsedMs,
       remainingMs: Math.max(0, CFG.payloadMismatchFailMs - elapsedMs)
+    };
+  }
+
+  function getRejectedFinalPayloadState(openTicketId) {
+    const openId = norm(openTicketId || '');
+    if (!openId || !state.rejectedFinalPayloadKey.startsWith(`${openId}|`)) {
+      return { active: false, ready: false };
+    }
+
+    const since = Number(state.rejectedFinalPayloadSince || 0);
+    if (!since) return { active: false, ready: false };
+
+    const elapsedMs = Math.max(0, Date.now() - since);
+    const ready = elapsedMs >= CFG.payloadMismatchFailMs;
+    if (ready && state.rejectedFinalPayloadTriggeredKey !== state.rejectedFinalPayloadKey) {
+      state.rejectedFinalPayloadTriggeredKey = state.rejectedFinalPayloadKey;
+      log(`Rejected final payload held for ${Math.round(elapsedMs / 1000)}s; running failed path for open ticket ${openId} | ${state.rejectedFinalPayloadReason}`);
+    }
+
+    return {
+      active: true,
+      ready,
+      openTicketId: openId,
+      reason: state.rejectedFinalPayloadReason,
+      elapsedMs,
+      remainingMs: Math.max(0, CFG.payloadMismatchFailMs - elapsedMs)
+    };
+  }
+
+  function getLauncherDataMissingState(openTicketId) {
+    const openId = norm(openTicketId || '');
+    if (!openId || !isFrontActive()) {
+      resetLauncherDataMissing();
+      return { active: false, ready: false };
+    }
+
+    const currentJob = getBestCurrentJobForAz(openId);
+    if (currentJob) {
+      resetLauncherDataMissing();
+      return { active: false, ready: false };
+    }
+
+    const key = `launcher-missing|${openId}`;
+    const now = Date.now();
+    if (state.launcherDataMissingKey !== key) {
+      state.launcherDataMissingKey = key;
+      state.launcherDataMissingSince = now;
+      state.launcherDataMissingTriggeredKey = '';
+      log(`Launcher data missing for open ticket ${openId}; waiting before failed path`);
+    }
+
+    const elapsedMs = Math.max(0, now - state.launcherDataMissingSince);
+    const ready = elapsedMs >= CFG.launcherDataMissingFailMs;
+    if (ready && state.launcherDataMissingTriggeredKey !== key) {
+      state.launcherDataMissingTriggeredKey = key;
+      log(`Launcher data missing for ${Math.round(elapsedMs / 1000)}s; running failed path for open ticket ${openId}`);
+    }
+
+    return {
+      active: true,
+      ready,
+      openTicketId: openId,
+      elapsedMs,
+      remainingMs: Math.max(0, CFG.launcherDataMissingFailMs - elapsedMs)
     };
   }
 
@@ -951,6 +1054,35 @@
     return Number.isFinite(ms) ? ms : 0;
   }
 
+  function getSignalSavedMs(signal) {
+    const candidates = [
+      signal?.savedAt,
+      signal?.updatedAt,
+      signal?.requestedAt,
+      signal?.sentAt
+    ];
+
+    for (const value of candidates) {
+      const ms = Date.parse(norm(value || ''));
+      if (Number.isFinite(ms)) return ms;
+    }
+
+    return 0;
+  }
+
+  function chooseBetterReadySignal(localReady, gmReady) {
+    const localOk = isPlainObject(localReady) && (localReady.ready === true || norm(localReady.azId || localReady.ticketId || ''));
+    const gmOk = isPlainObject(gmReady) && (gmReady.ready === true || norm(gmReady.azId || gmReady.ticketId || ''));
+    if (localOk && !gmOk) return localReady;
+    if (!localOk && gmOk) return gmReady;
+    if (!localOk && !gmOk) return null;
+
+    const localMs = getSignalSavedMs(localReady);
+    const gmMs = getSignalSavedMs(gmReady);
+    if (localMs && gmMs && localMs !== gmMs) return localMs > gmMs ? localReady : gmReady;
+    return localReady;
+  }
+
   function getBestCurrentJobForAz(azId) {
     const wantedAzId = norm(azId || '');
     if (!wantedAzId) return null;
@@ -983,7 +1115,87 @@
     const currentJobMs = getCurrentJobUpdatedMs(currentJob);
     if (!currentJobMs) return false;
     if (!payloadSavedMs) return true;
-    return false;
+    return (payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs;
+  }
+
+  function logFinalPayloadRejected(azId, reason, details = {}) {
+    const cleanAzId = norm(azId || '');
+    const key = [
+      cleanAzId,
+      reason,
+      details.payloadSavedMs || 0,
+      details.readySavedMs || 0,
+      details.currentJobMs || 0
+    ].join('|');
+
+    const rejectedKey = cleanAzId ? `${cleanAzId}|${reason}` : reason;
+    if (!state.rejectedFinalPayloadSince || state.rejectedFinalPayloadKey !== rejectedKey) {
+      state.rejectedFinalPayloadSince = Date.now();
+    }
+    state.rejectedFinalPayloadKey = rejectedKey;
+    state.rejectedFinalPayloadReason = reason;
+
+    if (state.lastFinalPayloadRejectLogKey === key) return;
+    state.lastFinalPayloadRejectLogKey = key;
+
+    const parts = [];
+    if (details.payloadSavedMs) parts.push(`payload=${new Date(details.payloadSavedMs).toISOString()}`);
+    if (details.readySavedMs) parts.push(`ready=${new Date(details.readySavedMs).toISOString()}`);
+    if (details.currentJobMs) parts.push(`launcher=${new Date(details.currentJobMs).toISOString()}`);
+    log(`Final payload rejected for AZ ${cleanAzId || '(unknown)'}: ${reason}${parts.length ? ` | ${parts.join(' | ')}` : ''}`);
+  }
+
+  function clearRejectedFinalPayloadState() {
+    state.rejectedFinalPayloadKey = '';
+    state.rejectedFinalPayloadSince = 0;
+    state.rejectedFinalPayloadReason = '';
+    state.rejectedFinalPayloadTriggeredKey = '';
+  }
+
+  function validateFinalPayloadForActiveLauncher(payload, readyLike, azId) {
+    const cleanAzId = norm(azId || '');
+    const readyAzId = norm(readyLike?.azId || readyLike?.ticketId || '');
+    const readySavedMs = getSignalSavedMs(readyLike);
+    const payloadSavedMs = getPayloadSavedMs(payload);
+    const currentJob = getBestCurrentJobForAz(cleanAzId);
+    const currentJobMs = getCurrentJobUpdatedMs(currentJob);
+
+    if (!readyLike || readyLike.ready !== true) {
+      return { ok: false, reason: 'final ready flag missing', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if (readyAzId && readyAzId !== cleanAzId) {
+      return { ok: false, reason: `final ready flag belongs to AZ ${readyAzId}`, payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if (!currentJob) {
+      return { ok: false, reason: 'active launcher current job missing', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if (!currentJobMs) {
+      return { ok: false, reason: 'active launcher current job timestamp missing', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if (!payloadSavedMs) {
+      return { ok: false, reason: 'final payload timestamp missing', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if ((payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
+      return { ok: false, reason: 'stored final payload is older than active launcher job', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    if (readySavedMs && (readySavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
+      return { ok: false, reason: 'final ready flag is older than active launcher job', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
+    return {
+      ok: true,
+      currentJob,
+      currentJobMs,
+      payloadSavedMs,
+      readySavedMs,
+      minSavedMs: Math.max(0, currentJobMs - CFG.stalePayloadSlackMs)
+    };
   }
 
   function countFilledKeys(value, keys) {
@@ -1064,23 +1276,30 @@
     if (!isPlainObject(payload)) return null;
     const localReady = readLocalOnly(GM_KEYS.finalReady, null);
     const gmReady = readGmOnly(GM_KEYS.finalReady, null);
-    const ready = isPlainObject(localReady) && (localReady.ready === true || norm(localReady.azId || '')) ? localReady : gmReady;
+    const ready = chooseBetterReadySignal(localReady, gmReady);
     const readyLike = isPlainObject(ready) ? ready : {};
     const readyOk = readyLike.ready === true;
     const azId = norm(payload.azId || readyLike.azId || '');
     const savedAt = norm(payload.savedAt || readyLike.savedAt || '');
     const payloadSavedMs = getPayloadSavedMs(payload);
     if (!azId) return null;
-    if (isPayloadStaleForCurrentJob(azId, payloadSavedMs)) return null;
+    const validation = validateFinalPayloadForActiveLauncher(payload, readyLike, azId);
+    if (!validation.ok) {
+      logFinalPayloadRejected(azId, validation.reason, validation);
+      return null;
+    }
+
+    clearRejectedFinalPayloadState();
     return {
-      ready: readyOk ? readyLike : {
-        ready: true,
-        azId,
-        savedAt
-      },
+      ready: readyOk ? readyLike : { ready: true, azId, savedAt },
       payload,
       azId,
-      payloadKey: `${azId}|${savedAt}`
+      payloadKey: `${azId}|${savedAt}`,
+      payloadSavedMs,
+      currentJob: validation.currentJob,
+      currentJobMs: validation.currentJobMs,
+      readySavedMs: validation.readySavedMs,
+      minSavedMs: validation.minSavedMs
     };
   }
 
@@ -1272,7 +1491,7 @@
 
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
-    const minSavedMs = 0;
+    const minSavedMs = Number(finalPayload.minSavedMs || finalPayload.currentJobMs || 0) || 0;
     const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
       { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
@@ -1603,6 +1822,11 @@
     }
 
     showBootstrapTab(mainTab);
+    const openTicketId = norm(getOpenTicketInfo().ticketId || state.activeAzId || '');
+    if (openTicketId) {
+      state.lastMainClickedTicketId = openTicketId;
+      state.lastMainClickedAt = Date.now();
+    }
     log('Clicked: Main tab');
     await sleep(CFG.bigActionDelayMs);
 
@@ -2376,6 +2600,116 @@
     saveRuns(runs);
   }
 
+  function evaluateFinishCloseGate({ data, finalPayload, missingPayloadTriggerKey, forceRun }) {
+    const cleanAzId = norm(data?.azId || '');
+    const openTicket = getOpenTicketInfo();
+    const openId = norm(openTicket.ticketId || '');
+    const now = Date.now();
+
+    if (!cleanAzId) {
+      return { allowed: false, reason: 'AZ ID missing from workflow data', status: 'Close blocked: missing AZ ID', stopLoop: true };
+    }
+
+    if (!openId) {
+      return { allowed: false, reason: 'no open ticket drawer is available', status: 'Close blocked: no open ticket' };
+    }
+
+    if (openId !== cleanAzId) {
+      return { allowed: false, reason: `open ticket ${openId} does not match workflow AZ ${cleanAzId}`, status: 'Close blocked: ticket changed' };
+    }
+
+    const openAgeMs = state.openTicketId === cleanAzId && state.openTicketOpenedAt
+      ? now - state.openTicketOpenedAt
+      : Number.POSITIVE_INFINITY;
+    if (openAgeMs < CFG.minTicketOpenBeforeCloseMs) {
+      return {
+        allowed: false,
+        reason: `ticket was just opened ${Math.round(openAgeMs / 1000)}s ago`,
+        status: 'Close blocked: ticket just opened'
+      };
+    }
+
+    const mainAgeMs = state.lastMainClickedTicketId === cleanAzId && state.lastMainClickedAt
+      ? now - state.lastMainClickedAt
+      : Number.POSITIVE_INFINITY;
+    if (mainAgeMs < CFG.minMainClickBeforeCloseMs) {
+      return {
+        allowed: false,
+        reason: `Main tab was just clicked ${Math.round(mainAgeMs / 1000)}s ago`,
+        status: 'Close blocked: Main just clicked'
+      };
+    }
+
+    if (forceRun) {
+      return { allowed: true, reason: 'manual force run requested' };
+    }
+
+    if (data?.missingPayloadFallback) {
+      if (norm(missingPayloadTriggerKey || '')) {
+        return { allowed: true, reason: `confirmed failed/missing payload path (${missingPayloadTriggerKey})` };
+      }
+      return {
+        allowed: false,
+        reason: 'missing payload fallback has no current launcher trigger key',
+        status: 'Close blocked: missing launcher failure trigger',
+        stopLoop: true
+      };
+    }
+
+    if (!isPlainObject(finalPayload)) {
+      return {
+        allowed: false,
+        reason: 'final payload object missing at close gate',
+        status: 'Close blocked: final payload missing',
+        stopLoop: true
+      };
+    }
+
+    if (norm(finalPayload.azId || '') !== cleanAzId) {
+      return {
+        allowed: false,
+        reason: `final payload belongs to ${norm(finalPayload.azId || '') || '(blank)'}`,
+        status: 'Close blocked: payload mismatch',
+        stopLoop: true
+      };
+    }
+
+    const currentJobMs = Number(finalPayload.currentJobMs || 0);
+    const payloadSavedMs = Number(finalPayload.payloadSavedMs || 0);
+
+    if (!currentJobMs) {
+      return {
+        allowed: false,
+        reason: 'active launcher current job timestamp missing at close gate',
+        status: 'Close blocked: launcher data missing',
+        stopLoop: true
+      };
+    }
+
+    if (!payloadSavedMs) {
+      return {
+        allowed: false,
+        reason: 'final payload timestamp missing at close gate',
+        status: 'Close blocked: payload timestamp missing',
+        stopLoop: true
+      };
+    }
+
+    if ((payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
+      return {
+        allowed: false,
+        reason: `stored final payload is stale at close gate | payload=${new Date(payloadSavedMs).toISOString()} | launcher=${new Date(currentJobMs).toISOString()}`,
+        status: 'Close blocked: stale payload',
+        stopLoop: true
+      };
+    }
+
+    return {
+      allowed: true,
+      reason: `active launcher job confirmed | payload=${new Date(payloadSavedMs).toISOString()} | launcher=${new Date(currentJobMs).toISOString()}`
+    };
+  }
+
   async function fillTicketFields(data, runRecord, forceRun) {
     const targets = getFieldTargets();
     let changed = false;
@@ -2569,6 +2903,23 @@
       );
 
       if (runRecord.fieldsUpdatedAt && noteComplete && tagComplete) {
+        const closeGate = evaluateFinishCloseGate({ data, finalPayload, missingPayloadTriggerKey, forceRun });
+        if (!closeGate.allowed) {
+          runRecord.closeBlockedAt = nowIso();
+          runRecord.closeBlockedReason = closeGate.reason;
+          saveRunRecord(runs, data.azId, runRecord);
+          setStatus(closeGate.status || 'Close blocked');
+          log(`Close blocked for AZ ${data.azId}: ${closeGate.reason}`);
+          if (closeGate.stopLoop) {
+            state.running = false;
+            saveRunning(false);
+            setStatus('Stopped: missing launcher data');
+            log(`Finisher stopped for AZ ${data.azId}: required launcher/final data missing or stale`);
+          }
+          return;
+        }
+
+        log(`Close allowed for AZ ${data.azId}: ${closeGate.reason}`);
         setStatus('Closing ticket');
         await sleep(CFG.actionSettleMs);
 
@@ -2582,6 +2933,8 @@
         }
 
         delete runRecord.closeFailedAt;
+        delete runRecord.closeBlockedAt;
+        delete runRecord.closeBlockedReason;
         runRecord.completedAt = nowIso();
         runRecord.payloadSavedAt = data.payloadSavedAt;
         if (data.missingPayloadFallback) {
@@ -2621,11 +2974,18 @@
     }
 
     const openTicket = getOpenTicketInfo();
+    updateOpenTicketTracking(openTicket);
     const missingPayloadTrigger = getActiveMissingPayloadTrigger(openTicket.ticketId);
     const finalPayload = missingPayloadTrigger ? null : getFinalPayload();
     const mismatchWait = missingPayloadTrigger
       ? { active: false, ready: false }
       : getWaitingTicketMismatchState(openTicket.ticketId, finalPayload?.azId || '');
+    const rejectedFinalPayload = missingPayloadTrigger || finalPayload
+      ? { active: false, ready: false }
+      : getRejectedFinalPayloadState(openTicket.ticketId);
+    const launcherDataMissing = missingPayloadTrigger || finalPayload || rejectedFinalPayload.active
+      ? { active: false, ready: false }
+      : getLauncherDataMissingState(openTicket.ticketId);
     let workflowPayload = finalPayload;
     let mismatchMissingPayloadTriggerKey = '';
     let fallbackTicketId = missingPayloadTrigger
@@ -2647,6 +3007,22 @@
       workflowPayload = null;
       fallbackTicketId = mismatchWait.openTicketId || openTicket.ticketId;
       mismatchMissingPayloadTriggerKey = `payload-mismatch|${fallbackTicketId}|mirrored-${mismatchWait.targetTicketId}|front-session-${state.frontSession}`;
+    } else if (rejectedFinalPayload.active && !rejectedFinalPayload.ready) {
+      setStatus(`Rejected stale final payload (${Math.ceil(rejectedFinalPayload.remainingMs / 1000)}s before failed path)`);
+      renderAll();
+      return;
+    } else if (rejectedFinalPayload.active && rejectedFinalPayload.ready) {
+      workflowPayload = null;
+      fallbackTicketId = rejectedFinalPayload.openTicketId || openTicket.ticketId;
+      mismatchMissingPayloadTriggerKey = `rejected-final-payload|${fallbackTicketId}|${norm(rejectedFinalPayload.reason || 'stale-final')}`;
+    } else if (launcherDataMissing.active && !launcherDataMissing.ready) {
+      setStatus(`Waiting for launcher data (${Math.ceil(launcherDataMissing.remainingMs / 1000)}s before failed path)`);
+      renderAll();
+      return;
+    } else if (launcherDataMissing.active && launcherDataMissing.ready) {
+      workflowPayload = null;
+      fallbackTicketId = launcherDataMissing.openTicketId || openTicket.ticketId;
+      mismatchMissingPayloadTriggerKey = `missing-launcher-data|${fallbackTicketId}|front-session-${state.frontSession}`;
     }
 
     if (!missingPayloadTrigger && (!openTicket.ticketId || (finalPayload && openTicket.ticketId === norm(finalPayload.azId || '')))) {
