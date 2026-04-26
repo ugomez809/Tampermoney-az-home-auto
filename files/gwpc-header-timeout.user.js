@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.11
+// @version      2.3.12
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.11';
+  const VERSION = '2.3.12';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -856,6 +856,7 @@
   function logSelectorRuleMatchReady(context, rule, matchInfo) {
     const ruleLabel = getRuleLogLabel(rule);
     const meta = buildElementLogMeta(matchInfo?.element);
+    const matchedText = normalizeText(matchInfo?.matchedText || meta.text || '');
     const sentError = normalizeText(rule?.savedErrorText || rule?.errorText || '');
     const header = normalizeText(context?.header || '');
     const product = normalizeText(context?.product || '');
@@ -868,7 +869,7 @@
       `Selector rule matched | ruleId=${normalizeText(rule?.ruleId || '')} | label=${quoteLogValue(ruleLabel, 160)} | ` +
       `sentError=${quoteLogValue(sentError, 280)} | selector=${quoteLogValue(selector, 260)} | ` +
       `matchedTag=${quoteLogValue(meta.tag, 80)} | matchedClass=${quoteLogValue(meta.className, 160)} | matchedId=${quoteLogValue(meta.id, 120)} | ` +
-      `matchedText=${quoteLogValue(meta.text, 320)} | header=${quoteLogValue(header, 120)} | ` +
+      `matchedText=${quoteLogValue(matchedText, 320)} | header=${quoteLogValue(header, 120)} | ` +
       `product=${quoteLogValue(product, 60)} | stage=${quoteLogValue(stage, 120)} | AZ ID=${quoteLogValue(azId, 80)} | submission=${quoteLogValue(submission, 80)}`
     );
   }
@@ -893,6 +894,29 @@
 
     walk(window);
     return docs;
+  }
+
+  function queryAllDeep(root, selector) {
+    const out = [];
+    const seenRoots = new Set();
+
+    function scan(searchRoot) {
+      if (!searchRoot || seenRoots.has(searchRoot)) return;
+      seenRoots.add(searchRoot);
+
+      try {
+        out.push(...Array.from(searchRoot.querySelectorAll(selector)));
+      } catch {}
+
+      let descendants = [];
+      try { descendants = Array.from(searchRoot.querySelectorAll('*')); } catch {}
+      for (const el of descendants) {
+        if (el?.shadowRoot) scan(el.shadowRoot);
+      }
+    }
+
+    scan(root);
+    return out;
   }
 
   function firstVisibleTextBySelectors(selectors) {
@@ -3453,6 +3477,96 @@
     };
   }
 
+  function is360ValueRule(rule, selector = '') {
+    const fingerprint = isPlainObject(rule?.fingerprint) ? rule.fingerprint : {};
+    const haystack = [
+      selector,
+      rule?.ruleId,
+      rule?.id,
+      rule?.label,
+      rule?.errorName,
+      rule?.savedErrorText,
+      rule?.errorText,
+      fingerprint?.id,
+      fingerprint?.tag,
+      fingerprint?.textFingerprint
+    ].map(normalizeText).join(' ').toLowerCase();
+
+    return /360\s*value|360-value|360value|div360value|iv360|rule_360value_frame/.test(haystack);
+  }
+
+  function get360ValueMarkerMatchText(doc, el, matchedSelector) {
+    const directText = getVisibleElementLogText(el, 600);
+    if (directText) return directText;
+
+    const continueEl = queryAllDeep(doc, '#iv360-continue, button, [role="button"], a')
+      .find((node) => normalizeText(node?.textContent || node?.getAttribute?.('title') || '').toLowerCase() === 'continue');
+    const continueText = continueEl ? normalizeText(continueEl.textContent || continueEl.getAttribute?.('title') || 'Continue') : '';
+
+    let initFound = false;
+    for (const script of queryAllDeep(doc, 'script')) {
+      const scriptText = normalizeText(script.textContent || '');
+      if (/_360Value\.init/i.test(scriptText) && /div360Value/i.test(scriptText)) {
+        initFound = true;
+        break;
+      }
+    }
+
+    return [
+      '360Value detected',
+      matchedSelector ? `selector ${matchedSelector}` : '',
+      continueText ? `text ${continueText}` : '',
+      initFound ? '_360Value.init elementId div360Value' : ''
+    ].filter(Boolean).join(' | ');
+  }
+
+  function find360ValueDocumentMatch(rule, selector) {
+    if (!is360ValueRule(rule, selector)) return null;
+
+    const markerSelectors = [
+      '#div360Value',
+      'iv360-valuation',
+      '#iv360-continue'
+    ];
+
+    for (const doc of getAllDocs()) {
+      for (const markerSelector of markerSelectors) {
+        const node = queryAllDeep(doc, markerSelector)[0];
+        if (!node) continue;
+        const meta = buildElementLogMeta(node);
+        return {
+          ok: true,
+          reason: '',
+          selector,
+          element: node,
+          matchedText: get360ValueMarkerMatchText(doc, node, markerSelector),
+          elementTag: meta.tag,
+          elementId: meta.id,
+          elementClass: meta.className
+        };
+      }
+
+      for (const script of queryAllDeep(doc, 'script')) {
+        const scriptText = normalizeText(script.textContent || '');
+        if (!/_360Value\.init/i.test(scriptText) || !/div360Value/i.test(scriptText)) continue;
+        const fallbackElement = doc.body || doc.documentElement;
+        const meta = buildElementLogMeta(fallbackElement);
+        return {
+          ok: true,
+          reason: '',
+          selector,
+          element: fallbackElement,
+          matchedText: '360Value detected | _360Value.init elementId div360Value',
+          elementTag: meta.tag,
+          elementId: meta.id,
+          elementClass: meta.className
+        };
+      }
+    }
+
+    return null;
+  }
+
   function findRuleMatch(rule) {
     const selector = normalizeText(rule.selector || '');
     if (!selector) {
@@ -3467,6 +3581,9 @@
         elementClass: ''
       };
     }
+
+    const special360Match = find360ValueDocumentMatch(rule, selector);
+    if (special360Match?.ok) return special360Match;
 
     let bestFailure = null;
     let sawNodes = false;
