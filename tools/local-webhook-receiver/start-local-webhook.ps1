@@ -76,14 +76,24 @@ function Send-JsonResponse {
   param(
     [System.Net.HttpListenerResponse]$Response,
     [int]$StatusCode,
-    [object]$Body
+    [object]$Body,
+    [System.Net.HttpListenerRequest]$Request = $null
   )
   $Response.StatusCode = $StatusCode
   $Response.ContentType = "application/json; charset=utf-8"
-  $Response.Headers["Access-Control-Allow-Origin"] = "*"
+  $origin = "*"
+  if ($null -ne $Request -and $Request.Headers["Origin"]) {
+    $origin = $Request.Headers["Origin"]
+  }
+  $requestHeaders = "Content-Type"
+  if ($null -ne $Request -and $Request.Headers["Access-Control-Request-Headers"]) {
+    $requestHeaders = $Request.Headers["Access-Control-Request-Headers"]
+  }
+  $Response.Headers["Access-Control-Allow-Origin"] = $origin
   $Response.Headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
-  $Response.Headers["Access-Control-Allow-Headers"] = "Content-Type"
+  $Response.Headers["Access-Control-Allow-Headers"] = $requestHeaders
   $Response.Headers["Access-Control-Allow-Private-Network"] = "true"
+  $Response.Headers["Vary"] = "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
   $json = $Body | ConvertTo-Json -Depth 20
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
   $Response.ContentLength64 = $bytes.Length
@@ -184,8 +194,16 @@ try {
     }
 
     try {
+      $origin = $request.Headers["Origin"]
+      $privateNetwork = $request.Headers["Access-Control-Request-Private-Network"]
+      if ($origin -or $request.HttpMethod -eq "OPTIONS") {
+        $originLabel = if ($origin) { $origin } else { "(none)" }
+        $privateNetworkLabel = if ($privateNetwork) { $privateNetwork } else { "(none)" }
+        Write-ReceiverLog "$($request.HttpMethod) $requestPath | Origin=$originLabel | PrivateNetwork=$privateNetworkLabel"
+      }
+
       if ($request.HttpMethod -eq "OPTIONS") {
-        Send-JsonResponse $response 204 @{ ok = $true }
+        Send-JsonResponse $response 200 @{ ok = $true; preflight = $true; route = $Route } $request
         continue
       }
 
@@ -195,7 +213,7 @@ try {
           service = "gwpc-local-webhook"
           route = $Route
           outputDir = $resolvedOutputDir
-        }
+        } $request
         continue
       }
 
@@ -203,13 +221,13 @@ try {
         Send-JsonResponse $response 404 @{
           ok = $false
           error = "Use POST http://127.0.0.1:$Port$Route"
-        }
+        } $request
         continue
       }
 
       $raw = Read-RequestBody $request
       if (-not $raw.Trim()) {
-        Send-JsonResponse $response 400 @{ ok = $false; error = "Empty request body" }
+        Send-JsonResponse $response 400 @{ ok = $false; error = "Empty request body" } $request
         continue
       }
 
@@ -225,14 +243,14 @@ try {
       Send-JsonResponse $response 200 @{
         ok = $true
         savedPath = $savedPath
-      }
+      } $request
     } catch {
       Write-ReceiverLog "Request failed: $($_.Exception.Message)"
       try {
         Send-JsonResponse $response 500 @{
           ok = $false
           error = $_.Exception.Message
-        }
+        } $request
       } catch {}
     }
   }

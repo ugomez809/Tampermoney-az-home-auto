@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.10
+// @version      1.18.11
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.10';
+  const VERSION = '1.18.11';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -1037,13 +1037,14 @@
   async function fetchPostJson(url, data, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const local = isLoopbackWebhookUrl(url);
     try {
       const res = await fetch(url, {
         method: 'POST',
         mode: 'cors',
         cache: 'no-store',
         credentials: 'omit',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': local ? 'text/plain;charset=UTF-8' : 'application/json' },
         body: JSON.stringify(data),
         signal: controller.signal
       });
@@ -1078,7 +1079,7 @@
       GM_xmlhttpRequest({
         method: 'POST',
         url,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': isLoopbackWebhookUrl(url) ? 'text/plain;charset=UTF-8' : 'application/json' },
         data: JSON.stringify(data),
         timeout: timeoutMs,
         onload: (res) => resolve(res),
