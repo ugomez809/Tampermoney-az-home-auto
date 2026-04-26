@@ -1,7 +1,8 @@
 param(
   [string]$OutputDir = "$env:USERPROFILE\Documents\GWPC Payloads",
   [int]$Port = 8787,
-  [string]$Route = "/gwpc-payload"
+  [string]$Route = "/gwpc-payload",
+  [string]$Token = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,6 +90,9 @@ function Send-JsonResponse {
   if ($null -ne $Request -and $Request.Headers["Access-Control-Request-Headers"]) {
     $requestHeaders = $Request.Headers["Access-Control-Request-Headers"]
   }
+  if ($requestHeaders -notmatch "(?i)\bX-Webhook-Token\b") {
+    $requestHeaders = "$requestHeaders, X-Webhook-Token"
+  }
   $Response.Headers["Access-Control-Allow-Origin"] = $origin
   $Response.Headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
   $Response.Headers["Access-Control-Allow-Headers"] = $requestHeaders
@@ -99,6 +103,20 @@ function Send-JsonResponse {
   $Response.ContentLength64 = $bytes.Length
   $Response.OutputStream.Write($bytes, 0, $bytes.Length)
   $Response.OutputStream.Close()
+}
+
+function Test-RequestToken {
+  param([System.Net.HttpListenerRequest]$Request)
+  if (-not $Token) {
+    return $true
+  }
+
+  $queryToken = ""
+  try { $queryToken = [string]$Request.QueryString["token"] } catch {}
+  $headerToken = ""
+  try { $headerToken = [string]$Request.Headers["X-Webhook-Token"] } catch {}
+
+  return ($queryToken -eq $Token) -or ($headerToken -eq $Token)
 }
 
 function Read-RequestBody {
@@ -178,6 +196,11 @@ Write-ReceiverLog "Local webhook receiver started"
 Write-ReceiverLog "Listening: $prefix"
 Write-ReceiverLog "POST URL: http://127.0.0.1:$Port$Route"
 Write-ReceiverLog "Saving TXT files to: $resolvedOutputDir"
+if ($Token) {
+  Write-ReceiverLog "Token protection: ON"
+} else {
+  Write-ReceiverLog "Token protection: OFF"
+}
 Write-ReceiverLog "Press Ctrl+C to stop"
 
 try {
@@ -221,6 +244,15 @@ try {
         Send-JsonResponse $response 404 @{
           ok = $false
           error = "Use POST http://127.0.0.1:$Port$Route"
+        } $request
+        continue
+      }
+
+      if (-not (Test-RequestToken -Request $request)) {
+        Write-ReceiverLog "Rejected POST $requestPath | invalid or missing token"
+        Send-JsonResponse $response 401 @{
+          ok = $false
+          error = "Invalid or missing webhook token"
         } $request
         continue
       }
