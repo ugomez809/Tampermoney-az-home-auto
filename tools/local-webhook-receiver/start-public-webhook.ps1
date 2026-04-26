@@ -178,7 +178,7 @@ if (-not $publicBase) {
   exit 1
 }
 
-$publicWebhookUrl = "$publicBase$Route?token=$Token"
+$publicWebhookUrl = "${publicBase}${Route}?token=${Token}"
 Write-Host ""
 Write-Host "============================================================"
 Write-Host "PUBLIC WEBHOOK URL - paste this into the OTHER PC"
