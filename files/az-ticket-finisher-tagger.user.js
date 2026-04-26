@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.48
+// @version      1.0.49
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.48';
+  const VERSION = '1.0.49';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1452,8 +1452,23 @@
     };
   }
 
-  function buildBlankMissingWorkflowData(ticketId) {
+  function getMissingPayloadNoteText(reason = '') {
+    const text = norm(reason || '');
+    if (!text) return 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE';
+
+    const lowerText = text.toLowerCase();
+    const generic =
+      lowerText === 'main/payload failed' ||
+      lowerText === 'payload does not match after 20 seconds' ||
+      lowerText.startsWith('launcher error:') ||
+      lowerText.includes('missing launcher data');
+
+    return generic ? 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE' : text;
+  }
+
+  function buildBlankMissingWorkflowData(ticketId, reason = '') {
     const azId = norm(ticketId || '');
+    const noteText = getMissingPayloadNoteText(reason);
     return {
       azId,
       payloadSavedAt: '',
@@ -1478,8 +1493,8 @@
       note: {
         homeSubmission: '',
         accountNumber: '',
-        doneValue: 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE',
-        text: 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE'
+        doneValue: noteText,
+        text: noteText
       },
       sources: {
         home: 'missing-payload'
@@ -1506,8 +1521,12 @@
     }) || buildMissingPayloadWorkflowData(finalPayload.azId);
   }
 
-  function buildMissingPayloadWorkflowData(ticketId) {
+  function buildMissingPayloadWorkflowData(ticketId, reason = '') {
     const azId = norm(ticketId || '');
+    if (getMissingPayloadNoteText(reason) !== 'SKIPPED, NOT ENOUGH INFO TO START A QUOTE') {
+      return buildBlankMissingWorkflowData(azId, reason);
+    }
+
     const minSavedMs = 0;
     const homeChoice = choosePreferredProductPayload('home', azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 2 }
@@ -1520,7 +1539,7 @@
       homeChoice,
       forceFailedTag: true,
       missingPayloadFallback: true
-    }) || buildBlankMissingWorkflowData(azId);
+    }) || buildBlankMissingWorkflowData(azId, reason);
   }
 
   function cssEscape(value) {
@@ -2747,13 +2766,14 @@
       forceRun = false,
       finalPayload = null,
       fallbackTicketId = '',
+      fallbackReason = '',
       runTicketId = '',
       missingPayloadTriggerKey = ''
     } = options;
 
     const data = finalPayload
       ? extractWorkflowData(finalPayload)
-      : buildMissingPayloadWorkflowData(fallbackTicketId);
+      : buildMissingPayloadWorkflowData(fallbackTicketId, fallbackReason);
 
     if (!data.azId) {
       setStatus('Payload missing');
@@ -3098,6 +3118,7 @@
         forceRun: state.forceRunRequested,
         finalPayload: workflowPayload,
         fallbackTicketId: fallbackMissingPayload ? (fallbackTicketId || openTicket.ticketId) : '',
+        fallbackReason: missingPayloadTrigger?.reason || rejectedFinalPayload.reason || (launcherDataMissing.ready ? 'MISSING LAUNCHER DATA' : ''),
         runTicketId: currentFrontRunTicketId,
         missingPayloadTriggerKey: missingPayloadTrigger?.triggerKey || mismatchMissingPayloadTriggerKey || ''
       }).catch((err) => {

@@ -84,6 +84,7 @@ These files remain installable only so existing Tampermonkey installs can auto-u
 | Cross-Origin Global Clear Launcher | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js) |
 | Cross-Origin UI Dock Organizer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js) |
 | GWPC Payload Mirror + Non-AZ Tab Closer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js) |
+| Cross-Origin Shared Failure Selector | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-failure-selector.user.js) |
 
 ## How auto-update works
 
