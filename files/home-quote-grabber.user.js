@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.17
+// @version      4.1.18
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.17';
+  const VERSION = '4.1.18';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -623,6 +623,33 @@
     return `custom_${hashString(`${normalizeText(headerText).toLowerCase()}|${normalizeText(fieldName).toLowerCase()}`)}`;
   }
 
+  function normalizeCustomFieldHeaderKey(text) {
+    const raw = normalizeText(text).toLowerCase();
+    if (!raw) return '';
+    if (raw.includes('disclosure') && raw.includes('qualification')) return 'disclosure qualification';
+    if (raw.includes('policy info')) return 'policy info';
+    if (raw.includes('policy summary')) return 'policy summary';
+    if (raw.includes('dwelling')) return 'dwelling';
+    if (raw.includes('coverages')) return 'coverages';
+    if (raw.includes('exclusions') && raw.includes('conditions')) return 'exclusions and conditions';
+    if (raw === 'quote' || raw.includes('view quote')) return 'quote';
+    return raw
+      .replace(/\b\d{5,}\b/g, '')
+      .replace(/:\s*$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function customFieldHeaderMatches(savedHeader, currentHeader) {
+    const saved = normalizeText(savedHeader);
+    const current = normalizeText(currentHeader);
+    if (!saved || !current) return false;
+    if (saved === current) return true;
+    const savedKey = normalizeCustomFieldHeaderKey(saved);
+    const currentKey = normalizeCustomFieldHeaderKey(current);
+    return !!savedKey && savedKey === currentKey;
+  }
+
   function normalizeCustomFieldRule(raw) {
     if (!isPlainObject(raw)) return null;
 
@@ -635,7 +662,9 @@
     return {
       ruleId: normalizeText(raw.ruleId || buildCustomFieldRuleId(headerText, fieldName)),
       headerText,
+      headerKey: normalizeText(raw.headerKey || normalizeCustomFieldHeaderKey(headerText)),
       fieldName,
+      labelText: normalizeText(raw.labelText || raw.fieldLabel || ''),
       selector,
       fingerprint: {
         tag: normalizeText(fingerprintRaw.tag || ''),
@@ -3107,30 +3136,95 @@
     return '';
   }
 
+  function inferCustomFieldLabelText(el) {
+    if (!(el instanceof Element)) return '';
+
+    const ownValue = normalizeText(readCustomFieldElementValue(el) || el.innerText || el.textContent || '');
+    const containers = [
+      el.closest('.gw-InputWidget, .gw-ValueWidget, .gw-ValueWidget--inner, .gw-InfoBarElementWidget, .gw-RowWidget, td, tr, [role="group"]'),
+      el.parentElement,
+      el.parentElement?.parentElement,
+      el.parentElement?.parentElement?.parentElement
+    ].filter(Boolean);
+
+    for (const container of containers) {
+      let labels = [];
+      try {
+        labels = Array.from(container.querySelectorAll('.gw-label, .gw-boldLabel, .gw-LabelWidget, .gw-vw--label, label'));
+      } catch {}
+
+      for (const label of labels) {
+        if (!isVisibleEl(label)) continue;
+        const text = normalizeText(label.textContent || '');
+        if (!text || text === ownValue || text.length > 120) continue;
+        return text;
+      }
+    }
+
+    return '';
+  }
+
+  function readCustomFieldValueByLabel(rule) {
+    const labels = [
+      normalizeText(rule?.labelText || ''),
+      normalizeText(rule?.fieldName || '')
+    ].filter(Boolean);
+    const uniqueLabels = [...new Set(labels)];
+    if (!uniqueLabels.length) return { value: '', label: '' };
+
+    const value = extractLabeledFieldValue(uniqueLabels);
+    if (!value) return { value: '', label: uniqueLabels.join(' / ') };
+    return { value, label: uniqueLabels.join(' / ') };
+  }
+
   function captureCustomFieldUpdatesForCurrentHeader(options = {}) {
     const headerText = normalizeText(options.headerText || getHeaderText());
-    const rules = readCustomFieldRules().filter((rule) => normalizeText(rule.headerText) === headerText);
+    const allRules = readCustomFieldRules();
+    const rules = [];
     const updates = {};
     const missing = [];
+    const headerFallbacks = [];
+    const headerSkips = [];
 
-    for (const rule of rules) {
+    for (const rule of allRules) {
+      const headerMatches = customFieldHeaderMatches(rule.headerText, headerText);
       const target = findCustomFieldElement(rule);
-      if (!target) {
-        missing.push(`${rule.fieldName}: target not found`);
+      const targetVisible = !!target && isVisibleEl(target);
+      let value = target ? readCustomFieldElementValue(target) : '';
+      let source = target ? 'selector' : '';
+
+      if (!value) {
+        const labeled = readCustomFieldValueByLabel(rule);
+        if (labeled.value) {
+          value = labeled.value;
+          source = `label ${labeled.label}`;
+        }
+      }
+
+      if (!headerMatches && !(targetVisible && value) && !source.startsWith('label ')) {
+        headerSkips.push(`${rule.fieldName}: saved under "${rule.headerText || '(blank)'}"`);
         continue;
       }
-      const value = readCustomFieldElementValue(target);
+
+      rules.push(rule);
       if (!value) {
         missing.push(`${rule.fieldName}: blank`);
         continue;
+      }
+
+      if (!headerMatches) {
+        headerFallbacks.push(`${rule.fieldName}: saved="${rule.headerText || '(blank)'}" current="${headerText || '(blank)'}" via ${source || 'selector'}`);
       }
       updates[rule.fieldName] = value;
     }
 
     if (options.logMatches && Object.keys(updates).length) {
       log(`Custom fields (${headerText}): ${JSON.stringify(updates)}`);
+      if (headerFallbacks.length) log(`Custom field header fallback (${headerText}): ${headerFallbacks.join(' | ')}`);
     } else if (options.logMissing && rules.length && missing.length) {
       log(`Custom fields missing (${headerText}): ${missing.join(' | ')}`);
+    } else if (options.logMissing && !rules.length && headerSkips.length) {
+      log(`Custom fields skipped by header (${headerText || '(blank)'}): ${headerSkips.slice(0, 6).join(' | ')}`);
     }
 
     return { headerText, rules, updates, missing };
@@ -3229,7 +3323,9 @@
     const rule = upsertCustomFieldRule({
       ruleId: buildCustomFieldRuleId(headerText, saveAs),
       headerText,
+      headerKey: normalizeCustomFieldHeaderKey(headerText),
       fieldName: saveAs,
+      labelText: inferCustomFieldLabelText(target),
       selector,
       fingerprint: buildFieldFingerprint(target),
       savedAt: new Date().toISOString(),
