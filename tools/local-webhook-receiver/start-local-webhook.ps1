@@ -83,6 +83,7 @@ function Send-JsonResponse {
   $Response.Headers["Access-Control-Allow-Origin"] = "*"
   $Response.Headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
   $Response.Headers["Access-Control-Allow-Headers"] = "Content-Type"
+  $Response.Headers["Access-Control-Allow-Private-Network"] = "true"
   $json = $Body | ConvertTo-Json -Depth 20
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
   $Response.ContentLength64 = $bytes.Length

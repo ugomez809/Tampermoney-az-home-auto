@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.9
+// @version      1.18.10
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -11,6 +11,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      *
+// @connect      127.0.0.1
+// @connect      localhost
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
 // ==/UserScript==
@@ -22,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.9';
+  const VERSION = '1.18.10';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -421,6 +423,15 @@
     try {
       const parsed = new URL(url);
       return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch {
+      return false;
+    }
+  }
+
+  function isLoopbackWebhookUrl(url) {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
     } catch {
       return false;
     }
@@ -1023,8 +1034,47 @@
     };
   }
 
+  async function fetchPostJson(url, data, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        cache: 'no-store',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal: controller.signal
+      });
+      return {
+        status: res.status,
+        responseText: await res.text()
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function gmPostJson(url, data, timeoutMs) {
     return new Promise((resolve, reject) => {
+      const tryLocalFetchFallback = async () => {
+        if (!isLoopbackWebhookUrl(url) || typeof fetch !== 'function') {
+          reject(new Error('Network error'));
+          return;
+        }
+        try {
+          resolve(await fetchPostJson(url, data, timeoutMs));
+        } catch (err) {
+          reject(new Error(`Network error; local fetch fallback failed: ${err?.message || err}`));
+        }
+      };
+
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        tryLocalFetchFallback();
+        return;
+      }
+
       GM_xmlhttpRequest({
         method: 'POST',
         url,
@@ -1032,7 +1082,7 @@
         data: JSON.stringify(data),
         timeout: timeoutMs,
         onload: (res) => resolve(res),
-        onerror: () => reject(new Error('Network error')),
+        onerror: tryLocalFetchFallback,
         ontimeout: () => reject(new Error('Request timeout'))
       });
     });
