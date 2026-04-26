@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.8
+// @version      1.5.9
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC HOME payload/storage to TXT, mirrors key Home payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5.8';
+  const VERSION = '1.5.9';
   const UI_ID = 'tm-az-apex-gwpc-storage-tools-v156';
   const TOAST_ID = 'tm-az-apex-gwpc-storage-tools-toast-v156';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
@@ -782,22 +782,52 @@
     return '';
   }
 
+  function getOutcomeTypeFromMessage(message) {
+    const text = String(message || '');
+
+    if (
+      /Applied tag:\s*Successful Quote/i.test(text) ||
+      /Tag already applied\b.*current result\s*\(\s*Successful Quote\s*\)/i.test(text) ||
+      /Tag already present:\s*Successful Quote/i.test(text)
+    ) {
+      return 'success';
+    }
+
+    if (
+      /Applied tag:\s*Failed Quote/i.test(text) ||
+      /Tag already applied\b.*current result\s*\(\s*Failed Quote\s*\)/i.test(text) ||
+      /Tag already present:\s*Failed Quote/i.test(text)
+    ) {
+      return 'failed';
+    }
+
+    return '';
+  }
+
   function summarizeOutcomeCounts(events) {
     const successIds = new Set();
     const failedIds = new Set();
     let successWithoutId = 0;
     let failedWithoutId = 0;
+    const currentAzBySource = new Map();
 
     for (const event of events) {
       const text = String(event.message || event.rawLine || '');
-      const azId = extractAzIdFromOutcomeMessage(text);
+      const sourceKey = `${event.origin || ''}||${event.script || ''}`;
+      const runningMatch = text.match(/\bRunning finisher for AZ\s+(\d+)\b/i);
+      if (runningMatch) currentAzBySource.set(sourceKey, runningMatch[1]);
 
-      if (/Applied tag:\s*Successful Quote/i.test(text)) {
+      const outcomeType = getOutcomeTypeFromMessage(text);
+      if (!outcomeType) continue;
+
+      const azId = extractAzIdFromOutcomeMessage(text) || currentAzBySource.get(sourceKey) || '';
+
+      if (outcomeType === 'success') {
         if (azId) successIds.add(azId);
         else successWithoutId += 1;
       }
 
-      if (/Applied tag:\s*Failed Quote/i.test(text)) {
+      if (outcomeType === 'failed') {
         if (azId) failedIds.add(azId);
         else failedWithoutId += 1;
       }
