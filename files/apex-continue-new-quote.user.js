@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.10
-// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait for Continue New Quote readiness, then confirm handoff before safe close.
+// @version      1.8.11
+// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait for Continue New Quote readiness, and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.10';
+  const VERSION = '1.8.11';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -45,11 +45,11 @@
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
-    afterResidenceBeforeContinueMs: 3000,
+    afterResidenceBeforeContinueMs: 6000,
     afterContinueClickMs: 1200,
     afterContinueBeforeCloseMs: 5000,
     continueReadyTimeoutMs: 20000,
-    continueReadyStableMs: 1800,
+    continueReadyStableMs: 3000,
     continueHandoffTimeoutMs: 20000,
     continueRetryDelayMs: 1200,
     continueClickAttempts: 3,
@@ -78,6 +78,8 @@
     forceCloseAttempts: 0,
     forceCloseTimer: null,
     closeSkippedAfterContinue: false,
+    windowOpenMonitorInstalled: false,
+    windowOpenCalls: [],
     logs: [],
     logsIntervalTimer: null
   };
@@ -88,6 +90,77 @@
 
   function now() {
     return Date.now();
+  }
+
+  function resolveOpenUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+
+    try {
+      return new URL(rawUrl, location.href).href;
+    } catch {
+      return String(rawUrl || '');
+    }
+  }
+
+  function isLikelyGwpcUrl(url) {
+    const value = String(url || '');
+    return /policycenter(?:-\d+)?\.farmersinsurance\.com/i.test(value) ||
+      /\/pc\/PolicyCenter\.do/i.test(value) ||
+      /\bPolicyCenter\b/i.test(value);
+  }
+
+  function installWindowOpenMonitor() {
+    if (state.windowOpenMonitorInstalled) return;
+    state.windowOpenMonitorInstalled = true;
+
+    const originalOpen = window.open;
+    if (typeof originalOpen !== 'function') return;
+
+    try {
+      window.open = function hbApexContinueWindowOpenMonitor(url, target, features) {
+        const resolvedUrl = resolveOpenUrl(url);
+        let opened = null;
+        let threw = null;
+
+        try {
+          opened = originalOpen.apply(this, arguments);
+          return opened;
+        } catch (err) {
+          threw = err;
+          throw err;
+        } finally {
+          state.windowOpenCalls.push({
+            url: resolvedUrl,
+            rawUrl: String(url || ''),
+            target: String(target || ''),
+            features: String(features || ''),
+            blocked: !opened,
+            error: threw ? String(threw?.message || threw) : '',
+            at: now()
+          });
+
+          if (state.windowOpenCalls.length > 20) {
+            state.windowOpenCalls.splice(0, state.windowOpenCalls.length - 20);
+          }
+        }
+      };
+
+      log('window.open handoff monitor installed');
+    } catch (err) {
+      log(`window.open monitor unavailable: ${err?.message || err}`);
+    }
+  }
+
+  function getRecentBlockedGwpcOpen(sinceAt) {
+    for (let i = state.windowOpenCalls.length - 1; i >= 0; i--) {
+      const call = state.windowOpenCalls[i];
+      if (!call || call.at < sinceAt) continue;
+      if (!call.blocked) continue;
+      if (!isLikelyGwpcUrl(call.url)) continue;
+      return call;
+    }
+
+    return null;
   }
 
   function isFrontVisibleTab() {
@@ -928,8 +1001,9 @@
     ]).filter(el => isVisible(el) && !isDisabled(el));
   }
 
-  async function waitForContinueHandoff(startUrl) {
+  async function waitForContinueHandoff(startUrl, clickStartedAt) {
     const startedAt = now();
+    let blockedPopupHandled = false;
 
     while (now() - startedAt < CFG.continueHandoffTimeoutMs) {
       if (document.visibilityState === 'hidden') {
@@ -938,6 +1012,18 @@
 
       if (location.href !== startUrl) {
         return 'APEX URL changed';
+      }
+
+      const blockedGwpc = getRecentBlockedGwpcOpen(clickStartedAt || startedAt);
+      if (blockedGwpc && !blockedPopupHandled) {
+        blockedPopupHandled = true;
+        log(`GWPC popup was blocked on this PC; navigating current APEX tab instead: ${blockedGwpc.url}`);
+        try {
+          location.assign(blockedGwpc.url);
+          return 'blocked GWPC popup fallback';
+        } catch (err) {
+          log(`Blocked popup fallback navigation failed: ${err?.message || err}`);
+        }
       }
 
       const header = getQuoteHeader();
@@ -966,6 +1052,7 @@
       const reason = `Continue New Quote attempt ${attempt}/${CFG.continueClickAttempts}`;
 
       log(`Clicking ${reason}: ${describeClickTarget(target)}`);
+      const clickStartedAt = now();
 
       const clicked =
         attempt === CFG.continueClickAttempts
@@ -978,7 +1065,7 @@
         continue;
       }
 
-      const handoff = await waitForContinueHandoff(startUrl);
+      const handoff = await waitForContinueHandoff(startUrl, clickStartedAt);
       if (handoff) {
         log(`Continue New Quote handoff confirmed: ${handoff}`);
         return true;
@@ -1243,6 +1330,7 @@
     log('Script start.');
     log('Page detected: APEX.');
     log(`Version: ${VERSION}`);
+    installWindowOpenMonitor();
     armForceCloseFailsafe();
     setStatus('Running');
 
