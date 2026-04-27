@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.33
+// @version      2.5.34
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.33';
+  const VERSION = '2.5.34';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -662,14 +662,6 @@
 
   function runFrontIdleReloadWatchdog() {
     if (state.destroyed) return;
-    if (!state.running && !state.refreshRequiredThisLoad) {
-      state.frontIdleFrontSinceAt = 0;
-      state.frontIdleArmedLogged = false;
-      state.frontIdleReloadPending = false;
-      state.frontIdleBusyLogged = false;
-      state.frontIdleLastSignature = getFrontIdleSignature();
-      return;
-    }
 
     if (!isPipelinePage()) {
       state.frontIdleFrontSinceAt = 0;
@@ -679,21 +671,6 @@
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
     }
-
-    if (state.busy || state.fatalFallbackInFlight) {
-      state.frontIdleFrontSinceAt = 0;
-      state.frontIdleArmedLogged = false;
-      state.frontIdleReloadPending = false;
-      state.frontIdleLastActivityAt = Date.now();
-      state.frontIdleLastSignature = getFrontIdleSignature();
-      if (!state.frontIdleBusyLogged) {
-        state.frontIdleBusyLogged = true;
-        log('Front idle reload suppressed: launcher is actively working', 'info');
-      }
-      return;
-    }
-
-    state.frontIdleBusyLogged = false;
 
     const openTicket = getOpenTicketInfo();
     if (isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
@@ -705,6 +682,26 @@
       state.frontIdleLastSignature = getFrontIdleSignature();
       return;
     }
+
+    if (state.fatalFallbackInFlight) {
+      state.frontIdleFrontSinceAt = 0;
+      state.frontIdleArmedLogged = false;
+      state.frontIdleReloadPending = false;
+      state.frontIdleLastActivityAt = Date.now();
+      state.frontIdleLastSignature = getFrontIdleSignature();
+      if (!state.frontIdleBusyLogged) {
+        state.frontIdleBusyLogged = true;
+        log('Front idle reload suppressed: launcher is handing the ticket to finisher', 'info');
+      }
+      return;
+    }
+
+    const watchdogReason = state.busy
+      ? 'busy/no open ticket'
+      : !state.running
+        ? (state.refreshRequiredThisLoad ? 'refresh required' : 'stopped/no open ticket')
+        : 'idle';
+    state.frontIdleBusyLogged = false;
 
     const signature = getFrontIdleSignature();
     if (signature !== state.frontIdleLastSignature) {
@@ -731,7 +728,7 @@
 
     if (!state.frontIdleArmedLogged && frontForMs >= 1000) {
       state.frontIdleArmedLogged = true;
-      log('Front idle reload armed: 40s unchanged on visible AZ page', 'info');
+      log(`Front idle reload armed: 40s unchanged on visible AZ page | ${watchdogReason}`, 'info');
     }
 
     if (frontForMs < CFG.frontIdleReloadMs || idleForMs < CFG.frontIdleReloadMs) return;
@@ -745,7 +742,7 @@
     saveMode(state.mode);
     syncUi();
     setStatus('RELOADING (HOME)');
-    log('Front idle timeout reached: reloading AgencyZoom pipeline page', 'warn');
+    log(`Front idle timeout reached: reloading AgencyZoom pipeline page | ${watchdogReason}`, 'warn');
     persistState();
     schedulePendingReload(() => {
       if (!state.destroyed) reloadToPipelineRoot();
