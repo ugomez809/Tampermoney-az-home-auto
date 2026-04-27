@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.22
+// @version      1.0.23
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.22';
+  const VERSION = '1.0.23';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -87,6 +87,7 @@
     apexWakeMissingMs: 2 * 60 * 1000,
     apexWakeOpenMs: 20000,
     apexWakeCooldownMs: 60000,
+    apexWakeMaxWithoutOpenMs: 10 * 60 * 1000,
     apexWakeUrls: [
       'https://farmersagent.lightning.force.com/',
       'https://farmersagent.lightning.force.com/lightning/page/home'
@@ -904,10 +905,15 @@
       });
     }
 
-    const missingMs = Date.now() - missingSinceMs;
-    const remainingMs = Math.max(0, CFG.apexWakeMissingMs - missingMs);
+    const now = Date.now();
+    const missingMs = now - missingSinceMs;
+    const lastWakeMs = parseTimeMs(wakeState.lastWakeAt || wakeState.wakeStartedAt);
+    const maxGapRemainingMs = lastWakeMs
+      ? Math.max(0, CFG.apexWakeMaxWithoutOpenMs - (now - lastWakeMs))
+      : Number.POSITIVE_INFINITY;
+    const remainingMs = Math.max(0, Math.min(CFG.apexWakeMissingMs - missingMs, maxGapRemainingMs));
     const gwpcTail = lastGwpcMs
-      ? ` | GWPC healthy ${formatAge(Date.now() - lastGwpcMs)} ago`
+      ? ` | GWPC healthy ${formatAge(now - lastGwpcMs)} ago`
       : ' | GWPC missing';
     if (remainingMs > 0) {
       state.apexWakeStatus = `LEX missing, wake in ${formatAge(remainingMs)}${gwpcTail}`;
@@ -919,16 +925,16 @@
       return;
     }
 
-    const lastWakeMs = parseTimeMs(wakeState.lastWakeAt || wakeState.wakeStartedAt);
-    if (lastWakeMs && (Date.now() - lastWakeMs) < CFG.apexWakeCooldownMs) {
-      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - (Date.now() - lastWakeMs))}${gwpcTail}`;
+    const lastWakeAgeMs = lastWakeMs ? now - lastWakeMs : Number.POSITIVE_INFINITY;
+    if (lastWakeMs && lastWakeAgeMs < CFG.apexWakeCooldownMs && lastWakeAgeMs < CFG.apexWakeMaxWithoutOpenMs) {
+      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - lastWakeAgeMs)}${gwpcTail}`;
       return;
     }
 
     const logKey = `missing-${Math.floor(missingSinceMs / 1000)}`;
     if (state.lastApexWakeLogKey !== logKey) {
       state.lastApexWakeLogKey = logKey;
-      log('No APEX/LEX heartbeat for 2m; opening APEX wake tab');
+      log(`No APEX/LEX heartbeat; opening APEX wake tab (max ${Math.round(CFG.apexWakeMaxWithoutOpenMs / 60000)}m without wake)`);
     }
     openApexWakeTab();
   }
@@ -1658,6 +1664,7 @@
       renderAll();
       return;
     }
+    checkApexWakeMonitor();
     if (!state.running) {
       setStatus('Stopped');
       renderAll();
@@ -1746,7 +1753,6 @@
     }
 
     checkGwpcSamePageCloseWatchdog();
-    checkApexWakeMonitor();
     renderAll();
   }
 
