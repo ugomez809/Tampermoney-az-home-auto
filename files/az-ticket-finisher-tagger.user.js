@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.50
+// @version      1.0.51
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.50';
+  const VERSION = '1.0.51';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -53,6 +53,8 @@
     panelPos: 'tm_az_ticket_finisher_panel_pos_v1'
   };
 
+  const DECLINE_REASON_FIELD = 'Decline Reason';
+
   const FIELD_ORDER = [
     'CFP?',
     'Reconstruction Cost',
@@ -69,7 +71,8 @@
     'Standard Pricing Auto Discount',
     'Enhance Pricing Auto Discount',
     'Home Submission Number',
-    'Account Number'
+    'Account Number',
+    DECLINE_REASON_FIELD
   ];
 
   const TAG_ORDER = [
@@ -776,6 +779,62 @@
     return text === 'yes' || text === 'true' || text === 'completed' || text === 'done' || text === 'y';
   }
 
+  function getEventFailureReason(event) {
+    if (!isPlainObject(event)) return '';
+    return pickFirst(
+      event.resultValue,
+      event.errorText,
+      event.errorMessage,
+      event.errorName,
+      event.sentError,
+      event.label,
+      event.reason
+    );
+  }
+
+  function getBundleFailureReason(payload) {
+    const timeout = payload?.bundle?.timeout;
+    const homeData = payload?.bundle?.home?.data;
+    const events = Array.isArray(timeout?.events) ? timeout.events : [];
+    const newestEvent = events.slice().reverse().find((event) => norm(getEventFailureReason(event)));
+
+    return pickFirst(
+      getEventFailureReason(timeout?.lastEvent),
+      getEventFailureReason(newestEvent),
+      homeData?.errorText,
+      homeData?.errorMessage,
+      homeData?.errorName,
+      homeData?.resultValue,
+      homeData?.result
+    );
+  }
+
+  function normalizeDeclineReason(value) {
+    const text = norm(value);
+    if (!text || normalizeYes(text)) return '';
+    return text;
+  }
+
+  function getDeclineReasonForWorkflow({ payload, homeRaw, home, homeRow, doneValue, forceFailedTag, missingPayloadReason }) {
+    const fallbackReason = forceFailedTag ? getMissingPayloadNoteText(missingPayloadReason) : '';
+    const doneReason = normalizeDeclineReason(doneValue);
+
+    return pickFirst(
+      homeRow?.[DECLINE_REASON_FIELD],
+      homeRaw?.[DECLINE_REASON_FIELD],
+      home?.[DECLINE_REASON_FIELD],
+      homeRow?.Result,
+      homeRaw?.Result,
+      home?.Result,
+      getBundleFailureReason(payload),
+      homeRow?.['Done?'],
+      homeRaw?.['Done?'],
+      home?.['Done?'],
+      doneReason,
+      fallbackReason
+    );
+  }
+
   function strongClick(el) {
     if (!el) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
@@ -999,6 +1058,17 @@
   function hasAllFieldTargets() {
     const targets = getFieldTargets();
     return FIELD_ORDER.every((label) => isPlainObject(targets[label]) && norm(targets[label].selector));
+  }
+
+  function getMissingFieldTargetLabels() {
+    const targets = getFieldTargets();
+    return FIELD_ORDER.filter((label) => !(isPlainObject(targets[label]) && norm(targets[label].selector)));
+  }
+
+  function getFieldTargetStatusText() {
+    const missing = getMissingFieldTargetLabels();
+    if (!missing.length) return 'Saved';
+    return `Missing ${missing.length}/${FIELD_ORDER.length}`;
   }
 
   function hasAllTagTargets() {
@@ -1399,6 +1469,16 @@
       ? 'YES'
       : (homeReady && exclusionsChecked && cfpDetectedFlag === false ? 'NO' : '');
     const cfpValue = pickFirst(homeRow['CFP?'], cfpFromTabs);
+    const chooseSuccessfulTag = options.forceFailedTag ? false : normalizeYes(doneValue);
+    const declineReason = chooseSuccessfulTag ? '' : getDeclineReasonForWorkflow({
+      payload,
+      homeRaw,
+      home,
+      homeRow,
+      doneValue,
+      forceFailedTag: options.forceFailedTag === true,
+      missingPayloadReason: options.missingPayloadReason || ''
+    });
 
     const fields = {
       'CFP?': cfpValue,
@@ -1416,7 +1496,8 @@
       'Standard Pricing Auto Discount': pickFirst(homeRow['Standard Pricing Auto Discount']),
       'Enhance Pricing Auto Discount': pickFirst(homeRow['Enhance Pricing Auto Discount']),
       'Home Submission Number': homeSubmission,
-      'Account Number': accountNumber
+      'Account Number': accountNumber,
+      [DECLINE_REASON_FIELD]: declineReason
     };
 
     const noteLines = [
@@ -1447,7 +1528,7 @@
       sources: {
         home: formatProductChoiceSource(homeChoice, options.homeSourceFallback || 'missing-payload')
       },
-      chooseSuccessfulTag: options.forceFailedTag ? false : normalizeYes(doneValue),
+      chooseSuccessfulTag,
       missingPayloadFallback: options.missingPayloadFallback === true
     };
   }
@@ -1488,7 +1569,8 @@
         'Standard Pricing Auto Discount': '',
         'Enhance Pricing Auto Discount': '',
         'Home Submission Number': '',
-        'Account Number': ''
+        'Account Number': '',
+        [DECLINE_REASON_FIELD]: noteText
       },
       note: {
         homeSubmission: '',
@@ -1538,6 +1620,7 @@
       payload: {},
       homeChoice,
       forceFailedTag: true,
+      missingPayloadReason: reason,
       missingPayloadFallback: true
     }) || buildBlankMissingWorkflowData(azId, reason);
   }
@@ -3188,7 +3271,7 @@
     state.hoverBox.style.height = `${rect.height}px`;
   }
 
-  function startPicker(type) {
+  function startPicker(type, options = {}) {
     if (state.busy || state.picker) return;
 
     if (type === 'tags') {
@@ -3199,9 +3282,13 @@
       }
     }
 
+    const fieldLabels = Array.isArray(options.fieldLabels) && options.fieldLabels.length
+      ? options.fieldLabels
+      : FIELD_ORDER;
+
     state.picker = {
       type,
-      items: type === 'fields' ? FIELD_ORDER.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
+      items: type === 'fields' ? fieldLabels.map((label) => ({ key: label, label })) : TAG_ORDER.map((item) => deepClone(item)),
       index: 0,
       primerPending: type === 'tags'
     };
@@ -3259,6 +3346,19 @@
       log(`Picker started: click ${current.label}`);
     }
     renderAll();
+  }
+
+  function startMissingFieldPicker() {
+    const missing = getMissingFieldTargetLabels();
+    if (!missing.length) {
+      log('No missing field targets to add');
+      setStatus('Field targets already saved');
+      renderAll();
+      return;
+    }
+
+    log(`Adding missing field targets: ${missing.join(', ')}`);
+    startPicker('fields', { fieldLabels: missing });
   }
 
   function stopPicker(message, logIt = true) {
@@ -3380,7 +3480,8 @@
         <div ${UI_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-force" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">FORCE RUN</button>
-          <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SET FIELD TARGETS</button>
+          <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-missing-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0d9488;color:#fff;font-weight:800;cursor:pointer;">ADD MISSING FIELDS</button>
+          <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">REDO ALL FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-reset-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET FIELD TARGETS</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#f59e0b;color:#111827;font-weight:800;cursor:pointer;">SET TAG TARGETS</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-reset-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET TAG TARGETS</button>
@@ -3401,6 +3502,7 @@
     state.ui.head = panel.querySelector('#tm-az-ticket-finisher-head');
     state.ui.toggle = panel.querySelector('#tm-az-ticket-finisher-toggle');
     state.ui.force = panel.querySelector('#tm-az-ticket-finisher-force');
+    state.ui.setMissingFields = panel.querySelector('#tm-az-ticket-finisher-set-missing-fields');
     state.ui.setFields = panel.querySelector('#tm-az-ticket-finisher-set-fields');
     state.ui.resetFields = panel.querySelector('#tm-az-ticket-finisher-reset-fields');
     state.ui.setTags = panel.querySelector('#tm-az-ticket-finisher-set-tags');
@@ -3444,6 +3546,7 @@
       tick();
     });
 
+    state.ui.setMissingFields?.addEventListener('click', startMissingFieldPicker);
     state.ui.setFields?.addEventListener('click', () => startPicker('fields'));
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
     state.ui.setTags?.addEventListener('click', () => startPicker('tags'));
@@ -3460,7 +3563,7 @@
     const payload = getFinalPayload();
     if (state.ui.azId) state.ui.azId.textContent = norm(state.activeAzId || payload?.azId || '-') || '-';
     if (state.ui.payload) state.ui.payload.textContent = payload ? 'Found' : 'Missing';
-    if (state.ui.fields) state.ui.fields.textContent = hasAllFieldTargets() ? 'Saved' : 'Missing';
+    if (state.ui.fields) state.ui.fields.textContent = getFieldTargetStatusText();
     if (state.ui.tags) state.ui.tags.textContent = hasAllTagTargets() ? 'Saved' : 'Missing';
 
     if (state.ui.toggle) {
