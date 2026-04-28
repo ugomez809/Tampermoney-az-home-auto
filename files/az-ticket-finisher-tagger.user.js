@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.52
+// @version      1.0.53
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.52';
+  const VERSION = '1.0.53';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1426,6 +1426,49 @@
     return savedAt ? `${source} @ ${savedAt}` : source;
   }
 
+  function buildGwpcAccountUrl(accountNumber) {
+    const cleanAccount = norm(accountNumber || '');
+    if (!cleanAccount) return '';
+    return `https://policycenter-2.farmersinsurance.com/pc/AccountFile.do?AccountNumber=${encodeURIComponent(cleanAccount)}`;
+  }
+
+  function buildWorkflowNoteData({ homeSubmission = '', accountNumber = '', cfpValue = '', doneValue = '' } = {}) {
+    const cleanSubmission = norm(homeSubmission || '');
+    const cleanAccount = norm(accountNumber || '');
+    const cleanCfp = norm(cfpValue || '') || '(blank)';
+    const cleanDone = norm(doneValue || '');
+    const accountLinkUrl = buildGwpcAccountUrl(cleanAccount);
+    const linkText = cleanAccount ? `Account Link: ${cleanAccount}` : '';
+    const accountDisplayLine = linkText || `Account Number: ${cleanAccount}`;
+    const fallbackAccountLine = accountLinkUrl
+      ? `Account Link: ${accountLinkUrl}`
+      : accountDisplayLine;
+
+    const lines = [
+      `Home Submission Number: ${cleanSubmission}`,
+      accountDisplayLine,
+      `CFP?: ${cleanCfp}`,
+      `Done?: ${cleanDone}`
+    ];
+
+    const fallbackLines = [
+      `Home Submission Number: ${cleanSubmission}`,
+      fallbackAccountLine,
+      `CFP?: ${cleanCfp}`,
+      `Done?: ${cleanDone}`
+    ];
+
+    return {
+      homeSubmission: cleanSubmission,
+      accountNumber: cleanAccount,
+      doneValue: cleanDone,
+      accountLinkUrl,
+      linkText,
+      text: lines.join('\n'),
+      fallbackText: fallbackLines.join('\n')
+    };
+  }
+
   function buildWorkflowDataFromProductChoices(options = {}) {
     const azId = norm(options.azId || '');
     if (!azId) return null;
@@ -1455,11 +1498,16 @@
     );
 
     const accountNumber = pickFirst(
+      payload.currentJob?.['Account Number'],
+      payload.currentJob?.AccountNumber,
+      payload.bundle?.['Account Number'],
+      payload.bundle?.AccountNumber,
       homeRaw['Account Number'],
       home['Account Number'],
       homeRow['Account Number'],
       home.currentJob?.['Account Number'],
-      payload.bundle?.home?.data?.row?.['Account Number']
+      payload.bundle?.home?.data?.row?.['Account Number'],
+      payload.bundle?.home?.data?.currentJob?.['Account Number']
     );
     const homeReady = homeRaw.ready === true || home.ready === true || payload.bundle?.home?.ready === true;
     const tabsUsed = isPlainObject(home.tabsUsed) ? home.tabsUsed : {};
@@ -1502,12 +1550,12 @@
       [DECLINE_REASON_FIELD]: declineReason
     };
 
-    const noteLines = [
-      `Home Submission Number: ${homeSubmission}`,
-      `Account Number: ${accountNumber}`,
-      `CFP?: ${cfpValue || '(blank)'}`,
-      `Done?: ${doneValue}`
-    ];
+    const note = buildWorkflowNoteData({
+      homeSubmission,
+      accountNumber,
+      cfpValue,
+      doneValue
+    });
 
     const hasSubstantiveProductData = (
       Number(homeChoice.score || 0) > 0 ||
@@ -1521,12 +1569,7 @@
       azId,
       payloadSavedAt: norm(options.payloadSavedAt || ''),
       fields,
-      note: {
-        homeSubmission,
-        accountNumber,
-        doneValue,
-        text: noteLines.join('\n')
-      },
+      note,
       sources: {
         home: formatProductChoiceSource(homeChoice, options.homeSourceFallback || 'missing-payload')
       },
@@ -1578,7 +1621,10 @@
         homeSubmission: '',
         accountNumber: '',
         doneValue: noteText,
-        text: noteText
+        accountLinkUrl: '',
+        linkText: '',
+        text: noteText,
+        fallbackText: noteText
       },
       sources: {
         home: 'missing-payload'
@@ -1998,16 +2044,99 @@
     return true;
   }
 
-  async function fillNoteEditor(noteText) {
-    const editor = await waitFor(() => findVisibleElements(SEL.noteEditor)[0], 4000);
-    if (!editor) return false;
+  function normalizeNoteInput(noteInput) {
+    if (!isPlainObject(noteInput)) {
+      const text = String(noteInput == null ? '' : noteInput);
+      return {
+        text,
+        fallbackText: text,
+        accountLinkUrl: '',
+        linkText: ''
+      };
+    }
 
-    const lines = noteText.split('\n');
+    const text = String(noteInput.text == null ? '' : noteInput.text);
+    const fallbackText = String(noteInput.fallbackText == null ? text : noteInput.fallbackText);
+    return {
+      ...noteInput,
+      text,
+      fallbackText,
+      accountLinkUrl: norm(noteInput.accountLinkUrl || ''),
+      linkText: String(noteInput.linkText == null ? '' : noteInput.linkText)
+    };
+  }
+
+  function findNoteQuill(editor) {
+    if (!(editor instanceof Element)) return null;
+
+    let node = editor;
+    while (node && node instanceof Element) {
+      const quill = node.__quill;
+      if (quill && typeof quill.insertText === 'function') return quill;
+      node = node.parentElement;
+    }
+
+    return null;
+  }
+
+  function fillNoteEditorFallback(editor, noteText) {
+    const lines = String(noteText == null ? '' : noteText).split('\n');
     editor.innerHTML = lines.map((line) => `<p>${escapeHtml(line || '') || '<br>'}</p>`).join('');
     editor.classList.remove('ql-blank');
     dispatchFieldEvents(editor);
+  }
+
+  function fillNoteEditorWithQuill(editor, note) {
+    const quill = findNoteQuill(editor);
+    if (!quill || !note.linkText || !note.accountLinkUrl) return false;
+
+    try { quill.focus(); } catch {}
+
+    try {
+      if (typeof quill.setText === 'function') quill.setText('', 'silent');
+      else if (typeof quill.deleteText === 'function' && typeof quill.getLength === 'function') quill.deleteText(0, quill.getLength(), 'silent');
+      else editor.innerHTML = '<p><br></p>';
+    } catch {
+      editor.innerHTML = '<p><br></p>';
+    }
+
+    const lines = note.text.split('\n');
+    let index = 0;
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = String(lines[i] == null ? '' : lines[i]);
+      if (i > 0) {
+        quill.insertText(index, '\n', 'user');
+        index += 1;
+      }
+      if (!line) continue;
+      if (line === note.linkText) quill.insertText(index, line, { link: note.accountLinkUrl }, 'user');
+      else quill.insertText(index, line, 'user');
+      index += line.length;
+    }
+
+    const root = quill.root instanceof Element ? quill.root : editor;
+    try { root.classList.remove('ql-blank'); } catch {}
+    dispatchFieldEvents(root);
+    return true;
+  }
+
+  async function fillNoteEditor(noteInput) {
+    const editor = await waitFor(() => findVisibleElements(SEL.noteEditor)[0], 4000);
+    if (!editor) return false;
+
+    const note = normalizeNoteInput(noteInput);
+    const usedQuill = fillNoteEditorWithQuill(editor, note);
+    if (!usedQuill) {
+      fillNoteEditorFallback(editor, note.fallbackText || note.text);
+      if (note.accountLinkUrl) log('Quill note API unavailable; used plain GWPC account URL fallback');
+    } else if (note.accountLinkUrl) {
+      log('Filled note editor via Quill account link formatting');
+    }
+
     await sleep(150);
-    return norm(editor.innerText || editor.textContent || '') === norm(noteText);
+    const expectedText = usedQuill ? note.text : (note.fallbackText || note.text);
+    return norm(editor.innerText || editor.textContent || '') === norm(expectedText);
   }
 
   function findPinToTop() {
@@ -2045,11 +2174,11 @@
     return findByText(['button', 'a'], 'Save Note');
   }
 
-  async function addPinnedNote(noteText) {
+  async function addPinnedNote(noteInput) {
     const opened = await openNotePanel();
     if (!opened) return false;
 
-    const filled = await fillNoteEditor(noteText);
+    const filled = await fillNoteEditor(noteInput);
     if (!filled) log('Note editor value did not fully stick');
     else log('Filled note editor');
 
@@ -2978,9 +3107,9 @@
         if (data.missingPayloadFallback) {
           log(`Note data | Missing payload failure${mustRunMissingPayloadNote ? ' | forcing failed note for current trigger' : ''}`);
         } else {
-          log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Done=${data.note.doneValue || '(blank)'}`);
+          log(`Note data | Home Submission=${data.note.homeSubmission || '(blank)'} | Account=${data.note.accountNumber || '(blank)'} | Done=${data.note.doneValue || '(blank)'}`);
         }
-        const noteOk = await addPinnedNote(data.note.text);
+        const noteOk = await addPinnedNote(data.note);
         if (noteOk) {
           runRecord.noteSavedAt = nowIso();
           if (data.missingPayloadFallback && missingPayloadRunKey) {
