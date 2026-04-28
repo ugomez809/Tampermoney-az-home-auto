@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.35
+// @version      2.5.36
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.35';
+  const VERSION = '2.5.36';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -590,16 +590,48 @@
   // location.reload() keeps whatever the operator drifted to (e.g. a
   // ticket-drawer hash state). Normalize the URL bar with replaceState
   // (silent same-origin update) and then reload so the new page loads
-  // at the canonical URL regardless of starting state.
+  // at the canonical URL regardless of starting state. If reload() is
+  // ignored by the browser/app shell, fall back to a hard navigation.
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
   function reloadToPipelineRoot() {
+    let fallbackTimer = 0;
+    const clearFallback = () => {
+      try {
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      } catch {}
+      fallbackTimer = 0;
+    };
+
+    try { window.addEventListener('beforeunload', clearFallback, { capture: true, once: true }); } catch {}
+    try { window.addEventListener('pagehide', clearFallback, { capture: true, once: true }); } catch {}
+
+    fallbackTimer = window.setTimeout(() => {
+      fallbackTimer = 0;
+      log('Reload fallback fired; forcing navigation to AgencyZoom pipeline root', 'warn');
+      try {
+        location.replace(PIPELINE_ROOT_URL);
+        return;
+      } catch {}
+      try { location.href = PIPELINE_ROOT_URL; } catch {}
+    }, 1500);
+
     try {
       if (location.href !== PIPELINE_ROOT_URL) {
         history.replaceState(null, '', PIPELINE_ROOT_URL);
       }
     } catch {}
-    try { location.reload(); } catch {}
+    try {
+      location.reload();
+      return;
+    } catch {}
+
+    clearFallback();
+    try {
+      location.replace(PIPELINE_ROOT_URL);
+      return;
+    } catch {}
+    try { location.href = PIPELINE_ROOT_URL; } catch {}
   }
 
   function consumeBootstrapReloadMode() {
@@ -640,7 +672,6 @@
   function setupFrontIdleReloadWatchdog() {
     const onTrustedActivity = (event) => {
       if (!event?.isTrusted) return;
-      if (!isPipelinePage()) return;
       markFrontIdleActivity();
     };
     state.frontIdleActivityHandler = onTrustedActivity;
@@ -671,17 +702,12 @@
   function runFrontIdleReloadWatchdog() {
     if (state.destroyed) return;
 
-    if (!isPipelinePage()) {
-      state.frontIdleFrontSinceAt = 0;
-      state.frontIdleArmedLogged = false;
-      state.frontIdleReloadPending = false;
-      state.frontIdleBusyLogged = false;
-      state.frontIdleLastSignature = getFrontIdleSignature();
-      return;
-    }
-
     const openTicket = getOpenTicketInfo();
-    if (isTicketDrawerOpen() || norm(openTicket.ticketId || '')) {
+    const drawerOpen = isTicketDrawerOpen();
+    const openTicketId = norm(openTicket.ticketId || '');
+    const onPipelinePage = isPipelinePage();
+
+    if (drawerOpen && openTicketId) {
       state.frontIdleFrontSinceAt = 0;
       state.frontIdleArmedLogged = false;
       state.frontIdleReloadPending = false;
@@ -704,11 +730,15 @@
       return;
     }
 
-    const watchdogReason = state.busy
-      ? 'busy/no open ticket'
-      : !state.running
-        ? (state.refreshRequiredThisLoad ? 'refresh required' : 'stopped/no open ticket')
-        : 'idle';
+    const watchdogReason = !onPipelinePage
+      ? 'off-pipeline page'
+      : drawerOpen
+        ? 'drawer open without ticket id'
+        : state.busy
+          ? 'busy/no open ticket'
+          : !state.running
+            ? (state.refreshRequiredThisLoad ? 'refresh required' : 'stopped/no open ticket')
+            : 'idle';
     state.frontIdleBusyLogged = false;
 
     const signature = getFrontIdleSignature();
