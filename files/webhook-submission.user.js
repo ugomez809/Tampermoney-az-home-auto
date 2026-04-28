@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.11
+// @version      1.18.12
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.11';
+  const VERSION = '1.18.12';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -49,6 +49,7 @@
 
   const CFG = {
     webhookUrlKey: 'tm_pc_webhook_submit_url_v17',
+    agencyNameKey: 'tm_pc_webhook_submit_agency_name_v1',
     sentMetaKey: 'tm_pc_webhook_submit_sent_meta_v17',
     postSuccessKey: 'tm_pc_webhook_post_success_v1',
     panelPosKey: 'tm_pc_webhook_submit_panel_pos_v17',
@@ -74,6 +75,7 @@
     statusEl: null,
     logsEl: null,
     webhookUrlEl: null,
+    agencyNameEl: null,
     activeUrlEl: null,
     toggleBtn: null,
     sendBtn: null,
@@ -85,6 +87,7 @@
     drag: null,
     fatalOverlay: null,
     savedWebhookUrl: '',
+    savedAgencyName: '',
     lastWaitKey: '',
     lastStatus: '',
     activityState: 'idle',
@@ -97,6 +100,7 @@
     clearStoppedForPageLoad();
     clearStaleSharedPause();
     hydrateWebhookStorage();
+    hydrateAgencyNameStorage();
     buildUI();
     syncWebhookUi();
     renderButtons();
@@ -125,6 +129,7 @@
     try { writeActivityState('stopped', 'Cleanup'); } catch {}
 
     try { persistWebhookFromUi(false); } catch {}
+    try { persistAgencyNameFromUi(false); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
@@ -396,6 +401,68 @@
     return uiValue || getWebhookUrl();
   }
 
+  function readAgencyNameFromGM() {
+    try {
+      return normalizeText(GM_getValue(CFG.agencyNameKey, ''));
+    } catch {
+      return '';
+    }
+  }
+
+  function readAgencyNameFromLocal() {
+    try {
+      return normalizeText(localStorage.getItem(CFG.agencyNameKey) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function mirrorAgencyName(name) {
+    const normalized = normalizeText(name);
+
+    try { GM_setValue(CFG.agencyNameKey, normalized); } catch {}
+    try { localStorage.setItem(CFG.agencyNameKey, normalized); } catch {}
+    try { sessionStorage.setItem(CFG.agencyNameKey, normalized); } catch {}
+
+    state.savedAgencyName = normalized;
+    return normalized;
+  }
+
+  function hydrateAgencyNameStorage() {
+    const gmName = readAgencyNameFromGM();
+    const localName = readAgencyNameFromLocal();
+    const resolved = gmName || localName || '';
+
+    if (resolved) mirrorAgencyName(resolved);
+    else state.savedAgencyName = '';
+  }
+
+  function getAgencyName() {
+    const gmName = readAgencyNameFromGM();
+    const localName = readAgencyNameFromLocal();
+    const resolved = gmName || localName || state.savedAgencyName || '';
+
+    if (resolved && (gmName !== resolved || localName !== resolved || state.savedAgencyName !== resolved)) {
+      mirrorAgencyName(resolved);
+    } else {
+      state.savedAgencyName = resolved;
+    }
+
+    return resolved;
+  }
+
+  function persistAgencyNameFromUi(withLog = false) {
+    const current = normalizeSpace(state.agencyNameEl?.value || '');
+    const before = getAgencyName();
+    const saved = mirrorAgencyName(current);
+
+    if (withLog && saved !== before) {
+      log(saved ? 'Agency Name saved' : 'Agency Name cleared');
+    }
+
+    return saved;
+  }
+
   function persistWebhookFromUi(withLog = false) {
     const current = normalizeSpace(state.webhookUrlEl?.value || '');
     const before = getWebhookUrl();
@@ -411,11 +478,13 @@
 
   function persistWebhookBeforeUnload() {
     try { persistWebhookFromUi(false); } catch {}
+    try { persistAgencyNameFromUi(false); } catch {}
   }
 
   function onVisibilityChange() {
     if (document.visibilityState === 'hidden') {
       try { persistWebhookFromUi(false); } catch {}
+      try { persistAgencyNameFromUi(false); } catch {}
     }
   }
 
@@ -455,6 +524,8 @@
   function syncWebhookUi() {
     const url = getWebhookUrl();
     if (state.webhookUrlEl && state.webhookUrlEl.value !== url) state.webhookUrlEl.value = url;
+    const agencyName = getAgencyName();
+    if (state.agencyNameEl && state.agencyNameEl.value !== agencyName) state.agencyNameEl.value = agencyName;
     updateActiveWebhookUi(url);
   }
 
@@ -1011,6 +1082,7 @@
 
   function buildRequestBody(job, bundle, signature, test = false) {
     return {
+      'Agency Name': getAgencyName(),
       event: test ? 'az_to_gwpc_bundle_test' : 'az_to_gwpc_bundle',
       test,
       sender: {
@@ -1119,6 +1191,7 @@
     }
 
     persistWebhookFromUi(false);
+    persistAgencyNameFromUi(false);
 
     const job = readCurrentJob();
     const resolved = getEffectiveBundle(job);
@@ -1192,6 +1265,7 @@
     }
 
     persistWebhookFromUi(false);
+    persistAgencyNameFromUi(false);
 
     const job = readCurrentJob();
     const resolved = getEffectiveBundle(job);
@@ -1506,6 +1580,10 @@
           <input id="hb-webhook-url" type="text" placeholder="https://...">
         </div>
         <div class="hb-field" style="margin-bottom:8px">
+          <div class="hb-label">Agency Name</div>
+          <input id="hb-agency-name" type="text" placeholder="Carlos Perez Agency">
+        </div>
+        <div class="hb-field" style="margin-bottom:8px">
           <div class="hb-label">Active webhook</div>
           <div id="hb-active-url" class="hb-active">(empty)</div>
         </div>
@@ -1523,6 +1601,7 @@
     state.statusEl = panel.querySelector('#hb-status');
     state.logsEl = panel.querySelector('#hb-logs');
     state.webhookUrlEl = panel.querySelector('#hb-webhook-url');
+    state.agencyNameEl = panel.querySelector('#hb-agency-name');
     state.activeUrlEl = panel.querySelector('#hb-active-url');
     state.toggleBtn = panel.querySelector('#hb-toggle');
     state.sendBtn = panel.querySelector('#hb-send');
@@ -1581,6 +1660,20 @@
         ev.preventDefault();
         persistWebhookFromUi(true);
         try { state.webhookUrlEl.blur(); } catch {}
+      }
+    });
+
+    state.agencyNameEl.addEventListener('input', () => { persistAgencyNameFromUi(false); });
+    state.agencyNameEl.addEventListener('change', () => { persistAgencyNameFromUi(true); });
+    state.agencyNameEl.addEventListener('blur', () => { persistAgencyNameFromUi(true); });
+    state.agencyNameEl.addEventListener('paste', () => {
+      setTimeout(() => persistAgencyNameFromUi(true), 0);
+    });
+    state.agencyNameEl.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        persistAgencyNameFromUi(true);
+        try { state.agencyNameEl.blur(); } catch {}
       }
     });
 
