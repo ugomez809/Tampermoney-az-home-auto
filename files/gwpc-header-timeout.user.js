@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.13
+// @version      2.3.16
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.13';
+  const VERSION = '2.3.16';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -56,7 +56,10 @@
     selectorRuleTombstones: 'tm_pc_header_timeout_selector_rule_tombstones_v1',
     sharedRulesClientId: 'tm_pc_header_timeout_shared_rules_client_id_v1',
     watchAlertWebhookUrl: 'tm_pc_header_timeout_watch_alert_webhook_url_v1',
-    timeoutTextWebhookUrl: 'tm_pc_header_timeout_text_webhook_url_v1'
+    timeoutTextWebhookUrl: 'tm_pc_header_timeout_text_webhook_url_v1',
+    timeoutRetryState: 'tm_pc_header_timeout_retry_state_v1',
+    timeoutRetryRequest: 'tm_pc_header_timeout_retry_request_v1',
+    timeoutRetryRequestedContext: 'tm_pc_header_timeout_retry_requested_context_v1'
   };
 
   const CFG = {
@@ -64,6 +67,10 @@
     uiMs: 250,
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
+    timeoutRetryLimit: 3,
+    timeoutRetryCloseDelayMs: 800,
+    timeoutRetryCloseRetryMs: 1200,
+    timeoutRetryCloseAttempts: 6,
     maxLogLines: 140,
     maxSentEvents: 300,
     maxRuleText: 280,
@@ -132,6 +139,7 @@
     pausedAtMs: 0,
     frozenElapsedMs: 0,
     timeoutDispatchInFlightKey: '',
+    timeoutRetryCloseAttemptedKey: '',
     selectorSkipLogKeys: new Map(),
     last360ValueLogKeys: new Set()
   };
@@ -642,6 +650,295 @@
     const resolved = gmUrl || localUrl || '';
     if (resolved) mirrorTimeoutTextWebhookUrl(resolved);
     else state.savedTimeoutTextWebhookUrl = '';
+  }
+
+  function readSharedJsonValue(key, fallback = null) {
+    const local = safeJsonParse(localStorage.getItem(key), undefined);
+    if (local !== undefined && local !== null) return local;
+    try {
+      const raw = GM_getValue(key, undefined);
+      if (raw === undefined || raw === null || raw === '') return fallback;
+      return typeof raw === 'string' ? safeJsonParse(raw, fallback) : raw;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeSharedJsonValue(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value, null, 2)); } catch {}
+    try { GM_setValue(key, value); } catch {}
+    return value;
+  }
+
+  function clearSharedJsonValue(key) {
+    try { localStorage.removeItem(key); } catch {}
+    try { GM_setValue(key, null); } catch {}
+  }
+
+  function readTimeoutRetryState() {
+    const raw = readSharedJsonValue(KEYS.timeoutRetryState, null);
+    if (!isPlainObject(raw)) return null;
+    return {
+      scope: normalizeText(raw.scope || ''),
+      retries: Math.max(0, Number(raw.retries || 0) || 0),
+      azId: normalizeText(raw.azId || ''),
+      product: normalizeText(raw.product || ''),
+      submission: normalizeText(raw.submission || ''),
+      header: normalizeText(raw.header || ''),
+      lastLaunchedContextKey: normalizeText(raw.lastLaunchedContextKey || ''),
+      lastLaunchedAt: normalizeText(raw.lastLaunchedAt || ''),
+      updatedAt: normalizeText(raw.updatedAt || '')
+    };
+  }
+
+  function writeTimeoutRetryState(value) {
+    if (!isPlainObject(value)) return null;
+    const next = {
+      scope: normalizeText(value.scope || ''),
+      retries: Math.max(0, Number(value.retries || 0) || 0),
+      azId: normalizeText(value.azId || ''),
+      product: normalizeText(value.product || ''),
+      submission: normalizeText(value.submission || ''),
+      header: normalizeText(value.header || ''),
+      lastLaunchedContextKey: normalizeText(value.lastLaunchedContextKey || ''),
+      lastLaunchedAt: normalizeText(value.lastLaunchedAt || ''),
+      updatedAt: normalizeText(value.updatedAt || nowIso())
+    };
+    return writeSharedJsonValue(KEYS.timeoutRetryState, next);
+  }
+
+  function clearTimeoutRetryState() {
+    clearSharedJsonValue(KEYS.timeoutRetryState);
+  }
+
+  function buildTimeoutRetryScope(context) {
+    return [
+      normalizeText(context?.job?.['AZ ID'] || ''),
+      normalizeText(context?.product || '')
+    ].join('|');
+  }
+
+  function readTimeoutRetryRequest() {
+    const raw = readSharedJsonValue(KEYS.timeoutRetryRequest, null);
+    if (!isPlainObject(raw)) return null;
+    return {
+      ready: raw.ready === true,
+      scope: normalizeText(raw.scope || ''),
+      timeoutContextKey: normalizeText(raw.timeoutContextKey || ''),
+      ticketId: normalizeText(raw.ticketId || raw.azId || ''),
+      azId: normalizeText(raw.azId || raw.ticketId || ''),
+      product: normalizeText(raw.product || ''),
+      submission: normalizeText(raw.submission || ''),
+      header: normalizeText(raw.header || ''),
+      attempt: Math.max(0, Number(raw.attempt || 0) || 0),
+      maxAttempts: Math.max(0, Number(raw.maxAttempts || 0) || 0),
+      requestedAt: normalizeText(raw.requestedAt || ''),
+      source: normalizeText(raw.source || ''),
+      version: normalizeText(raw.version || '')
+    };
+  }
+
+  function writeTimeoutRetryRequest(value) {
+    if (!isPlainObject(value)) return null;
+    const next = {
+      ready: value.ready === true,
+      scope: normalizeText(value.scope || ''),
+      timeoutContextKey: normalizeText(value.timeoutContextKey || ''),
+      ticketId: normalizeText(value.ticketId || value.azId || ''),
+      azId: normalizeText(value.azId || value.ticketId || ''),
+      product: normalizeText(value.product || ''),
+      submission: normalizeText(value.submission || ''),
+      header: normalizeText(value.header || ''),
+      attempt: Math.max(0, Number(value.attempt || 0) || 0),
+      maxAttempts: Math.max(0, Number(value.maxAttempts || 0) || 0),
+      requestedAt: normalizeText(value.requestedAt || nowIso()),
+      source: normalizeText(value.source || SCRIPT_NAME),
+      version: normalizeText(value.version || VERSION)
+    };
+    return writeSharedJsonValue(KEYS.timeoutRetryRequest, next);
+  }
+
+  function clearTimeoutRetryRequest() {
+    clearSharedJsonValue(KEYS.timeoutRetryRequest);
+  }
+
+  function buildTimeoutRetryRequestKey(request) {
+    return [
+      normalizeText(request?.scope || ''),
+      normalizeText(request?.timeoutContextKey || ''),
+      String(Math.max(0, Number(request?.attempt || 0) || 0)),
+      normalizeText(request?.requestedAt || '')
+    ].join('|');
+  }
+
+  function readTimeoutRetryRequestedContext() {
+    try { return normalizeText(sessionStorage.getItem(KEYS.timeoutRetryRequestedContext) || ''); }
+    catch { return ''; }
+  }
+
+  function writeTimeoutRetryRequestedContext(value) {
+    const next = normalizeText(value || '');
+    try {
+      if (next) sessionStorage.setItem(KEYS.timeoutRetryRequestedContext, next);
+      else sessionStorage.removeItem(KEYS.timeoutRetryRequestedContext);
+    } catch {}
+    return next;
+  }
+
+  function readTimeoutRetryStateForContext(context) {
+    const scope = buildTimeoutRetryScope(context);
+    if (!scope) {
+      clearTimeoutRetryState();
+      return { scope: '', retries: 0 };
+    }
+
+    const current = readTimeoutRetryState();
+    if (!current || current.scope !== scope) {
+      if (current?.scope) clearTimeoutRetryState();
+      return { scope, retries: 0 };
+    }
+
+    return current;
+  }
+
+  function rememberTimeoutRetry(context, retries) {
+    const scope = buildTimeoutRetryScope(context);
+    if (!scope) return null;
+    return writeTimeoutRetryState({
+      scope,
+      retries,
+      azId: normalizeText(context?.job?.['AZ ID'] || ''),
+      product: normalizeText(context?.product || ''),
+      submission: normalizeText(context?.submission || ''),
+      header: normalizeText(context?.header || '')
+    });
+  }
+
+  function tryTimeoutLauncherRecovery(context) {
+    const timeoutContextKey = buildTimeoutContextKey(context);
+    if (!timeoutContextKey) return false;
+    const current = readTimeoutRetryStateForContext(context);
+    const activeRequest = readTimeoutRetryRequest();
+    const activeRequestScope = normalizeText(activeRequest?.scope || '');
+    const requestedContextKey = readTimeoutRetryRequestedContext();
+
+    if (current.retries >= CFG.timeoutRetryLimit) {
+      if (activeRequest?.ready === true && activeRequestScope === current.scope) {
+        clearTimeoutRetryRequest();
+      }
+      return false;
+    }
+
+    if (activeRequest?.ready === true && activeRequestScope === current.scope) {
+      setStatus(`Waiting for launcher retry (${Math.max(1, activeRequest.attempt || current.retries)}/${CFG.timeoutRetryLimit})`);
+      return true;
+    }
+
+    if (requestedContextKey && requestedContextKey === timeoutContextKey) {
+      if (normalizeText(current.lastLaunchedContextKey || '') === timeoutContextKey) {
+        closeTimedOutTabAfterLauncherRetry(context, current);
+        return true;
+      }
+      writeTimeoutRetryRequestedContext('');
+      return false;
+    }
+
+    const nextRetry = current.retries + 1;
+    if (nextRetry > CFG.timeoutRetryLimit) return false;
+
+    rememberTimeoutRetry(context, nextRetry);
+    writeTimeoutRetryRequest({
+      ready: true,
+      scope: current.scope,
+      timeoutContextKey,
+      ticketId: normalizeText(context.job?.['AZ ID'] || ''),
+      azId: normalizeText(context.job?.['AZ ID'] || ''),
+      product: normalizeText(context.product || ''),
+      submission: normalizeText(context.submission || ''),
+      header: normalizeText(context.header || ''),
+      attempt: nextRetry,
+      maxAttempts: CFG.timeoutRetryLimit,
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    });
+    writeTimeoutRetryRequestedContext(timeoutContextKey);
+    setStatus(`Requesting launcher retry (${nextRetry}/${CFG.timeoutRetryLimit})`);
+    log(
+      `Header timeout retry requested (${nextRetry}/${CFG.timeoutRetryLimit}) | ` +
+      `${context.product.toUpperCase()} | AZ ${context.job['AZ ID']} | ${context.header}`
+    );
+    return true;
+  }
+
+  function tryCloseCurrentTimedOutTab() {
+    const wasClosed = !!window.closed;
+    try { window.close(); } catch {}
+    if (window.closed || wasClosed) return;
+
+    try { window.open(location.href, '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.open('', '_self'); } catch {}
+    try { window.close(); } catch {}
+    if (window.closed) return;
+
+    try { window.top?.close?.(); } catch {}
+    if (window.closed) return;
+
+    setTimeout(() => {
+      if (window.closed) return;
+      try { location.replace('about:blank'); } catch {}
+      setTimeout(() => {
+        try { window.close(); } catch {}
+      }, 100);
+    }, 350);
+  }
+
+  function attemptTimedOutTabClose(timeoutContextKey, attempt = 1) {
+    if (state.destroyed) return;
+    if (state.timeoutRetryCloseAttemptedKey !== timeoutContextKey) return;
+    if (window.closed) return;
+
+    setStatus(`Closing timed-out tab (${attempt}/${CFG.timeoutRetryCloseAttempts})`);
+    tryCloseCurrentTimedOutTab();
+
+    setTimeout(() => {
+      if (state.destroyed || window.closed) return;
+      if (state.timeoutRetryCloseAttemptedKey !== timeoutContextKey) return;
+      if (attempt < CFG.timeoutRetryCloseAttempts) {
+        attemptTimedOutTabClose(timeoutContextKey, attempt + 1);
+        return;
+      }
+      log('Timed-out GWPC tab close was blocked by the browser after launcher retry');
+      setStatus('Timed-out tab close blocked');
+    }, CFG.timeoutRetryCloseRetryMs);
+  }
+
+  function closeTimedOutTabAfterLauncherRetry(context, retryState) {
+    const timeoutContextKey = buildTimeoutContextKey(context);
+    if (!timeoutContextKey) {
+      setStatus(`Launcher retry launched (${retryState.retries}/${CFG.timeoutRetryLimit})`);
+      return;
+    }
+
+    if (state.timeoutRetryCloseAttemptedKey === timeoutContextKey) {
+      setStatus('Closing timed-out tab');
+      return;
+    }
+
+    state.timeoutRetryCloseAttemptedKey = timeoutContextKey;
+    state.running = false;
+    renderButtons();
+    setStatus(`Launcher retry launched (${retryState.retries}/${CFG.timeoutRetryLimit})`);
+    log(
+      `Launcher retry confirmed; closing timed-out GWPC tab | ` +
+      `${context.product.toUpperCase()} | AZ ${context.job['AZ ID']} | ${context.header}`
+    );
+    setTimeout(() => {
+      attemptTimedOutTabClose(timeoutContextKey, 1);
+    }, CFG.timeoutRetryCloseDelayMs);
   }
 
   function getTimeoutTextWebhookUrl() {
@@ -2344,6 +2641,8 @@
       }
       return;
     }
+
+    if (tryTimeoutLauncherRecovery(context)) return;
 
     queueTimeoutTextWebhookThenDispatch(event, context);
   }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.51
+// @version      1.0.52
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.51';
+  const VERSION = '1.0.52';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1469,7 +1469,9 @@
       ? 'YES'
       : (homeReady && exclusionsChecked && cfpDetectedFlag === false ? 'NO' : '');
     const cfpValue = pickFirst(homeRow['CFP?'], cfpFromTabs);
-    const chooseSuccessfulTag = options.forceFailedTag ? false : normalizeYes(doneValue);
+    // Fallback handling can still bypass final-payload gating, but a positive
+    // Done flag means the quote completed and should keep the success tag.
+    const chooseSuccessfulTag = normalizeYes(doneValue);
     const declineReason = chooseSuccessfulTag ? '' : getDeclineReasonForWorkflow({
       payload,
       homeRaw,

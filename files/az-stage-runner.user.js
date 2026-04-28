@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.34
+// @version      2.5.35
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.34';
+  const VERSION = '2.5.35';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -81,6 +81,8 @@
     WORKFLOW_CLEANUP_REQUEST: 'tm_az_workflow_cleanup_request_v1',
     FINISHER_CLOSE_SIGNAL: 'tm_az_finisher_ticket_closed_signal_v1',
     MISSING_PAYLOAD_TRIGGER: 'tm_az_missing_payload_fallback_trigger_v1',
+    TIMEOUT_RETRY_STATE: 'tm_pc_header_timeout_retry_state_v1',
+    TIMEOUT_RETRY_REQUEST: 'tm_pc_header_timeout_retry_request_v1',
     MAIN_PAYLOAD_FAILURES: 'tm_az_stage_runner_main_payload_failures_v1',
     FINAL_PAYLOAD: 'tm_az_gwpc_final_payload_v1',
     FINAL_READY: 'tm_az_gwpc_final_payload_ready_v1'
@@ -90,7 +92,8 @@
     BOOTSTRAP_RELOAD_TOKEN: 'tm_az_stage_runner_bootstrap_reload_token_v1',
     BOOTSTRAP_RELOAD_MODE: 'tm_az_stage_runner_bootstrap_reload_mode_v1',
     MISSING_PAYLOAD_HANDOFF_PAUSE: 'tm_az_stage_runner_missing_payload_handoff_pause_v1',
-    LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED: 'tm_az_stage_runner_last_workflow_cleanup_request_handled_v1'
+    LAST_WORKFLOW_CLEANUP_REQUEST_HANDLED: 'tm_az_stage_runner_last_workflow_cleanup_request_handled_v1',
+    LAST_TIMEOUT_RETRY_REQUEST_HANDLED: 'tm_az_stage_runner_last_timeout_retry_request_handled_v1'
   };
 
   const SEL = {
@@ -137,6 +140,8 @@
     'tm_pc_home_quote_grab_payload_v1',
     'tm_pc_auto_quote_grab_payload_v1',
     'tm_pc_webhook_bundle_v1',
+    'tm_pc_header_timeout_retry_state_v1',
+    'tm_pc_header_timeout_retry_request_v1',
     'tm_pc_webhook_submit_sent_meta_v17',
     'tm_pc_webhook_submit_url_v17',
     'tm_pc_webhook_submit_stopped_v17',
@@ -277,6 +282,7 @@
       if (
         event.key !== KEYS.FINISHER_CLOSE_SIGNAL
         && event.key !== KEYS.WORKFLOW_CLEANUP_REQUEST
+        && event.key !== KEYS.TIMEOUT_RETRY_REQUEST
         && event.key !== KEYS.FINAL_READY
         && event.key !== KEYS.FINAL_PAYLOAD
       ) return;
@@ -284,6 +290,8 @@
         ? 'finisher-close'
         : event.key === KEYS.WORKFLOW_CLEANUP_REQUEST
           ? 'workflow-cleanup'
+          : event.key === KEYS.TIMEOUT_RETRY_REQUEST
+            ? 'timeout-quote-retry'
           : 'final-home-payload';
       markExternalWake(reason);
     };
@@ -811,6 +819,39 @@
     } catch {}
   }
 
+  function clearTimeoutRetryRequest() {
+    try {
+      localStorage.removeItem(KEYS.TIMEOUT_RETRY_REQUEST);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.TIMEOUT_RETRY_REQUEST);
+    } catch {}
+  }
+
+  function markTimeoutRetryLaunched(request) {
+    const timeoutContextKey = norm(request?.timeoutContextKey || '');
+    const scope = norm(request?.scope || '');
+    if (!timeoutContextKey || !scope) return;
+
+    const current = readSharedJson(KEYS.TIMEOUT_RETRY_STATE, null);
+    const next = current && typeof current === 'object' && !Array.isArray(current)
+      ? { ...current }
+      : {};
+
+    next.scope = scope;
+    next.retries = Math.max(0, Number(request?.attempt || next.retries || 0) || 0);
+    next.azId = norm(request?.azId || request?.ticketId || next.azId || '');
+    next.product = norm(request?.product || next.product || '');
+    next.submission = norm(request?.submission || next.submission || '');
+    next.header = norm(request?.header || next.header || '');
+    next.lastLaunchedContextKey = timeoutContextKey;
+    next.lastLaunchedAt = nowIso();
+    next.updatedAt = nowIso();
+
+    try { localStorage.setItem(KEYS.TIMEOUT_RETRY_STATE, JSON.stringify(next)); } catch {}
+    try { GM_setValue(KEYS.TIMEOUT_RETRY_STATE, next); } catch {}
+  }
+
   function publishMissingPayloadTrigger(ticketId, reason = 'MAIN/PAYLOAD FAILED') {
     const cleanTicketId = norm(ticketId || '');
     if (!cleanTicketId) return false;
@@ -880,8 +921,22 @@
     return request && typeof request === 'object' ? request : null;
   }
 
+  function readTimeoutRetryRequest() {
+    const request = readSharedJson(KEYS.TIMEOUT_RETRY_REQUEST, null);
+    return request && typeof request === 'object' ? request : null;
+  }
+
   function buildWorkflowCleanupRequestKey(request) {
     return `${norm(request?.azId || request?.ticketId || '')}|${norm(request?.requestedAt || '')}`;
+  }
+
+  function buildTimeoutRetryRequestKey(request) {
+    return [
+      norm(request?.scope || ''),
+      norm(request?.timeoutContextKey || ''),
+      String(Math.max(0, Number(request?.attempt || 0) || 0)),
+      norm(request?.requestedAt || '')
+    ].join('|');
   }
 
   function markExternalWake(reason = 'external') {
@@ -946,6 +1001,34 @@
     return true;
   }
 
+  function consumeTimeoutRetryRequest(ticketId) {
+    const wantedId = norm(ticketId || '');
+    const request = readTimeoutRetryRequest();
+    if (!request || request.ready !== true) return null;
+
+    const requestId = norm(request.azId || request.ticketId || '');
+    const requestKey = buildTimeoutRetryRequestKey(request);
+    const requestedAtMs = Date.parse(norm(request.requestedAt || ''));
+    if (!requestId || !requestKey) return null;
+
+    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) {
+      clearTimeoutRetryRequest();
+      return null;
+    }
+
+    if (wantedId && requestId !== wantedId) return null;
+    if (readSession(SS_KEYS.LAST_TIMEOUT_RETRY_REQUEST_HANDLED) === requestKey) return null;
+
+    writeSession(SS_KEYS.LAST_TIMEOUT_RETRY_REQUEST_HANDLED, requestKey);
+    clearTimeoutRetryRequest();
+    log(
+      `Received timeout quote retry trigger | ${requestId} | ` +
+      `attempt ${Math.max(0, Number(request.attempt || 0) || 0)}/${Math.max(0, Number(request.maxAttempts || 0) || 0)}`,
+      'warn'
+    );
+    return request;
+  }
+
   function consumeFinalPayloadReady(ticketId, minSignalMs = 0) {
     const wantedId = norm(ticketId || '');
     if (!wantedId) return false;
@@ -973,6 +1056,42 @@
     if (consumeFinisherCloseSignal(ticketId)) return true;
     if (consumeWorkflowCleanupRequest(ticketId)) return true;
     return false;
+  }
+
+  async function relaunchHomeQuoteAfterTimeout(ticketId, options = {}, request = null) {
+    const cleanTicketId = norm(ticketId || '');
+    const attempt = Math.max(0, Number(request?.attempt || 0) || 0);
+    const maxAttempts = Math.max(0, Number(request?.maxAttempts || 0) || 0);
+    const attemptLabel = attempt && maxAttempts ? ` (${attempt}/${maxAttempts})` : '';
+
+    clearFinisherCloseSignal();
+    clearMissingPayloadTrigger();
+
+    const openInfo = getOpenTicketInfo();
+    if (
+      options.card instanceof Element
+      && (!isTicketDrawerOpen() || String(openInfo.ticketId || '') !== String(cleanTicketId))
+    ) {
+      const reopened = await openCard(options.card, cleanTicketId);
+      log(
+        reopened
+          ? `Reopened ticket for timeout retry${attemptLabel} | ${cleanTicketId}`
+          : `Could not reopen ticket for timeout retry${attemptLabel} | ${cleanTicketId}`,
+        reopened ? 'ok' : 'error'
+      );
+      if (!reopened) return false;
+    }
+
+    log(`Retrying Farmers Home Quote after GWPC timeout${attemptLabel} | ${cleanTicketId}`, 'warn');
+    const quoteStarted = await startQuoteFlow();
+    if (!quoteStarted) {
+      log(`Timeout retry quote click failed${attemptLabel} | ${cleanTicketId}`, 'error');
+      return false;
+    }
+
+    markTimeoutRetryLaunched(request);
+    log(`Timeout retry quote relaunched${attemptLabel} | ${cleanTicketId}`, 'ok');
+    return true;
   }
 
   function nowIso() {
@@ -1747,7 +1866,7 @@
     let drawerHiddenLogged = false;
     let finalPayloadReadyLogged = false;
     let mismatchFallbackSent = false;
-    const waitStartedAt = Date.now();
+    let waitStartedAt = Date.now();
     const maxWaitMs = Math.max(0, Number(options.maxWaitMs || 0));
     const timeoutLabel = norm(options.timeoutLabel || 'finisher');
 
@@ -1755,6 +1874,19 @@
       if (maxWaitMs && (Date.now() - waitStartedAt) >= maxWaitMs) {
         log(`Timed out waiting for ${timeoutLabel} close trigger | ${ticketId}`, 'error');
         return false;
+      }
+
+      const timeoutRetryRequest = consumeTimeoutRetryRequest(ticketId);
+      if (timeoutRetryRequest) {
+        const relaunched = await relaunchHomeQuoteAfterTimeout(ticketId, options, timeoutRetryRequest);
+        if (relaunched) {
+          lastLogAt = 0;
+          drawerHiddenLogged = false;
+          finalPayloadReadyLogged = false;
+          mismatchFallbackSent = false;
+          waitStartedAt = Date.now();
+          continue;
+        }
       }
 
       if (consumeFinisherWakeTrigger(ticketId)) {
