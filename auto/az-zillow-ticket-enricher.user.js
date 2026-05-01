@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.0
-// @description  AUTO-only Zillow enricher. Opens the Ingored v2 AgencyZoom pipeline ticket, searches Zillow for the Main address, fills selected Zillow fields back into the ticket, and replaces BQ/BQF with dotted tag targets.
+// @version      1.0.1
+// @description  AUTO-only Zillow enricher. For now it stays on by default, locks AgencyZoom to Ingored v2, and opens the next visible ticket automatically.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -60,6 +60,7 @@
   ];
 
   const CFG = {
+    openTicketOnly: true,
     savedQueryName: 'Ingored v2',
     savedQueryDataId: '79210',
     savedQueryUrlNeedle: 'tags=310769,310770',
@@ -178,13 +179,17 @@
   }
 
   function loadRunning() {
-    try { return localStorage.getItem(LS_KEYS.running) === '1'; } catch { return false; }
+    try {
+      const saved = localStorage.getItem(LS_KEYS.running);
+      if (saved === '0') return false;
+      if (saved === '1') return true;
+    } catch {}
+    return true;
   }
 
   function saveRunning(on) {
     try {
-      if (on) localStorage.setItem(LS_KEYS.running, '1');
-      else localStorage.removeItem(LS_KEYS.running);
+      localStorage.setItem(LS_KEYS.running, on ? '1' : '0');
     } catch {}
   }
 
@@ -1810,14 +1815,16 @@
   }
 
   async function runAzWorkflow() {
-    if (!hasAllFieldTargets()) {
-      setStatus('Field target setup required');
-      return;
-    }
+    if (!CFG.openTicketOnly) {
+      if (!hasAllFieldTargets()) {
+        setStatus('Field target setup required');
+        return;
+      }
 
-    if (!hasAllTagTargets()) {
-      setStatus('Tag target setup required');
-      return;
+      if (!hasAllTagTargets()) {
+        setStatus('Tag target setup required');
+        return;
+      }
     }
 
     let openTicket = getOpenTicketInfo();
@@ -1854,6 +1861,11 @@
 
     if (!state.activeTicketId) {
       setStatus('Waiting for open ticket');
+      return;
+    }
+
+    if (CFG.openTicketOnly) {
+      setStatus(`Ticket open: ${state.activeTicketId}`);
       return;
     }
 
@@ -2260,7 +2272,7 @@
       }
 
       log('Automation started');
-      if (isPipelinePage() && !getOpenTicketInfo().ticketId && hasAllFieldTargets() && hasAllTagTargets()) {
+      if (isPipelinePage() && !getOpenTicketInfo().ticketId) {
         log('Reloading pipeline before scan');
         requestBootstrapReload('manual-start');
         return;
