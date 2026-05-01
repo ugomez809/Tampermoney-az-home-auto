@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.4
-// @description  AUTO-only Zillow enricher. For now it stays on by default, switches AgencyZoom to Ingored v2, and opens the next visible ticket automatically.
+// @version      1.0.5
+// @description  AUTO-only Zillow enricher. For now it stays on by default, switches AgencyZoom to Ingored v2, and opens the next visible ticket using the launcher-style ticket opener.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -68,6 +68,11 @@
     savedQueryUrlNeedle: 'tags=310769,310770',
     tickMs: 900,
     stepPollMs: 150,
+    openTryMs: 4200,
+    openTotalMs: 12000,
+    openCheckAfterClickMs: 2000,
+    frontStableMs: 1200,
+    gapMs: 220,
     mainReadyMs: 10000,
     filterSettleMs: 1500,
     actionSettleMs: 900,
@@ -80,6 +85,7 @@
   };
 
   const SEL = {
+    stageWrap: '.dd-heading-wrapper',
     stageCards: '.dd-card.referral-container[data-id]',
     customerLink: 'a.customer[rel], a.customer',
 
@@ -166,6 +172,15 @@
     try { state.hoverBox?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
     try { delete window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__; } catch {}
+  }
+
+  function stopAutomation(reason = 'Automation stopped') {
+    state.running = false;
+    saveRunning(false);
+    state.busy = false;
+    setStatus('Stopped');
+    if (reason) log(reason);
+    renderAll();
   }
 
   function isAzOrigin() {
@@ -290,6 +305,36 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function isFrontTab() {
+    return document.visibilityState !== 'hidden';
+  }
+
+  async function waitUntilFrontStable(ms = CFG.frontStableMs) {
+    let stableSince = 0;
+
+    while (state.running && !state.destroyed) {
+      if (isFrontTab()) {
+        if (!stableSince) stableSince = Date.now();
+        if ((Date.now() - stableSince) >= ms) return true;
+      } else {
+        stableSince = 0;
+      }
+      await sleep(120);
+    }
+
+    return false;
+  }
+
+  async function foregroundSleep(ms) {
+    const end = Date.now() + ms;
+    while (state.running && !state.destroyed && Date.now() < end) {
+      const ok = await waitUntilFrontStable(0);
+      if (!ok) return false;
+      await sleep(Math.min(120, Math.max(0, end - Date.now())));
+    }
+    return state.running && !state.destroyed;
   }
 
   function visible(el) {
@@ -929,7 +974,7 @@
 
     const started = Date.now();
     while ((Date.now() - started) < 6000) {
-      if (state.destroyed) return false;
+      if (!state.running || state.destroyed) return false;
       if (isIgnoredV2Selected()) {
         await sleep(CFG.filterSettleMs);
         return true;
@@ -941,22 +986,36 @@
     return false;
   }
 
-  function getVisibleStageCards() {
-    return Array.from(document.querySelectorAll(SEL.stageCards)).filter(visible);
+  function getStageWrap() {
+    return Array.from(document.querySelectorAll(SEL.stageWrap))
+      .find((wrap) => visible(wrap) && !!wrap.parentElement) || null;
   }
 
-  async function waitForOpenTicket(ticketId, timeoutMs = 4200) {
+  function getStageContainer() {
+    return getStageWrap()?.parentElement || null;
+  }
+
+  function getVisibleStageCards() {
+    const stage = getStageContainer();
+    const cards = stage ? Array.from(stage.querySelectorAll(SEL.stageCards)) : Array.from(document.querySelectorAll(SEL.stageCards));
+    return cards.filter(visible);
+  }
+
+  async function waitForOpenTicket(ticketId, timeoutMs = CFG.openTryMs) {
     const started = Date.now();
     let drawerSeenAt = 0;
 
     while ((Date.now() - started) < timeoutMs) {
-      if (state.destroyed) return false;
+      if (!state.running || state.destroyed) return false;
       const info = getOpenTicketInfo();
       if (String(info.ticketId || '') === String(ticketId || '')) return true;
 
       if (isTicketDrawerOpen()) {
         if (!drawerSeenAt) drawerSeenAt = Date.now();
-        if ((Date.now() - drawerSeenAt) >= 2000) return true;
+        if ((Date.now() - drawerSeenAt) >= CFG.openCheckAfterClickMs) {
+          log(`Drawer detected open from side-actions after 2s | ${ticketId || '(unknown)'}`);
+          return true;
+        }
       } else {
         drawerSeenAt = 0;
       }
@@ -969,16 +1028,31 @@
 
   async function openCard(card, ticketId) {
     const currentOpen = getOpenTicketInfo().ticketId;
+    if (currentOpen && currentOpen !== ticketId) {
+      await closeTicketDrawer();
+      await foregroundSleep(CFG.gapMs);
+    }
     if (currentOpen && currentOpen === ticketId && isTicketDrawerOpen()) return true;
+    if (isTicketDrawerOpen()) return true;
 
     const link = card.querySelector(SEL.customerLink);
     const targets = [link, card].filter(Boolean);
+    const overallStart = Date.now();
 
-    for (const target of targets) {
-      strongClick(target);
-      log(`Opening ticket ${ticketId || '(unknown)'}`);
-      const ok = await waitForOpenTicket(ticketId);
-      if (ok) return true;
+    while (state.running && !state.destroyed && (Date.now() - overallStart) < CFG.openTotalMs) {
+      const stable = await waitUntilFrontStable(CFG.frontStableMs);
+      if (!stable) return false;
+
+      for (const target of targets) {
+        if (!target) continue;
+        strongClick(target);
+        log(`Clicked ticket target, waiting 2s for drawer...`);
+        const ok = await waitForOpenTicket(ticketId, CFG.openTryMs);
+        if (ok) return true;
+      }
+
+      const okGap = await foregroundSleep(CFG.gapMs);
+      if (!okGap) return false;
     }
 
     return false;
@@ -1141,7 +1215,7 @@
 
     const started = Date.now();
     while ((Date.now() - started) < CFG.closeWaitMs) {
-      if (state.destroyed) return true;
+      if (!state.running || state.destroyed) return true;
       if (!isTicketDrawerOpen()) {
         log(`Closed ticket drawer for ${before || 'current ticket'}`);
         return true;
@@ -2369,9 +2443,7 @@
       saveRunning(state.running);
 
       if (!state.running) {
-        setStatus('Stopped');
-        log('Automation stopped');
-        renderAll();
+        stopAutomation('Automation stopped');
         return;
       }
 
