@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.2
-// @description  AUTO-only Zillow enricher. For now it stays on by default and keeps AgencyZoom locked to the Ingored v2 pipeline filter.
+// @version      1.0.3
+// @description  AUTO-only Zillow enricher. For now it stays on by default and keeps AgencyZoom locked to the Ingored v2 pipeline filter using the saved-query picker.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -784,11 +784,14 @@
     );
   }
 
-  function findIgnoredV2Option() {
-    let best = null;
-    let bestScore = -1;
+  function getIgnoredV2Candidates() {
+    const candidates = [];
+    const seen = new Set();
 
     for (const el of Array.from(document.querySelectorAll(SEL.savedQueryItems))) {
+      if (!(el instanceof Element) || seen.has(el)) continue;
+      seen.add(el);
+
       const text = lower(el.textContent || '');
       const dataId = norm(el.getAttribute('data-id') || '');
       const url = lower(el.getAttribute('url') || '');
@@ -797,17 +800,23 @@
       if (dataId && dataId === CFG.savedQueryDataId) score += 10;
       if (url && url.includes(lower(CFG.savedQueryUrlNeedle))) score += 8;
       if (matchesIgnoredV2Label(text)) score += 6;
-      if (score > bestScore) {
-        best = el;
-        bestScore = score;
-      }
+      if (score <= 0) continue;
+
+      candidates.push({ el, score, text, dataId, url });
     }
 
-    return bestScore >= 6 ? best : null;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates;
+  }
+
+  function findIgnoredV2Option() {
+    const first = getIgnoredV2Candidates()[0] || null;
+    return first && first.score >= 6 ? first.el : null;
   }
 
   async function openSavedQueryDropdown() {
     const btn = document.querySelector(SEL.savedQueryButton);
+    const wrap = document.querySelector(SEL.savedQueryWrap);
     if (!btn || !visible(btn)) {
       log('Saved query filter button not found');
       return false;
@@ -815,20 +824,88 @@
 
     if (isSavedQueryDropdownOpen()) return true;
 
-    strongClick(btn);
-    await sleep(220);
-    if (isSavedQueryDropdownOpen()) return true;
-
-    try {
-      const $ = window.jQuery || window.$;
-      if ($ && typeof $(btn).dropdown === 'function') {
-        $(btn).dropdown('toggle');
-        await sleep(220);
-        if (isSavedQueryDropdownOpen()) return true;
+    const attempts = [
+      () => strongClick(btn),
+      () => strongClick(wrap || btn.parentElement || btn),
+      () => {
+        const $ = window.jQuery || window.$;
+        if ($ && typeof $(btn).dropdown === 'function') {
+          $(btn).dropdown('toggle');
+          return true;
+        }
+        return false;
+      },
+      () => {
+        try {
+          btn.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'ArrowDown',
+            code: 'ArrowDown',
+            bubbles: true,
+            cancelable: true
+          }));
+          btn.dispatchEvent(new KeyboardEvent('keyup', {
+            key: 'ArrowDown',
+            code: 'ArrowDown',
+            bubbles: true,
+            cancelable: true
+          }));
+          return true;
+        } catch {
+          return false;
+        }
       }
-    } catch {}
+    ];
 
-    return isSavedQueryDropdownOpen();
+    for (const attempt of attempts) {
+      try { attempt(); } catch {}
+      await sleep(220);
+      if (isSavedQueryDropdownOpen()) return true;
+    }
+
+    return isSavedQueryDropdownOpen() || !!findIgnoredV2Option();
+  }
+
+  async function activateSavedQueryItem(item) {
+    if (!(item instanceof Element)) return false;
+
+    const attempts = [
+      () => strongClick(item),
+      () => {
+        try { item.click(); return true; } catch { return false; }
+      },
+      () => {
+        const $ = window.jQuery || window.$;
+        if ($) {
+          $(item).trigger('click');
+          return true;
+        }
+        return false;
+      },
+      () => {
+        try {
+          item.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: item.ownerDocument?.defaultView || window
+          }));
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    ];
+
+    for (const attempt of attempts) {
+      try { attempt(); } catch {}
+      await sleep(260);
+      if (isIgnoredV2Selected()) {
+        await sleep(CFG.filterSettleMs);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async function ensureIgnoredV2Filter() {
@@ -846,8 +923,9 @@
       return false;
     }
 
-    strongClick(item);
-    log(`Selected saved query: ${CFG.savedQueryName}`);
+    const clicked = await activateSavedQueryItem(item);
+    log(`${clicked ? 'Triggered' : 'Tried'} saved query: ${CFG.savedQueryName}`);
+    if (clicked && isIgnoredV2Selected()) return true;
 
     const started = Date.now();
     while ((Date.now() - started) < 6000) {
