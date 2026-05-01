@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.11
-// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait for Continue New Quote readiness, and recover when one PC blocks the GWPC popup handoff.
+// @version      1.8.13
+// @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.11';
+  const VERSION = '1.8.13';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -62,7 +62,11 @@
     zIndex: 2147483647,
     posKey: 'tm_apex_continue_new_quote_panel_pos_v18',
     doneThisLoadKey: 'tm_apex_continue_new_quote_done_this_load_v18',
-    sameElementCooldownMs: 4000
+    sameElementCooldownMs: 4000,
+    addressRepairStateKey: 'tm_apex_address_repair_state_v1',
+    addressRepairStateStaleMs: 30000,
+    addressRepairReadyTimeoutMs: 18000,
+    addressRepairNoStateFallbackMs: 2500
   };
 
   const state = {
@@ -90,6 +94,16 @@
 
   function now() {
     return Date.now();
+  }
+
+  function readLocalJson(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null || raw === '') return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
   }
 
   function resolveOpenUrl(rawUrl) {
@@ -1245,6 +1259,129 @@
     }
   }
 
+  function readAddressRepairState() {
+    const value = readLocalJson(CFG.addressRepairStateKey, null);
+    return value && typeof value === 'object' ? value : null;
+  }
+
+  function getFreshAddressRepairStateForQuote(quoteKey = '') {
+    const repairState = readAddressRepairState();
+    if (!repairState || typeof repairState !== 'object') return null;
+    const updatedMs = Date.parse(norm(repairState.updatedAt || ''));
+    if (Number.isFinite(updatedMs) && (now() - updatedMs) > CFG.addressRepairStateStaleMs) {
+      return null;
+    }
+
+    const quoteName = norm(repairState.quoteName || '');
+    if (quoteName && quoteKey && !lower(quoteKey).includes(lower(quoteName))) {
+      return null;
+    }
+
+    return repairState;
+  }
+
+  function getAddressRepairSelectionMode(repairState) {
+    const mode = lower(repairState?.selectionMode || '');
+    return mode === 'risk' ? 'risk' : 'residence';
+  }
+
+  function isAddressRepairBlockingStatus(status) {
+    return !!status && status !== 'ready' && status !== 'waiting-home' && status !== 'idle';
+  }
+
+  function announceAddressRepairWait(repairState) {
+    const status = lower(repairState?.status || '');
+    const message = norm(repairState.message || repairState.status || 'Waiting for APEX address repair.');
+    logWait(message, 2500);
+    setStatus(status === 'needs-review' ? 'Address needs review' : 'Waiting on address repair');
+  }
+
+  function shouldPauseBeforeHomeForAddressRepair(quoteKey) {
+    const repairState = getFreshAddressRepairStateForQuote(quoteKey);
+    if (!repairState || repairState.active !== true) return false;
+
+    const status = lower(repairState.status || '');
+    if (!isAddressRepairBlockingStatus(status)) return false;
+
+    announceAddressRepairWait(repairState);
+    return true;
+  }
+
+  async function waitForAddressRepairDecision(quoteKey) {
+    const startedAt = now();
+    let sawBlockingState = false;
+    let lastBlockingMessage = '';
+
+    while ((now() - startedAt) < CFG.addressRepairReadyTimeoutMs) {
+      const repairState = getFreshAddressRepairStateForQuote(quoteKey);
+      if (!repairState || repairState.active !== true) {
+        if ((now() - startedAt) >= CFG.addressRepairNoStateFallbackMs) {
+          return {
+            ready: true,
+            selectionMode: 'residence',
+            source: 'fallback-no-state'
+          };
+        }
+        await sleep(CFG.waitIntervalMs);
+        continue;
+      }
+
+      const status = lower(repairState.status || '');
+      if (status === 'ready') {
+        return {
+          ready: true,
+          selectionMode: getAddressRepairSelectionMode(repairState),
+          source: 'repair-state',
+          repairState
+        };
+      }
+
+      if (!status || status === 'waiting-home' || status === 'idle') {
+        if ((now() - startedAt) >= CFG.addressRepairNoStateFallbackMs) {
+          return {
+            ready: true,
+            selectionMode: 'residence',
+            source: 'fallback-dormant-state'
+          };
+        }
+        await sleep(CFG.waitIntervalMs);
+        continue;
+      }
+
+      if (status === 'needs-review') {
+        announceAddressRepairWait(repairState);
+        return {
+          ready: false,
+          blocked: true,
+          repairState
+        };
+      }
+
+      if (isAddressRepairBlockingStatus(status)) {
+        sawBlockingState = true;
+        lastBlockingMessage = norm(repairState.message || repairState.status || '');
+        announceAddressRepairWait(repairState);
+      }
+
+      await sleep(CFG.waitIntervalMs);
+    }
+
+    if (sawBlockingState) {
+      if (lastBlockingMessage) log(lastBlockingMessage);
+      setStatus('Waiting on address repair');
+      return {
+        ready: false,
+        blocked: true
+      };
+    }
+
+    return {
+      ready: true,
+      selectionMode: 'residence',
+      source: 'fallback-timeout'
+    };
+  }
+
   async function runFlow() {
     if (state.busy || state.doneThisLoad) return;
 
@@ -1265,28 +1402,52 @@
     log(`Quote detected: ${quoteKey}`);
 
     try {
-      const homeTarget = getHomeTarget();
-      if (!homeTarget) {
-        log('Home control for custom107 missing.');
-        setStatus('Running');
+      if (shouldPauseBeforeHomeForAddressRepair(quoteKey)) {
         return;
       }
 
-      log(`Clicking Home control: ${getLabel(homeTarget) || homeTarget.tagName}`);
-      const homeClicked = hardClick(homeTarget, 'Home control');
-      if (!homeClicked) {
-        log('Home click skipped/blocked.');
-        setStatus('Running');
+      const repairStateBeforeHome = getFreshAddressRepairStateForQuote(quoteKey);
+      const readyRiskBeforeHome =
+        repairStateBeforeHome &&
+        repairStateBeforeHome.active === true &&
+        lower(repairStateBeforeHome.status || '') === 'ready' &&
+        getAddressRepairSelectionMode(repairStateBeforeHome) === 'risk';
+
+      if (!readyRiskBeforeHome) {
+        const homeTarget = getHomeTarget();
+        if (!homeTarget) {
+          log('Home control for custom107 missing.');
+          setStatus('Running');
+          return;
+        }
+
+        log(`Clicking Home control: ${getLabel(homeTarget) || homeTarget.tagName}`);
+        const homeClicked = hardClick(homeTarget, 'Home control');
+        if (!homeClicked) {
+          log('Home click skipped/blocked.');
+          setStatus('Running');
+          return;
+        }
+
+        log('Waiting 2 seconds after Home click...');
+        await sleep(CFG.afterHomeClickMs);
+      } else {
+        log('Risk Address was already prepared by APEX Address Repair; skipping Home click.');
+      }
+
+      const repairDecision = await waitForAddressRepairDecision(quoteKey);
+      if (!repairDecision.ready) {
         return;
       }
 
-      log('Waiting 2 seconds after Home click...');
-      await sleep(CFG.afterHomeClickMs);
-
-      const residenceSelected = await ensureResidenceAddressSelected();
-      if (!residenceSelected) {
-        setStatus('Running');
-        return;
+      if (repairDecision.selectionMode !== 'risk') {
+        const residenceSelected = await ensureResidenceAddressSelected();
+        if (!residenceSelected) {
+          setStatus('Running');
+          return;
+        }
+      } else {
+        log('APEX Address Repair selected Risk Address; skipping Residence Address click.');
       }
 
       log(`Waiting ${Math.ceil(CFG.afterResidenceBeforeContinueMs / 1000)} seconds before Continue New Quote readiness check...`);
