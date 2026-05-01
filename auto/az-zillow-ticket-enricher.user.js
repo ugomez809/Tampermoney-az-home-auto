@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.1
-// @description  AUTO-only Zillow enricher. For now it stays on by default, locks AgencyZoom to Ingored v2, and opens the next visible ticket automatically.
+// @version      1.0.2
+// @description  AUTO-only Zillow enricher. For now it stays on by default and keeps AgencyZoom locked to the Ingored v2 pipeline filter.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -60,8 +60,10 @@
   ];
 
   const CFG = {
+    filterOnly: true,
     openTicketOnly: true,
     savedQueryName: 'Ingored v2',
+    savedQueryAliases: ['Ingored v2', 'Ignored v2'],
     savedQueryDataId: '79210',
     savedQueryUrlNeedle: 'tags=310769,310770',
     tickMs: 900,
@@ -761,8 +763,16 @@
     return norm(document.querySelector(SEL.savedQueryLabel)?.textContent || document.querySelector(SEL.savedQueryButton)?.textContent || '');
   }
 
+  function matchesIgnoredV2Label(value) {
+    const text = lower(value);
+    return (CFG.savedQueryAliases || []).some((name) => {
+      const want = lower(name);
+      return !!want && (text === want || text.includes(want));
+    });
+  }
+
   function isIgnoredV2Selected() {
-    return lower(getCurrentSavedQueryLabel()) === lower(CFG.savedQueryName);
+    return matchesIgnoredV2Label(getCurrentSavedQueryLabel());
   }
 
   function isSavedQueryDropdownOpen() {
@@ -775,16 +785,25 @@
   }
 
   function findIgnoredV2Option() {
-    return Array.from(document.querySelectorAll(SEL.savedQueryItems))
-      .filter(visible)
-      .find((el) => {
-        const text = lower(el.textContent || '');
-        const dataId = norm(el.getAttribute('data-id') || '');
-        const url = lower(el.getAttribute('url') || '');
-        return text === lower(CFG.savedQueryName)
-          || dataId === CFG.savedQueryDataId
-          || url.includes(lower(CFG.savedQueryUrlNeedle));
-      }) || null;
+    let best = null;
+    let bestScore = -1;
+
+    for (const el of Array.from(document.querySelectorAll(SEL.savedQueryItems))) {
+      const text = lower(el.textContent || '');
+      const dataId = norm(el.getAttribute('data-id') || '');
+      const url = lower(el.getAttribute('url') || '');
+      let score = 0;
+      if (visible(el)) score += 3;
+      if (dataId && dataId === CFG.savedQueryDataId) score += 10;
+      if (url && url.includes(lower(CFG.savedQueryUrlNeedle))) score += 8;
+      if (matchesIgnoredV2Label(text)) score += 6;
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+
+    return bestScore >= 6 ? best : null;
   }
 
   async function openSavedQueryDropdown() {
@@ -1827,18 +1846,25 @@
       }
     }
 
+    if (isPipelinePage()) {
+      const filterReady = await ensureIgnoredV2Filter();
+      if (!filterReady) {
+        setStatus('Ingored v2 filter failed');
+        return;
+      }
+
+      if (CFG.filterOnly) {
+        setStatus(`${CFG.savedQueryName} selected`);
+        return;
+      }
+    }
+
     let openTicket = getOpenTicketInfo();
     state.activeTicketId = norm(openTicket.ticketId || '');
 
     if (!state.activeTicketId) {
       if (!isPipelinePage()) {
         setStatus('Open AgencyZoom pipeline or a ticket');
-        return;
-      }
-
-      const filterReady = await ensureIgnoredV2Filter();
-      if (!filterReady) {
-        setStatus('Ingored v2 filter failed');
         return;
       }
 
