@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.8
+// @version      1.0.9
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.8';
+  const VERSION = '1.0.9';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -199,15 +199,18 @@
   function loadRunning() {
     try {
       const saved = localStorage.getItem(LS_KEYS.running);
-      if (saved === '0') return false;
       if (saved === '1') return true;
+      if (saved === '0') {
+        localStorage.removeItem(LS_KEYS.running);
+      }
     } catch {}
     return true;
   }
 
   function saveRunning(on) {
     try {
-      localStorage.setItem(LS_KEYS.running, on ? '1' : '0');
+      if (on) localStorage.setItem(LS_KEYS.running, '1');
+      else localStorage.removeItem(LS_KEYS.running);
     } catch {}
   }
 
@@ -1351,6 +1354,14 @@
     }
   }
 
+  function extractFirstLabeledValue(labels) {
+    for (const label of labels) {
+      const value = extractLabelValueFromBody(label);
+      if (norm(value)) return value;
+    }
+    return '';
+  }
+
   function extractLabeledValueFromDom(label) {
     const wanted = norm(label);
     if (!wanted) return '';
@@ -1416,8 +1427,9 @@
         /["']?bathrooms?["']?\s*:\s*"?([0-9.]+)"?/i,
         /"bathrooms?"\s*:\s*"?([0-9.]+)"?/i,
         /"baths?"\s*:\s*"?([0-9.]+)"?/i,
-        /"numberOfBathroomsTotal"\s*:\s*"?([0-9.]+)"?/i,
-        /"bathroomsFull"\s*:\s*"?([0-9.]+)"?/i
+        /["']?numberOfBathroomsTotal["']?\s*:\s*"?([0-9.]+)"?/i,
+        /["']?bathroomsFull["']?\s*:\s*"?([0-9.]+)"?/i,
+        /["']?bathroomsFloat["']?\s*:\s*"?([0-9.]+)"?/i
       ]),
       homeType: extractRegexValue(joined, [
         /["']?homeType["']?\s*:\s*"([^"]+)"/i,
@@ -1467,11 +1479,11 @@
   function scrapeZillowResult() {
     const hints = readZillowScriptHints();
     const bedrooms = normalizeRoomValue(firstNonEmpty(
-      extractLabelValueFromBody('Bedrooms'),
+      extractFirstLabeledValue(['Bedrooms', 'Bedroom', 'Beds', 'Bed']),
       hints.bedrooms
     ));
     const bathrooms = normalizeRoomValue(firstNonEmpty(
-      extractLabelValueFromBody('Bathrooms'),
+      extractFirstLabeledValue(['Bathrooms', 'Bathroom', 'Baths', 'Bath']),
       hints.bathrooms
     ));
     const homeType = normalizeHomeType(firstNonEmpty(
@@ -1519,6 +1531,7 @@
     const hasBathrooms = !!norm(scraped.bathrooms);
     const hasHomeType = !!norm(scraped.homeType);
     const hasRoomFacts = hasBedrooms || hasBathrooms;
+    const roomFactsComplete = hasBedrooms && hasBathrooms;
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
 
@@ -1526,7 +1539,7 @@
       return;
     }
 
-    if (!hasRoomFacts && listingAgeMs < CFG.zillowFactSettleMs) {
+    if (!roomFactsComplete && listingAgeMs < CFG.zillowFactSettleMs) {
       return;
     }
 
