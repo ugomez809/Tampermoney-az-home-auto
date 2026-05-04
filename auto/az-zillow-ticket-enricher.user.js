@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.18';
+  const VERSION = '1.0.19';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1476,6 +1476,13 @@
       return true;
     }
 
+    if (jobStatus === 'failed' && /verification required|press & hold|captcha/i.test(norm(job?.error || ''))) {
+      state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
+      state.zillowSummary = summarizeResult(job?.result);
+      setStatus(norm(job.error || 'Zillow verification required'));
+      return true;
+    }
+
     return false;
   }
 
@@ -1627,6 +1634,30 @@
     };
   }
 
+  function detectZillowVerificationBlock() {
+    const title = norm(document.title || '');
+    const body = norm(document.body?.innerText || '');
+    const html = norm(document.documentElement?.innerText || '');
+    const text = lower([title, body, html].filter(Boolean).join(' '));
+    if (!text) return '';
+
+    if (
+      text.includes('access to this page has been denied') ||
+      text.includes('press & hold') ||
+      text.includes('before we continue') ||
+      text.includes('confirm you are human') ||
+      text.includes('reference id')
+    ) {
+      return 'Zillow verification required (Press & Hold page)';
+    }
+
+    if (text.includes('captcha') && text.includes('zillow')) {
+      return 'Zillow verification required (captcha page)';
+    }
+
+    return '';
+  }
+
   function scrapeZillowResult() {
     const hints = readZillowScriptHints();
     const bedrooms = normalizeRoomValue(firstNonEmpty(
@@ -1656,6 +1687,16 @@
     const job = getJob();
     if (!isPlainObject(job)) return;
     if (!['pending', 'searching'].includes(norm(job.status || ''))) return;
+
+    const verificationBlock = detectZillowVerificationBlock();
+    if (verificationBlock) {
+      job.status = 'failed';
+      job.updatedAt = nowIso();
+      job.error = verificationBlock;
+      saveJob(job);
+      try { console.log(`[${SCRIPT_NAME}] ${verificationBlock} for ${job.ticketId}`); } catch {}
+      return;
+    }
 
     if (!isZillowListingPage()) {
       const cardResult = scrapeZillowSearchResultCard(job);
