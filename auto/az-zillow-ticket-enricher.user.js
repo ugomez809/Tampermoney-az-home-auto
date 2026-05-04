@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.6
-// @description  AUTO-only Zillow enricher. For now it stays on by default, switches AgencyZoom to Ingored v2, and opens the next visible ticket using the launcher-style ticket opener.
+// @version      1.0.7
+// @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -61,7 +61,7 @@
 
   const CFG = {
     filterOnly: false,
-    openTicketOnly: true,
+    openTicketOnly: false,
     savedQueryName: 'Ingored v2',
     savedQueryAliases: ['Ingored v2', 'Ignored v2'],
     savedQueryDataId: '79210',
