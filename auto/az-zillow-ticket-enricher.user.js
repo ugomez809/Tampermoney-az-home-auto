@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.1
+// @version      1.2.2
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.1';
+  const VERSION = '1.2.2';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1421,6 +1421,26 @@
     saveJob(job);
   }
 
+  function reportCaptchaWaitOnce(job) {
+    if (!isPlainObject(job)) return;
+    if (norm(job.azCaptchaReportedAt || '')) return;
+    const reason = getZillowJobErrorText(job, 'Zillow captcha detected');
+    log(`Zillow captcha detected for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${reason}. Solve it in the Zillow tab to resume.`);
+    job.azCaptchaReportedAt = nowIso();
+    job.updatedAt = nowIso();
+    saveJob(job);
+  }
+
+  function markJobCaptcha(job, reason) {
+    if (!isPlainObject(job)) return false;
+    job.status = 'captcha';
+    job.updatedAt = nowIso();
+    job.error = norm(reason || 'Zillow captcha detected');
+    if (!norm(job.captchaDetectedAt || '')) job.captchaDetectedAt = nowIso();
+    saveJob(job);
+    return true;
+  }
+
   function promoteJobToFallback(job, reason, overrides = null) {
     if (!isPlainObject(job)) return false;
     job.status = 'result-ready';
@@ -1525,6 +1545,14 @@
     const jobStatus = norm(job?.status || '');
     const sameTicketJob = jobMatchesTicket(job, state.activeTicketId);
     if (!sameTicketJob) return false;
+
+    if (jobStatus === 'captcha') {
+      state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
+      state.zillowSummary = firstNonEmpty(norm(job?.error || ''), summarizeResult(job?.result));
+      reportCaptchaWaitOnce(job);
+      setStatus(`Waiting for human Zillow captcha for ${state.activeTicketId}`);
+      return true;
+    }
 
     if (['pending', 'searching'].includes(jobStatus)) {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
@@ -1806,14 +1834,25 @@
 
     const job = getJob();
     if (!isPlainObject(job)) return;
-    if (!['pending', 'searching'].includes(norm(job.status || ''))) return;
+    if (!['pending', 'searching', 'captcha'].includes(norm(job.status || ''))) return;
 
     const verificationBlock = detectZillowVerificationBlock();
     if (verificationBlock) {
-      promoteJobToFallback(job, verificationBlock);
-      try { console.log(`[${SCRIPT_NAME}] Using fallback Zillow data for ${job.ticketId}: ${verificationBlock}`); } catch {}
-      closeCurrentTabSoon();
+      if (norm(job.status || '') !== 'captcha') {
+        markJobCaptcha(job, verificationBlock);
+        try { console.log(`[${SCRIPT_NAME}] Waiting for human captcha solve for ${job.ticketId}: ${verificationBlock}`); } catch {}
+      }
       return;
+    }
+
+    if (norm(job.status || '') === 'captcha') {
+      job.status = 'searching';
+      job.updatedAt = nowIso();
+      job.error = '';
+      job.azCaptchaReportedAt = '';
+      job.captchaSolvedAt = nowIso();
+      saveJob(job);
+      try { console.log(`[${SCRIPT_NAME}] Zillow captcha cleared for ${job.ticketId}; resuming scrape`); } catch {}
     }
 
     if (!isZillowListingPage()) {
