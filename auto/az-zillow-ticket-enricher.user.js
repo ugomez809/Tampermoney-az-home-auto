@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.19
+// @version      1.0.20
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.19';
+  const VERSION = '1.0.20';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -81,7 +81,8 @@
     zillowWaitMs: 45000,
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
-    zillowMaxLaunches: 2,
+    zillowMaxLaunches: 1,
+    zillowDeadPageMs: 18000,
     zillowSearchFallbackMs: 5000,
     maxLogLines: 80,
     panelWidth: 390,
@@ -1358,6 +1359,22 @@
     return Math.floor(raw);
   }
 
+  function hasZillowJobProgress(job) {
+    if (!isPlainObject(job)) return false;
+    if (isPlainObject(job.result)) return true;
+    return !!norm(job?.listingNavigatedAt || job?.listingSeenAt || job?.resultReadyAt || '');
+  }
+
+  function getZillowJobErrorText(job, fallback = 'Unknown Zillow error') {
+    return norm(job?.error || fallback) || fallback;
+  }
+
+  function closeCurrentTabSoon() {
+    setTimeout(() => {
+      try { window.close(); } catch {}
+    }, 250);
+  }
+
   function getIsoAgeMs(value) {
     return Math.max(0, Date.now() - Date.parse(norm(value || nowIso())));
   }
@@ -1445,6 +1462,16 @@
       state.zillowSummary = summarizeResult(job?.result);
 
       const ageMs = getJobActiveAgeMs(job);
+      if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
+        job.status = 'failed';
+        job.updatedAt = nowIso();
+        job.error = 'Zillow opened but no property data ever loaded';
+        saveJob(job);
+        setStatus(`Job failed: ${job.error}`);
+        log(`Zillow never exposed property data for AZ ${state.activeTicketId}`);
+        return true;
+      }
+
       if (shouldRelaunchStaleZillowJob(job)) {
         const reopened = launchZillowSearch(job);
         if (reopened) {
@@ -1476,10 +1503,10 @@
       return true;
     }
 
-    if (jobStatus === 'failed' && /verification required|press & hold|captcha/i.test(norm(job?.error || ''))) {
+    if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
-      setStatus(norm(job.error || 'Zillow verification required'));
+      setStatus(`Job failed: ${getZillowJobErrorText(job)}`);
       return true;
     }
 
@@ -1639,14 +1666,30 @@
     const body = norm(document.body?.innerText || '');
     const html = norm(document.documentElement?.innerText || '');
     const text = lower([title, body, html].filter(Boolean).join(' '));
+    const perimeterSignals = [
+      '[id*="px-captcha"]',
+      '[class*="px-captcha"]',
+      'iframe[src*="captcha"]',
+      'script[src*="perimeterx"]',
+      'script[src*="humansecurity"]',
+      'script[src*="captcha-delivery"]'
+    ];
+
+    if (perimeterSignals.some((selector) => document.querySelector(selector))) {
+      return 'Zillow verification required (PerimeterX page)';
+    }
+
     if (!text) return '';
 
     if (
       text.includes('access to this page has been denied') ||
       text.includes('press & hold') ||
+      text.includes('press and hold') ||
       text.includes('before we continue') ||
       text.includes('confirm you are human') ||
-      text.includes('reference id')
+      text.includes('reference id') ||
+      text.includes('verify you are human') ||
+      text.includes('unusual traffic')
     ) {
       return 'Zillow verification required (Press & Hold page)';
     }
@@ -1695,6 +1738,7 @@
       job.error = verificationBlock;
       saveJob(job);
       try { console.log(`[${SCRIPT_NAME}] ${verificationBlock} for ${job.ticketId}`); } catch {}
+      closeCurrentTabSoon();
       return;
     }
 
@@ -1718,9 +1762,17 @@
         job.result = cardResult;
         saveJob(job);
         try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
-        setTimeout(() => {
-          try { window.close(); } catch {}
-        }, 250);
+        closeCurrentTabSoon();
+        return;
+      }
+
+      if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowDeadPageMs) {
+        job.status = 'failed';
+        job.updatedAt = nowIso();
+        job.error = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
+        saveJob(job);
+        try { console.log(`[${SCRIPT_NAME}] ${job.error} for ${job.ticketId}`); } catch {}
+        closeCurrentTabSoon();
         return;
       }
 
@@ -1757,9 +1809,7 @@
     saveJob(job);
 
     try { console.log(`[${SCRIPT_NAME}] Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`); } catch {}
-    setTimeout(() => {
-      try { window.close(); } catch {}
-    }, 250);
+    closeCurrentTabSoon();
   }
 
   function getOpenTicketTagLabels() {
