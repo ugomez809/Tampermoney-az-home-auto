@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.17
+// @version      1.0.18
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.17';
+  const VERSION = '1.0.18';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -82,6 +82,7 @@
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
     zillowMaxLaunches: 2,
+    zillowSearchFallbackMs: 5000,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -1283,7 +1284,10 @@
     if (!text) return '';
     const condensed = lower(text).replace(/[^a-z]/g, '');
     const map = {
+      house: 'SingleFamily',
       singlefamily: 'SingleFamily',
+      singlefamilyresidence: 'SingleFamily',
+      singlefamilyhome: 'SingleFamily',
       multifamily: 'MultiFamily',
       townhouse: 'Townhouse',
       townhome: 'Townhome',
@@ -1298,6 +1302,28 @@
       cooperative: 'CoOp'
     };
     return map[condensed] || text.replace(/\s+/g, '');
+  }
+
+  function extractBedroomTextValue(text) {
+    const source = norm(text);
+    if (!source) return '';
+    if (/\bstudio\b/i.test(source)) return 'Studio';
+    const match = source.match(/\b(\d+(?:\.\d+)?)\s*(?:bd|bds|bed|beds|bedroom|bedrooms)\b/i);
+    return match ? norm(match[1]) : '';
+  }
+
+  function extractBathroomTextValue(text) {
+    const source = norm(text);
+    if (!source) return '';
+    const match = source.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bas|bath|baths|bathroom|bathrooms)\b/i);
+    return match ? norm(match[1]) : '';
+  }
+
+  function extractHomeTypeFromText(text) {
+    const source = norm(text);
+    if (!source) return '';
+    const match = source.match(/\b(single family(?: residence| home)?|house|multi family|townhouse|townhome|condo|condominium|apartment|duplex|triplex|manufactured(?: home)?|mobile home|co-?op)\b/i);
+    return match ? norm(match[1]) : '';
   }
 
   function summarizeResult(result) {
@@ -1575,6 +1601,32 @@
     return bestScore >= 8 ? best : null;
   }
 
+  function scrapeZillowSearchResultCard(job) {
+    const anchor = findLikelyZillowListingLink(job);
+    if (!(anchor instanceof HTMLAnchorElement) || !norm(anchor.href)) return null;
+
+    const card = anchor.closest('article, li, [data-test="property-card"], [class*="StyledPropertyCard"], [class*="property-card"], [class*="PropertyCard"], [class*="ListItem"]') || anchor.parentElement || anchor;
+    const text = norm([
+      anchor.getAttribute('aria-label'),
+      card?.innerText,
+      anchor.innerText
+    ].filter(Boolean).join(' '));
+    if (!text) return null;
+
+    const bedrooms = normalizeRoomValue(extractBedroomTextValue(text));
+    const bathrooms = normalizeRoomValue(extractBathroomTextValue(text));
+    const homeType = normalizeHomeType(extractHomeTypeFromText(text));
+
+    if (!norm(bedrooms) && !norm(bathrooms) && !norm(homeType)) return null;
+
+    return {
+      zillowUrl: anchor.href,
+      bedrooms,
+      bathrooms,
+      homeType
+    };
+  }
+
   function scrapeZillowResult() {
     const hints = readZillowScriptHints();
     const bedrooms = normalizeRoomValue(firstNonEmpty(
@@ -1606,6 +1658,7 @@
     if (!['pending', 'searching'].includes(norm(job.status || ''))) return;
 
     if (!isZillowListingPage()) {
+      const cardResult = scrapeZillowSearchResultCard(job);
       if (!norm(job.listingNavigatedAt || '')) {
         const listing = findLikelyZillowListingLink(job);
         if (listing?.href) {
@@ -1616,6 +1669,20 @@
           return;
         }
       }
+
+      if (cardResult && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
+        job.status = 'result-ready';
+        job.updatedAt = nowIso();
+        job.resultReadyAt = nowIso();
+        job.result = cardResult;
+        saveJob(job);
+        try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
+        setTimeout(() => {
+          try { window.close(); } catch {}
+        }, 250);
+        return;
+      }
+
       return;
     }
 
