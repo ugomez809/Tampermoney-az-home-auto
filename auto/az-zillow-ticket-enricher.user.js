@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.11
+// @version      1.0.12
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.11';
+  const VERSION = '1.0.12';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1309,6 +1309,10 @@
     return /\/homedetails\/|_zpid\//i.test(location.pathname + location.search);
   }
 
+  function getJobAgeMs(job) {
+    return Math.max(0, Date.now() - Date.parse(norm(job?.createdAt || nowIso())));
+  }
+
   function jobMatchesTicket(job, ticketId) {
     return norm(job?.ticketId || '') && norm(job?.ticketId || '') === norm(ticketId || '');
   }
@@ -2123,6 +2127,35 @@
       return;
     }
 
+    let job = getJob();
+    const jobStatus = norm(job?.status || '');
+    const sameTicketJob = jobMatchesTicket(job, state.activeTicketId);
+
+    if (sameTicketJob && ['pending', 'searching'].includes(jobStatus)) {
+      state.currentAddress = firstNonEmpty(job?.address, state.currentAddress);
+      state.zillowSummary = summarizeResult(job?.result);
+
+      const ageMs = getJobAgeMs(job);
+      if (ageMs > CFG.zillowWaitMs) {
+        job.status = 'failed';
+        job.updatedAt = nowIso();
+        job.error = 'Zillow scrape timed out';
+        saveJob(job);
+        setStatus('Zillow scrape timed out');
+        log(`Zillow scrape timed out for AZ ${state.activeTicketId}`);
+        return;
+      }
+
+      const remaining = Math.max(1, Math.ceil((CFG.zillowWaitMs - ageMs) / 1000));
+      setStatus(`Waiting for Zillow (${remaining}s)`);
+      return;
+    }
+
+    if (sameTicketJob && jobStatus === 'failed') {
+      setStatus(`Job failed: ${norm(job.error || 'Unknown error') || 'Unknown error'}`);
+      return;
+    }
+
     const mainOk = await ensureMainTab();
     if (!mainOk) {
       setStatus('Main tab failed');
@@ -2137,7 +2170,7 @@
       return;
     }
 
-    let job = getJob();
+    job = getJob();
     if (!jobMatchesTicket(job, state.activeTicketId) || ['failed', 'completed'].includes(norm(job?.status || ''))) {
       job = createJob(state.activeTicketId, addressInfo);
       const opened = launchZillowSearch(job);
@@ -2198,7 +2231,7 @@
       return;
     }
 
-    const ageMs = Math.max(0, Date.now() - Date.parse(norm(job.createdAt || nowIso())));
+    const ageMs = getJobAgeMs(job);
     if (ageMs > CFG.zillowWaitMs) {
       job.status = 'failed';
       job.updatedAt = nowIso();
