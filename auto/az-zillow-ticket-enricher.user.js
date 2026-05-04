@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.1.0
+// @version      1.2.0
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,18 +24,19 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
-    job: 'tm_az_zillow_ticket_enricher_job_v3',
+    job: 'tm_az_zillow_ticket_enricher_job_v4',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
     tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
     'tm_az_zillow_ticket_enricher_job_v1',
-    'tm_az_zillow_ticket_enricher_job_v2'
+    'tm_az_zillow_ticket_enricher_job_v2',
+    'tm_az_zillow_ticket_enricher_job_v3'
   ];
 
   const LS_KEYS = {
@@ -1406,12 +1407,27 @@
     return norm(job?.error || fallback) || fallback;
   }
 
-  function resultHasRoomFacts(result) {
-    return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
+  function getFallbackRoomValue(value) {
+    return firstNonEmpty(normalizeRoomValue(value), '0');
   }
 
-  function resultHasUsefulData(result) {
-    return resultHasRoomFacts(result) || !!norm(result?.homeType);
+  function getFallbackHomeType(value) {
+    return firstNonEmpty(normalizeHomeType(value), 'FAILED');
+  }
+
+  function buildFallbackResult(job, overrides = null) {
+    const source = isPlainObject(job?.result) ? job.result : {};
+    const extra = isPlainObject(overrides) ? overrides : {};
+    return {
+      zillowUrl: firstNonEmpty(extra.zillowUrl, source.zillowUrl, job?.searchUrl),
+      bedrooms: getFallbackRoomValue(firstNonEmpty(extra.bedrooms, source.bedrooms)),
+      bathrooms: getFallbackRoomValue(firstNonEmpty(extra.bathrooms, source.bathrooms)),
+      homeType: getFallbackHomeType(firstNonEmpty(extra.homeType, source.homeType))
+    };
+  }
+
+  function resultHasRoomFacts(result) {
+    return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
   }
 
   function reportJobFailureOnce(job) {
@@ -1424,14 +1440,21 @@
     saveJob(job);
   }
 
-  function stopForJobFailure(job) {
-    const reason = getZillowJobErrorText(job);
-    reportJobFailureOnce(job);
-    if (state.running) {
-      stopAutomation(`Stopped after Zillow failure on AZ ${norm(job?.ticketId || state.activeTicketId || '?')}: ${reason}`);
+  function promoteJobToFallback(job, reason, overrides = null) {
+    if (!isPlainObject(job)) return false;
+    job.status = 'result-ready';
+    job.updatedAt = nowIso();
+    job.resultReadyAt = nowIso();
+    job.error = norm(reason || '');
+    job.fallbackReason = job.error;
+    job.result = buildFallbackResult(job, overrides);
+    saveJob(job);
+    if (job.error) {
+      log(`Using fallback Zillow data for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${job.error}`);
+    } else {
+      log(`Using fallback Zillow data for AZ ${norm(job.ticketId || state.activeTicketId || '?')}`);
     }
-    setStatus(`Job failed: ${reason}`);
-    renderAll();
+    return true;
   }
 
   function closeCurrentTabSoon() {
@@ -1528,11 +1551,8 @@
 
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
-        job.status = 'failed';
-        job.updatedAt = nowIso();
-        job.error = 'Zillow opened but no property data ever loaded';
-        saveJob(job);
-        stopForJobFailure(job);
+        promoteJobToFallback(job, 'Zillow opened but no property data ever loaded');
+        setStatus('Using fallback Zillow data');
         return true;
       }
 
@@ -1553,11 +1573,8 @@
       }
 
       if (ageMs > CFG.zillowWaitMs) {
-        job.status = 'failed';
-        job.updatedAt = nowIso();
-        job.error = 'Zillow scrape timed out';
-        saveJob(job);
-        stopForJobFailure(job);
+        promoteJobToFallback(job, 'Zillow scrape timed out');
+        setStatus('Using fallback Zillow data');
         return true;
       }
 
@@ -1569,7 +1586,9 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
-      stopForJobFailure(job);
+      if (promoteJobToFallback(job, getZillowJobErrorText(job))) {
+        setStatus('Using fallback Zillow data');
+      }
       return true;
     }
 
@@ -1796,11 +1815,9 @@
 
     const verificationBlock = detectZillowVerificationBlock();
     if (verificationBlock) {
-      job.status = 'failed';
-      job.updatedAt = nowIso();
-      job.error = verificationBlock;
-      saveJob(job);
-      try { console.log(`[${SCRIPT_NAME}] ${verificationBlock} for ${job.ticketId}`); } catch {}
+      promoteJobToFallback(job, verificationBlock);
+      try { console.log(`[${SCRIPT_NAME}] Using fallback Zillow data for ${job.ticketId}: ${verificationBlock}`); } catch {}
+      closeCurrentTabSoon();
       return;
     }
 
@@ -1822,7 +1839,7 @@
         job.status = 'result-ready';
         job.updatedAt = nowIso();
         job.resultReadyAt = nowIso();
-        job.result = cardResult;
+        job.result = buildFallbackResult(job, cardResult);
         saveJob(job);
         try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
         closeCurrentTabSoon();
@@ -1830,11 +1847,10 @@
       }
 
       if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowDeadPageMs) {
-        job.status = 'failed';
-        job.updatedAt = nowIso();
-        job.error = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
-        saveJob(job);
-        try { console.log(`[${SCRIPT_NAME}] ${job.error} for ${job.ticketId}`); } catch {}
+        const reason = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
+        promoteJobToFallback(job, reason);
+        try { console.log(`[${SCRIPT_NAME}] Using fallback Zillow data for ${job.ticketId}: ${reason}`); } catch {}
+        closeCurrentTabSoon();
         return;
       }
 
@@ -1857,10 +1873,11 @@
 
     if (!hasRoomFacts && !hasHomeType) {
       if (listingAgeMs >= CFG.zillowFactSettleMs) {
-        job.status = 'failed';
-        job.updatedAt = nowIso();
-        job.error = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
-        saveJob(job);
+        const reason = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
+        promoteJobToFallback(job, reason, {
+          zillowUrl: location.href
+        });
+        closeCurrentTabSoon();
       }
       return;
     }
@@ -1872,7 +1889,10 @@
     job.status = 'result-ready';
     job.updatedAt = nowIso();
     job.resultReadyAt = nowIso();
-    job.result = scraped;
+    job.result = buildFallbackResult(job, {
+      ...scraped,
+      zillowUrl: location.href
+    });
     saveJob(job);
 
     try { console.log(`[${SCRIPT_NAME}] Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`); } catch {}
@@ -2342,19 +2362,12 @@
     const targets = getFieldTargets();
     const fields = {
       'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
-      'Bedrooms': normalizeRoomValue(job?.result?.bedrooms),
-      'Bathrooms': normalizeRoomValue(job?.result?.bathrooms),
-      'Home Type': normalizeHomeType(job?.result?.homeType)
+      'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
+      'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
+      'Home Type': getFallbackHomeType(job?.result?.homeType)
     };
 
-    if (!resultHasUsefulData(job?.result)) {
-      setStatus('Zillow result missing usable data');
-      log('Refused to apply Zillow result because it had no usable data fields');
-      return false;
-    }
-
     let changed = false;
-    let changedUsefulField = false;
     for (const label of FIELD_ORDER) {
       const value = norm(fields[label]);
       if (!value) {
@@ -2364,7 +2377,6 @@
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
         changed = true;
-        if (label !== 'Zillow URL') changedUsefulField = true;
         log(`Filled field: ${label} = ${value}`);
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
@@ -2375,12 +2387,6 @@
     if (!changed) {
       setStatus('No Zillow fields were applied');
       log('No Zillow field values were applied');
-      return false;
-    }
-
-    if (!changedUsefulField) {
-      setStatus('Only Zillow URL applied; missing property data');
-      log('Refused to finish ticket because only Zillow URL applied');
       return false;
     }
 
@@ -2486,12 +2492,8 @@
       job = createJob(state.activeTicketId, addressInfo);
       const opened = launchZillowSearch(job);
       if (!opened) {
-        job.status = 'failed';
-        job.updatedAt = nowIso();
-        job.error = 'Could not open Zillow tab';
-        saveJob(job);
-        setStatus('Could not open Zillow tab');
-        log('Could not open Zillow search tab');
+        promoteJobToFallback(job, 'Could not open Zillow tab');
+        setStatus('Using fallback Zillow data');
         return;
       }
 
@@ -2507,7 +2509,8 @@
         setStatus(`Address changed; reopened Zillow for ${state.activeTicketId}`);
         log(`Address changed; reopened Zillow search: ${job.searchUrl}`);
       } else {
-        setStatus('Could not reopen Zillow tab');
+        promoteJobToFallback(job, 'Could not reopen Zillow tab after address change');
+        setStatus('Using fallback Zillow data');
       }
       return;
     }
@@ -2539,17 +2542,16 @@
     }
 
     if (norm(job.status) === 'failed') {
-      stopForJobFailure(job);
+      if (promoteJobToFallback(job, getZillowJobErrorText(job))) {
+        setStatus('Using fallback Zillow data');
+      }
       return;
     }
 
     const ageMs = getJobActiveAgeMs(job);
     if (ageMs > CFG.zillowWaitMs) {
-      job.status = 'failed';
-      job.updatedAt = nowIso();
-      job.error = 'Zillow scrape timed out';
-      saveJob(job);
-      stopForJobFailure(job);
+      promoteJobToFallback(job, 'Zillow scrape timed out');
+      setStatus('Using fallback Zillow data');
       return;
     }
 
