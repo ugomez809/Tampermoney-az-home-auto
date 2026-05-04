@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.9
+// @version      1.0.10
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.9';
+  const VERSION = '1.0.10';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -2169,16 +2169,22 @@
       const applied = await applyZillowResultToTicket(job);
       if (!applied) return;
 
+      const completedTicketId = state.activeTicketId;
       job.status = 'completed';
       job.completedAt = nowIso();
       job.updatedAt = nowIso();
       saveJob(job);
 
       await closeTicketDrawer();
-      state.running = false;
-      saveRunning(false);
-      setStatus(`Completed ticket ${state.activeTicketId}`);
-      log(`Completed ticket ${state.activeTicketId}`);
+      clearJob();
+      state.activeTicketId = '';
+      state.currentAddress = '';
+      state.zillowSummary = '';
+      setStatus(`Completed ticket ${completedTicketId}`);
+      log(`Completed ticket ${completedTicketId}`);
+      if (isPipelinePage()) {
+        requestBootstrapReload(`completed-ticket-${completedTicketId}`);
+      }
       return;
     }
 
