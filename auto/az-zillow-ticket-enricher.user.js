@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.21
+// @version      1.0.22
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.21';
+  const VERSION = '1.0.22';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -85,7 +85,7 @@
     zillowWaitMs: 45000,
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
-    zillowMaxLaunches: 1,
+    zillowMaxLaunches: 0,
     zillowDeadPageMs: 18000,
     zillowSearchFallbackMs: 5000,
     maxLogLines: 80,
@@ -1405,6 +1405,16 @@
     return norm(job?.error || fallback) || fallback;
   }
 
+  function reportJobFailureOnce(job) {
+    if (!isPlainObject(job)) return;
+    if (norm(job.azFailureReportedAt || '')) return;
+    const reason = getZillowJobErrorText(job);
+    log(`Zillow job failed for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${reason}`);
+    job.azFailureReportedAt = nowIso();
+    job.updatedAt = nowIso();
+    saveJob(job);
+  }
+
   function closeCurrentTabSoon() {
     setTimeout(() => {
       try { window.close(); } catch {}
@@ -1542,6 +1552,7 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
+      reportJobFailureOnce(job);
       setStatus(`Job failed: ${getZillowJobErrorText(job)}`);
       return true;
     }
@@ -1774,7 +1785,6 @@
       job.error = verificationBlock;
       saveJob(job);
       try { console.log(`[${SCRIPT_NAME}] ${verificationBlock} for ${job.ticketId}`); } catch {}
-      closeCurrentTabSoon();
       return;
     }
 
@@ -1808,7 +1818,6 @@
         job.error = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
         saveJob(job);
         try { console.log(`[${SCRIPT_NAME}] ${job.error} for ${job.ticketId}`); } catch {}
-        closeCurrentTabSoon();
         return;
       }
 
@@ -2492,6 +2501,7 @@
     }
 
     if (norm(job.status) === 'failed') {
+      reportJobFailureOnce(job);
       setStatus(`Job failed: ${norm(job.error || 'Unknown error') || 'Unknown error'}`);
       return;
     }
