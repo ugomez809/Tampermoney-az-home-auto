@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.13
+// @version      1.0.14
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.13';
+  const VERSION = '1.0.14';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -2157,12 +2157,25 @@
       return;
     }
 
+    const mainOk = await ensureMainTab();
+    if (!mainOk) {
+      setStatus('Main tab failed');
+      return;
+    }
+
+    const addressInfo = readAzAddressInfo(state.activeTicketId);
+    state.currentAddress = norm(addressInfo.address || '');
+    if (!state.currentAddress) {
+      setStatus('Address not found on Main');
+      log(`Could not read address for AZ ${state.activeTicketId}`);
+      return;
+    }
+
     let job = getJob();
     const jobStatus = norm(job?.status || '');
     const sameTicketJob = jobMatchesTicket(job, state.activeTicketId);
 
     if (sameTicketJob && ['pending', 'searching'].includes(jobStatus)) {
-      state.currentAddress = firstNonEmpty(job?.address, state.currentAddress);
       state.zillowSummary = summarizeResult(job?.result);
 
       const ageMs = getJobAgeMs(job);
@@ -2197,26 +2210,6 @@
       return;
     }
 
-    if (sameTicketJob && jobStatus === 'failed') {
-      setStatus(`Job failed: ${norm(job.error || 'Unknown error') || 'Unknown error'}`);
-      return;
-    }
-
-    const mainOk = await ensureMainTab();
-    if (!mainOk) {
-      setStatus('Main tab failed');
-      return;
-    }
-
-    const addressInfo = readAzAddressInfo(state.activeTicketId);
-    state.currentAddress = norm(addressInfo.address || '');
-    if (!state.currentAddress) {
-      setStatus('Address not found on Main');
-      log(`Could not read address for AZ ${state.activeTicketId}`);
-      return;
-    }
-
-    job = getJob();
     if (!jobMatchesTicket(job, state.activeTicketId) || ['failed', 'completed'].includes(norm(job?.status || ''))) {
       job = createJob(state.activeTicketId, addressInfo);
       const opened = launchZillowSearch(job);
