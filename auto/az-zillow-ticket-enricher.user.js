@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.0
+// @version      1.2.1
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1297,65 +1297,46 @@
   }
 
   function normalizeRoomValue(value) {
-    const text = norm(value);
-    if (!text) return '';
-    if (/studio/i.test(text)) return 'Studio';
-    const match = text.match(/-?\d+(?:\.\d+)?/);
-    return match ? match[0] : text;
+    return norm(value);
   }
 
   function normalizeHomeType(value) {
-    const text = norm(value);
-    if (!text) return '';
-    const condensed = lower(text).replace(/[^a-z]/g, '');
-    const map = {
-      house: 'SingleFamily',
-      singlefamily: 'SingleFamily',
-      singlefamilyresidence: 'SingleFamily',
-      singlefamilyhome: 'SingleFamily',
-      multifamily: 'MultiFamily',
-      townhouse: 'Townhouse',
-      townhome: 'Townhome',
-      condo: 'Condo',
-      condominium: 'Condominium',
-      apartment: 'Apartment',
-      duplex: 'Duplex',
-      triplex: 'Triplex',
-      manufactured: 'Manufactured',
-      mobilehome: 'MobileHome',
-      coop: 'CoOp',
-      cooperative: 'CoOp'
-    };
-    return map[condensed] || text.replace(/\s+/g, '');
+    return norm(value);
   }
 
   function extractBedroomTextValue(text) {
     const source = norm(text);
     if (!source) return '';
+    const labeledMatch = source.match(/\b(?:Bedrooms?|Beds?)\s*:\s*([^|,;\n]+)/i);
+    if (labeledMatch) return norm(labeledMatch[0]);
     if (/\bstudio\b/i.test(source)) return 'Studio';
-    const match = source.match(/\b(\d+(?:\.\d+)?)\s*(?:bd|bds|bed|beds|bedroom|bedrooms)\b/i);
-    return match ? norm(match[1]) : '';
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:bd|bds|bed|beds|bedroom|bedrooms))\b/i);
+    return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
   function extractBathroomTextValue(text) {
     const source = norm(text);
     if (!source) return '';
-    const match = source.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bas|bath|baths|bathroom|bathrooms)\b/i);
-    return match ? norm(match[1]) : '';
+    const labeledMatch = source.match(/\b(?:Bathrooms?|Baths?)\s*:\s*([^|,;\n]+)/i);
+    if (labeledMatch) return norm(labeledMatch[0]);
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:ba|bas|bath|baths|bathroom|bathrooms))\b/i);
+    return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
   function extractHomeTypeFromText(text) {
     const source = norm(text);
     if (!source) return '';
-    const match = source.match(/\b(single family(?: residence| home)?|house|multi family|townhouse|townhome|condo|condominium|apartment|duplex|triplex|manufactured(?: home)?|mobile home|co-?op)\b/i);
+    const labeledMatch = source.match(/\b(?:Home Type|Property Type)\s*:\s*([^|,;\n]+)/i);
+    if (labeledMatch) return norm(labeledMatch[0]);
+    const match = source.match(/\b(single family(?: residence| home)?|singlefamily|multi family|multifamily|townhouse|townhome|condo|condominium|apartment|duplex|triplex|manufactured(?: home)?|mobile home|mobilemanufactured|co-?op)\b/i);
     return match ? norm(match[1]) : '';
   }
 
   function summarizeResult(result) {
     if (!isPlainObject(result)) return '-';
     const parts = [
-      norm(result.bedrooms) ? `${norm(result.bedrooms)} bd` : '',
-      norm(result.bathrooms) ? `${norm(result.bathrooms)} ba` : '',
+      norm(result.bedrooms),
+      norm(result.bathrooms),
       norm(result.homeType)
     ].filter(Boolean);
     return parts.join(' | ') || norm(result.zillowUrl || '') || '-';
@@ -1617,10 +1598,10 @@
       if (!text || text.length > 120) continue;
 
       const directMatch = text.match(directPattern);
-      if (directMatch && norm(directMatch[1])) return norm(directMatch[1]);
+      if (directMatch && norm(directMatch[1])) return text;
 
       const inlineMatch = text.match(inlinePattern);
-      if (inlineMatch && norm(inlineMatch[1])) return norm(inlineMatch[1]);
+      if (inlineMatch && norm(inlineMatch[1])) return norm(inlineMatch[0]);
     }
 
     return '';
@@ -1633,14 +1614,27 @@
     const text = document.body?.innerText || '';
     if (!text) return '';
     const match = text.match(new RegExp(`${escapeRegExp(label)}\\s*:\\s*([^\\n]+)`, 'i'));
-    return match ? norm(match[1]) : '';
+    return match ? norm(match[0]) : '';
+  }
+
+  function extractHomeTypeFromDom() {
+    const candidates = Array.from(document.querySelectorAll('span, li, div, dd, dt'))
+      .filter((el) => el instanceof HTMLElement && visible(el));
+
+    for (const el of candidates) {
+      const text = norm(el.innerText || el.textContent || '');
+      if (!text || text.length > 80) continue;
+      const match = text.match(/\b(single family(?: residence| home)?|singlefamily|multi family|multifamily|townhouse|townhome|condo|condominium|apartment|duplex|triplex|manufactured(?: home)?|mobile home|mobilemanufactured|co-?op)\b/i);
+      if (match) return norm(match[1]);
+    }
+
+    return '';
   }
 
   function extractHomeTypeFromBody() {
     const bodyText = document.body?.innerText || '';
     if (!bodyText) return '';
-    const match = bodyText.match(/\b(SingleFamily|Single Family|MultiFamily|Multi Family|Townhouse|Townhome|Condo|Condominium|Apartment|Duplex|Triplex|Manufactured|Mobile Home|Co-Op|CoOp)\b/i);
-    return match ? norm(match[1]) : '';
+    return extractHomeTypeFromText(bodyText);
   }
 
   function extractRegexValue(text, patterns) {
@@ -1794,6 +1788,7 @@
       hints.bathrooms
     ));
     const homeType = normalizeHomeType(firstNonEmpty(
+      extractHomeTypeFromDom(),
       extractHomeTypeFromBody(),
       hints.homeType
     ));
