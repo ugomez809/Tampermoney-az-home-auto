@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.22
+// @version      1.1.0
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,17 +24,18 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.22';
+  const VERSION = '1.1.0';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
-    job: 'tm_az_zillow_ticket_enricher_job_v2',
+    job: 'tm_az_zillow_ticket_enricher_job_v3',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
     tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
-    'tm_az_zillow_ticket_enricher_job_v1'
+    'tm_az_zillow_ticket_enricher_job_v1',
+    'tm_az_zillow_ticket_enricher_job_v2'
   ];
 
   const LS_KEYS = {
@@ -82,12 +83,12 @@
     actionSettleMs: 900,
     updateSettleMs: 1200,
     closeWaitMs: 5000,
-    zillowWaitMs: 45000,
+    zillowWaitMs: 30000,
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
     zillowMaxLaunches: 0,
-    zillowDeadPageMs: 18000,
-    zillowSearchFallbackMs: 5000,
+    zillowDeadPageMs: 12000,
+    zillowSearchFallbackMs: 4000,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -1405,6 +1406,14 @@
     return norm(job?.error || fallback) || fallback;
   }
 
+  function resultHasRoomFacts(result) {
+    return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
+  }
+
+  function resultHasUsefulData(result) {
+    return resultHasRoomFacts(result) || !!norm(result?.homeType);
+  }
+
   function reportJobFailureOnce(job) {
     if (!isPlainObject(job)) return;
     if (norm(job.azFailureReportedAt || '')) return;
@@ -1413,6 +1422,16 @@
     job.azFailureReportedAt = nowIso();
     job.updatedAt = nowIso();
     saveJob(job);
+  }
+
+  function stopForJobFailure(job) {
+    const reason = getZillowJobErrorText(job);
+    reportJobFailureOnce(job);
+    if (state.running) {
+      stopAutomation(`Stopped after Zillow failure on AZ ${norm(job?.ticketId || state.activeTicketId || '?')}: ${reason}`);
+    }
+    setStatus(`Job failed: ${reason}`);
+    renderAll();
   }
 
   function closeCurrentTabSoon() {
@@ -1513,8 +1532,7 @@
         job.updatedAt = nowIso();
         job.error = 'Zillow opened but no property data ever loaded';
         saveJob(job);
-        setStatus(`Job failed: ${job.error}`);
-        log(`Zillow never exposed property data for AZ ${state.activeTicketId}`);
+        stopForJobFailure(job);
         return true;
       }
 
@@ -1539,8 +1557,7 @@
         job.updatedAt = nowIso();
         job.error = 'Zillow scrape timed out';
         saveJob(job);
-        setStatus('Zillow scrape timed out');
-        log(`Zillow scrape timed out for AZ ${state.activeTicketId}`);
+        stopForJobFailure(job);
         return true;
       }
 
@@ -1552,8 +1569,7 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
-      reportJobFailureOnce(job);
-      setStatus(`Job failed: ${getZillowJobErrorText(job)}`);
+      stopForJobFailure(job);
       return true;
     }
 
@@ -1790,6 +1806,7 @@
 
     if (!isZillowListingPage()) {
       const cardResult = scrapeZillowSearchResultCard(job);
+      const cardHasRoomFacts = resultHasRoomFacts(cardResult);
       if (!norm(job.listingNavigatedAt || '')) {
         const listing = findLikelyZillowListingLink(job);
         if (listing?.href) {
@@ -1801,7 +1818,7 @@
         }
       }
 
-      if (cardResult && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
+      if (cardResult && cardHasRoomFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
         job.status = 'result-ready';
         job.updatedAt = nowIso();
         job.resultReadyAt = nowIso();
@@ -1835,15 +1852,20 @@
     const hasBathrooms = !!norm(scraped.bathrooms);
     const hasHomeType = !!norm(scraped.homeType);
     const hasRoomFacts = hasBedrooms || hasBathrooms;
-    const roomFactsComplete = hasBedrooms && hasBathrooms;
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
 
     if (!hasRoomFacts && !hasHomeType) {
+      if (listingAgeMs >= CFG.zillowFactSettleMs) {
+        job.status = 'failed';
+        job.updatedAt = nowIso();
+        job.error = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
+        saveJob(job);
+      }
       return;
     }
 
-    if (!roomFactsComplete && listingAgeMs < CFG.zillowFactSettleMs) {
+    if (!hasRoomFacts && listingAgeMs < CFG.zillowFactSettleMs) {
       return;
     }
 
@@ -2325,7 +2347,14 @@
       'Home Type': normalizeHomeType(job?.result?.homeType)
     };
 
+    if (!resultHasUsefulData(job?.result)) {
+      setStatus('Zillow result missing usable data');
+      log('Refused to apply Zillow result because it had no usable data fields');
+      return false;
+    }
+
     let changed = false;
+    let changedUsefulField = false;
     for (const label of FIELD_ORDER) {
       const value = norm(fields[label]);
       if (!value) {
@@ -2335,6 +2364,7 @@
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
         changed = true;
+        if (label !== 'Zillow URL') changedUsefulField = true;
         log(`Filled field: ${label} = ${value}`);
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
@@ -2342,11 +2372,19 @@
       await sleep(250);
     }
 
-    if (changed) {
-      await clickUpdateButton();
-    } else {
+    if (!changed) {
+      setStatus('No Zillow fields were applied');
       log('No Zillow field values were applied');
+      return false;
     }
+
+    if (!changedUsefulField) {
+      setStatus('Only Zillow URL applied; missing property data');
+      log('Refused to finish ticket because only Zillow URL applied');
+      return false;
+    }
+
+    await clickUpdateButton();
 
     const tagsOk = await applyLegacyTagReplacement();
     if (!tagsOk) {
@@ -2501,8 +2539,7 @@
     }
 
     if (norm(job.status) === 'failed') {
-      reportJobFailureOnce(job);
-      setStatus(`Job failed: ${norm(job.error || 'Unknown error') || 'Unknown error'}`);
+      stopForJobFailure(job);
       return;
     }
 
@@ -2512,8 +2549,7 @@
       job.updatedAt = nowIso();
       job.error = 'Zillow scrape timed out';
       saveJob(job);
-      setStatus('Zillow scrape timed out');
-      log(`Zillow scrape timed out for AZ ${state.activeTicketId}`);
+      stopForJobFailure(job);
       return;
     }
 
