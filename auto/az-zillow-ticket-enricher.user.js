@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.20
+// @version      1.0.21
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,14 +24,18 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.20';
+  const VERSION = '1.0.21';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
-    job: 'tm_az_zillow_ticket_enricher_job_v1',
+    job: 'tm_az_zillow_ticket_enricher_job_v2',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
     tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1'
   };
+
+  const LEGACY_GM_JOB_KEYS = [
+    'tm_az_zillow_ticket_enricher_job_v1'
+  ];
 
   const LS_KEYS = {
     running: 'tm_az_zillow_ticket_enricher_running_v1',
@@ -143,6 +147,8 @@
   init();
 
   function init() {
+    const legacyJobStateCleared = clearLegacyJobState();
+    const staleJobReset = resetStaleActiveJobOnBoot();
     const resumedAfterReload = consumeBootstrapReloadToken();
 
     if (isAzOrigin()) {
@@ -154,6 +160,12 @@
     }
 
     log(`Loaded v${VERSION} on ${location.hostname}`);
+    if (legacyJobStateCleared) {
+      log('Cleared legacy Zillow job state');
+    }
+    if (staleJobReset) {
+      log(staleJobReset);
+    }
     if (resumedAfterReload) {
       log('Resumed after bootstrap reload');
     }
@@ -265,6 +277,16 @@
 
   function clearJob() {
     deleteGM(GM_KEYS.job);
+  }
+
+  function clearLegacyJobState() {
+    let cleared = false;
+    for (const key of LEGACY_GM_JOB_KEYS) {
+      const legacyJob = readGM(key, null);
+      if (isPlainObject(legacyJob)) cleared = true;
+      try { GM_deleteValue(key); } catch {}
+    }
+    return cleared;
   }
 
   function deepClone(value) {
@@ -1357,6 +1379,20 @@
     const raw = Number(job?.launchCount || 0);
     if (!Number.isFinite(raw) || raw < 0) return 0;
     return Math.floor(raw);
+  }
+
+  function resetStaleActiveJobOnBoot() {
+    const job = getJob();
+    if (!isPlainObject(job)) return '';
+    const status = norm(job?.status || '');
+    if (!['pending', 'searching'].includes(status)) return '';
+
+    const ageMs = getJobActiveAgeMs(job);
+    if (ageMs < CFG.zillowWaitMs) return '';
+
+    const ticketId = norm(job?.ticketId || '');
+    clearJob();
+    return `Cleared stale Zillow job${ticketId ? ` for AZ ${ticketId}` : ''}`;
   }
 
   function hasZillowJobProgress(job) {
