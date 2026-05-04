@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.7
+// @version      1.0.8
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.8';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -79,6 +79,7 @@
     updateSettleMs: 1200,
     closeWaitMs: 5000,
     zillowWaitMs: 45000,
+    zillowFactSettleMs: 9000,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -282,6 +283,10 @@
 
   function lower(value) {
     return norm(value).toLowerCase();
+  }
+
+  function escapeRegExp(value) {
+    return String(value == null ? '' : value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   function cleanTagText(value) {
@@ -1346,10 +1351,36 @@
     }
   }
 
+  function extractLabeledValueFromDom(label) {
+    const wanted = norm(label);
+    if (!wanted) return '';
+
+    const directPattern = new RegExp(`^${escapeRegExp(wanted)}\\s*:\\s*(.+)$`, 'i');
+    const inlinePattern = new RegExp(`\\b${escapeRegExp(wanted)}\\s*:\\s*([^|,;\\n]+)`, 'i');
+    const candidates = Array.from(document.querySelectorAll('li span, li, span, dd, dt, div'))
+      .filter((el) => el instanceof HTMLElement && visible(el));
+
+    for (const el of candidates) {
+      const text = norm(el.innerText || el.textContent || '');
+      if (!text || text.length > 120) continue;
+
+      const directMatch = text.match(directPattern);
+      if (directMatch && norm(directMatch[1])) return norm(directMatch[1]);
+
+      const inlineMatch = text.match(inlinePattern);
+      if (inlineMatch && norm(inlineMatch[1])) return norm(inlineMatch[1]);
+    }
+
+    return '';
+  }
+
   function extractLabelValueFromBody(label) {
+    const fromDom = extractLabeledValueFromDom(label);
+    if (fromDom) return fromDom;
+
     const text = document.body?.innerText || '';
     if (!text) return '';
-    const match = text.match(new RegExp(`${label}\\s*:\\s*([^\\n]+)`, 'i'));
+    const match = text.match(new RegExp(`${escapeRegExp(label)}\\s*:\\s*([^\\n]+)`, 'i'));
     return match ? norm(match[1]) : '';
   }
 
@@ -1376,14 +1407,20 @@
 
     return {
       bedrooms: extractRegexValue(joined, [
+        /["']?bedrooms?["']?\s*:\s*"?([0-9.]+)"?/i,
         /"bedrooms?"\s*:\s*"?([0-9.]+)"?/i,
-        /"beds?"\s*:\s*"?([0-9.]+)"?/i
+        /"beds?"\s*:\s*"?([0-9.]+)"?/i,
+        /"numberOfRooms"\s*:\s*"?([0-9.]+)"?/i
       ]),
       bathrooms: extractRegexValue(joined, [
+        /["']?bathrooms?["']?\s*:\s*"?([0-9.]+)"?/i,
         /"bathrooms?"\s*:\s*"?([0-9.]+)"?/i,
-        /"baths?"\s*:\s*"?([0-9.]+)"?/i
+        /"baths?"\s*:\s*"?([0-9.]+)"?/i,
+        /"numberOfBathroomsTotal"\s*:\s*"?([0-9.]+)"?/i,
+        /"bathroomsFull"\s*:\s*"?([0-9.]+)"?/i
       ]),
       homeType: extractRegexValue(joined, [
+        /["']?homeType["']?\s*:\s*"([^"]+)"/i,
         /"homeType"\s*:\s*"([^"]+)"/i,
         /"home_type"\s*:\s*"([^"]+)"/i,
         /"propertyType(?:Dimension)?"\s*:\s*"([^"]+)"/i
@@ -1471,8 +1508,25 @@
       return;
     }
 
+    if (!norm(job.listingSeenAt || '')) {
+      job.listingSeenAt = nowIso();
+      job.updatedAt = nowIso();
+      saveJob(job);
+    }
+
     const scraped = scrapeZillowResult();
-    if (!norm(scraped.bedrooms) && !norm(scraped.bathrooms) && !norm(scraped.homeType)) {
+    const hasBedrooms = !!norm(scraped.bedrooms);
+    const hasBathrooms = !!norm(scraped.bathrooms);
+    const hasHomeType = !!norm(scraped.homeType);
+    const hasRoomFacts = hasBedrooms || hasBathrooms;
+    const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
+    const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
+
+    if (!hasRoomFacts && !hasHomeType) {
+      return;
+    }
+
+    if (!hasRoomFacts && listingAgeMs < CFG.zillowFactSettleMs) {
       return;
     }
 
