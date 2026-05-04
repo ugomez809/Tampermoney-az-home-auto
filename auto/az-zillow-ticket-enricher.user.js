@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.12
+// @version      1.0.13
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.12';
+  const VERSION = '1.0.13';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -80,6 +80,8 @@
     closeWaitMs: 5000,
     zillowWaitMs: 45000,
     zillowFactSettleMs: 9000,
+    zillowStaleMs: 15000,
+    zillowMaxLaunches: 2,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -1313,6 +1315,31 @@
     return Math.max(0, Date.now() - Date.parse(norm(job?.createdAt || nowIso())));
   }
 
+  function getJobLaunchCount(job) {
+    const raw = Number(job?.launchCount || 0);
+    if (!Number.isFinite(raw) || raw < 0) return 0;
+    return Math.floor(raw);
+  }
+
+  function getIsoAgeMs(value) {
+    return Math.max(0, Date.now() - Date.parse(norm(value || nowIso())));
+  }
+
+  function shouldRelaunchStaleZillowJob(job) {
+    if (!isPlainObject(job)) return false;
+    const launches = getJobLaunchCount(job);
+    if (launches >= CFG.zillowMaxLaunches) return false;
+
+    const status = norm(job.status || '');
+    if (!['pending', 'searching'].includes(status)) return false;
+
+    if (!norm(job.listingSeenAt || '')) {
+      return getIsoAgeMs(job.searchOpenedAt || job.lastLaunchAt || job.createdAt) >= CFG.zillowStaleMs;
+    }
+
+    return getJobAgeMs(job) > CFG.zillowWaitMs;
+  }
+
   function jobMatchesTicket(job, ticketId) {
     return norm(job?.ticketId || '') && norm(job?.ticketId || '') === norm(ticketId || '');
   }
@@ -1329,6 +1356,7 @@
       status: 'pending',
       createdAt: nowIso(),
       updatedAt: nowIso(),
+      launchCount: 0,
       result: null,
       error: ''
     };
@@ -1341,6 +1369,8 @@
     job.status = 'searching';
     job.updatedAt = nowIso();
     job.searchOpenedAt = nowIso();
+    job.lastLaunchAt = job.searchOpenedAt;
+    job.launchCount = getJobLaunchCount(job) + 1;
     saveJob(job);
 
     try {
@@ -2136,6 +2166,22 @@
       state.zillowSummary = summarizeResult(job?.result);
 
       const ageMs = getJobAgeMs(job);
+      if (shouldRelaunchStaleZillowJob(job)) {
+        const reopened = launchZillowSearch(job);
+        if (reopened) {
+          setStatus(`Relaunching Zillow for ${state.activeTicketId}`);
+          log(`Relaunching stale Zillow search: ${job.searchUrl}`);
+        } else {
+          job.status = 'failed';
+          job.updatedAt = nowIso();
+          job.error = 'Could not relaunch stale Zillow tab';
+          saveJob(job);
+          setStatus('Could not relaunch Zillow tab');
+          log('Could not relaunch stale Zillow tab');
+        }
+        return;
+      }
+
       if (ageMs > CFG.zillowWaitMs) {
         job.status = 'failed';
         job.updatedAt = nowIso();
