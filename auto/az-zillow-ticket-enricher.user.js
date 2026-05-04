@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.0.16
+// @version      1.0.17
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.0.16';
+  const VERSION = '1.0.17';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1447,13 +1447,6 @@
 
       const remaining = Math.max(1, Math.ceil((CFG.zillowWaitMs - ageMs) / 1000));
       setStatus(`Waiting for Zillow (${remaining}s)`);
-      return true;
-    }
-
-    if (jobStatus === 'failed') {
-      state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
-      state.zillowSummary = summarizeResult(job?.result);
-      setStatus(`Job failed: ${norm(job.error || 'Unknown error') || 'Unknown error'}`);
       return true;
     }
 
