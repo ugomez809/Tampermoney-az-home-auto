@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.4
+// @version      1.0.5
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
@@ -20,7 +20,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
 
   const CFG = {
     scanMs: 400,
@@ -203,7 +203,21 @@
   }
 
   function findApexAgreeButton() {
-    const buttons = Array.from(document.querySelectorAll('#okta-signin-submit, button, input[type="submit"], input[type="button"], [role="button"]'));
+    const bodyText = lower(document.body?.innerText || '');
+    const looksLikeTrustedDevicePage = /\b(i agree|trust|trusted|remember|recognize|recognized|this device|this browser)\b/.test(bodyText);
+    const exact = document.querySelector('#okta-signin-submit');
+    if (exact && isVisible(exact) && isEnabled(exact)) {
+      const label = [
+        exact.textContent,
+        exact.value,
+        exact.getAttribute('aria-label'),
+        exact.getAttribute('title'),
+        exact.getAttribute('name')
+      ].filter(Boolean).join(' ');
+      if (isTrustedDeviceAgreeLabel(label) || looksLikeTrustedDevicePage) return exact;
+    }
+
+    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
     return buttons.find((el) => {
       if (!isVisible(el) || !isEnabled(el)) return false;
       const label = [
@@ -213,7 +227,7 @@
         el.getAttribute('title'),
         el.getAttribute('name')
       ].filter(Boolean).join(' ');
-      return isTrustedDeviceAgreeLabel(label);
+      return isTrustedDeviceAgreeLabel(label) || (looksLikeTrustedDevicePage && el.id === 'okta-signin-submit');
     }) || null;
   }
 
@@ -261,7 +275,10 @@
   }
 
   function canClickKind(kind) {
-    if (state.clickedKinds.has(kind)) return false;
+    if (state.clickedKinds.has(kind)) {
+      if (kind !== KIND.APEX_AGREE) return false;
+      if (!findTarget(kind)) return false;
+    }
     if ((now() - state.lastClickAt) < CFG.clickCooldownMs) return false;
 
     if (state.lastClickedKind && state.lastClickedKind !== kind) {
