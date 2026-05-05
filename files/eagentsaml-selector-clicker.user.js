@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.10
+// @version      1.0.11
 // @description  Clicks #okta-signin-submit on the eAgent SAML login page every 10 seconds while running.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,13 +18,12 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.10';
+  const VERSION = '1.0.11';
   const TARGET_SELECTOR = '#okta-signin-submit';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
-    panelPos: 'tm_eagentsaml_selector_clicker_panel_pos_v1',
-    username: 'tm_eagentsaml_selector_clicker_username_v1'
+    panelPos: 'tm_eagentsaml_selector_clicker_panel_pos_v1'
   };
 
   const CFG = {
@@ -41,13 +40,11 @@
     panel: null,
     statusEl: null,
     toggleBtn: null,
-    usernameEl: null,
     logEl: null,
     tickTimer: null,
     logs: [],
     gestureHandler: null,
-    lastGestureSubmitAt: 0,
-    savedUsername: readSavedUsername()
+    lastGestureSubmitAt: 0
   };
 
   boot();
@@ -120,10 +117,6 @@
           <div ${UI_ATTR}="1" style="font-size:11px;opacity:.75;margin-bottom:4px;">Target</div>
           <div ${UI_ATTR}="1" style="padding:7px 8px;border-radius:7px;background:rgba(2,6,23,.55);border:1px solid rgba(148,163,184,.25);word-break:break-word;">${TARGET_SELECTOR}</div>
         </div>
-        <div ${UI_ATTR}="1" style="margin-bottom:8px;">
-          <div ${UI_ATTR}="1" style="font-size:11px;opacity:.75;margin-bottom:4px;">Username (local only)</div>
-          <input ${UI_ATTR}="1" id="tm-eagentsaml-selector-clicker-username" type="text" spellcheck="false" autocomplete="off" placeholder="Enter username once" style="width:100%;box-sizing:border-box;padding:7px 8px;border-radius:7px;border:1px solid rgba(148,163,184,.25);background:rgba(2,6,23,.55);color:#fff;outline:none;" />
-        </div>
         <div ${UI_ATTR}="1" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
           <button ${UI_ATTR}="1" id="tm-eagentsaml-selector-clicker-toggle" type="button" style="border:0;border-radius:7px;padding:7px 8px;background:#0284c7;color:#fff;font-weight:800;cursor:pointer;"></button>
           <button ${UI_ATTR}="1" id="tm-eagentsaml-selector-clicker-now" type="button" style="border:0;border-radius:7px;padding:7px 8px;background:#16a34a;color:#fff;font-weight:800;cursor:pointer;">CLICK NOW</button>
@@ -136,17 +129,12 @@
     state.panel = panel;
     state.statusEl = panel.querySelector('#tm-eagentsaml-selector-clicker-status');
     state.toggleBtn = panel.querySelector('#tm-eagentsaml-selector-clicker-toggle');
-    state.usernameEl = panel.querySelector('#tm-eagentsaml-selector-clicker-username');
     state.logEl = panel.querySelector('#tm-eagentsaml-selector-clicker-log');
 
     state.toggleBtn?.addEventListener('click', () => {
       state.running = !state.running;
       renderAll();
       log(state.running ? 'Clicker resumed' : 'Clicker paused');
-    });
-    state.usernameEl?.addEventListener('change', (event) => {
-      saveSavedUsername(event.target instanceof HTMLInputElement ? event.target.value : '');
-      log(state.savedUsername ? 'Saved local username' : 'Cleared local username');
     });
     panel.querySelector('#tm-eagentsaml-selector-clicker-now')?.addEventListener('click', () => {
       clickButton('manual');
@@ -160,9 +148,6 @@
     if (state.toggleBtn) {
       state.toggleBtn.textContent = state.running ? 'PAUSE' : 'RESUME';
       state.toggleBtn.style.background = state.running ? '#0284c7' : '#b45309';
-    }
-    if (state.usernameEl && document.activeElement !== state.usernameEl) {
-      state.usernameEl.value = state.savedUsername || '';
     }
     setStatus(state.running ? 'Running: retries every 10s' : 'Paused');
     renderLogs();
@@ -226,23 +211,6 @@
     return '';
   }
 
-  function readSavedUsername() {
-    try {
-      return rawTrim(localStorage.getItem(LS_KEYS.username) || '');
-    } catch {
-      return '';
-    }
-  }
-
-  function saveSavedUsername(value) {
-    state.savedUsername = rawTrim(value || '');
-    try {
-      if (state.savedUsername) localStorage.setItem(LS_KEYS.username, state.savedUsername);
-      else localStorage.removeItem(LS_KEYS.username);
-    } catch {}
-    renderAll();
-  }
-
   function isLikelyCredentialUserInput(el) {
     if (!el || !visible(el) || !enabled(el)) return false;
     if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
@@ -296,76 +264,10 @@
     return !!(getInputCurrentValue(el) || fieldLooksAutofilled(el));
   }
 
-  function setNativeInputValue(el, value) {
-    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-    const setter = desc && typeof desc.set === 'function' ? desc.set : null;
-    if (!setter) return false;
-    try {
-      setter.call(el, value);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function typeTextLikeKeyboard(el, text) {
-    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
-    const desired = String(text == null ? '' : text);
-    if (!desired) return false;
-
-    try { el.focus({ preventScroll: true }); } catch {}
-    try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
-
-    const existing = String(el.value || '');
-    try { setNativeInputValue(el, ''); } catch {}
-    try { el.setAttribute('value', ''); } catch {}
-    try {
-      if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: null, inputType: existing ? 'deleteContentBackward' : 'insertText' }));
-      } else {
-        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-      }
-    } catch {}
-
-    let current = '';
-    for (const ch of Array.from(desired)) {
-      const nextValue = current + ch;
-      try {
-        if (typeof InputEvent === 'function') {
-          el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
-        }
-      } catch {}
-      try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ch })); } catch {}
-      try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: ch })); } catch {}
-      setNativeInputValue(el, nextValue);
-      try { el.setAttribute('value', nextValue); } catch {}
-      try {
-        if (typeof InputEvent === 'function') {
-          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
-        } else {
-          el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-        }
-      } catch {}
-      try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: ch })); } catch {}
-      current = nextValue;
-    }
-
-    try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
-    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
-    try { el.blur(); } catch {}
-    return true;
-  }
-
   function prepareVisibleLoginFields(root) {
     const scope = root || document;
     const passwordInput = getVisiblePasswordInput(scope);
     const userInput = getVisibleCredentialUserInput(scope, passwordInput);
-
-    if (userInput && state.savedUsername) {
-      typeTextLikeKeyboard(userInput, state.savedUsername);
-    }
 
     return {
       userInput,
@@ -485,7 +387,7 @@
       const passwordReady = prepared.passwordReady;
       if (!userValue || !passwordReady) {
         setStatus('Waiting for filled login fields');
-        log(`Skipping auto submit: login fields still empty | user=${userValue ? 'filled' : 'empty'}${prepared.userInput ? ` (${prepared.userInput.name || prepared.userInput.id || prepared.userInput.type || prepared.userInput.tagName})` : ' (missing)'} | pass=${passwordReady ? 'ready' : 'empty'}${prepared.passwordInput ? ` (${prepared.passwordInput.name || prepared.passwordInput.id || prepared.passwordInput.type || prepared.passwordInput.tagName})` : ' (missing)'}${state.savedUsername ? '' : ' | no saved username'}`);
+        log(`Skipping auto submit: login fields still empty | user=${userValue ? 'filled' : 'empty'}${prepared.userInput ? ` (${prepared.userInput.name || prepared.userInput.id || prepared.userInput.type || prepared.userInput.tagName})` : ' (missing)'} | pass=${passwordReady ? 'ready' : 'empty'}${prepared.passwordInput ? ` (${prepared.passwordInput.name || prepared.passwordInput.id || prepared.passwordInput.type || prepared.passwordInput.tagName})` : ' (missing)'}`);
         return false;
       }
 
