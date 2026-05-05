@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.55
+// @version      1.0.56
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.55';
+  const VERSION = '1.0.56';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -3241,10 +3241,18 @@
       return;
     }
 
+    const wakeMissingPayloadTrigger = !state.running ? getActiveMissingPayloadTrigger() : null;
     if (!state.running) {
-      setStatus('Stopped');
-      renderAll();
-      return;
+      if (wakeMissingPayloadTrigger) {
+        state.running = true;
+        saveRunning(true);
+        setStatus('Resuming for direct failed path');
+        log(`Direct missing payload trigger auto-resumed finisher | AZ ${wakeMissingPayloadTrigger.ticketId}`);
+      } else {
+        setStatus('Stopped');
+        renderAll();
+        return;
+      }
     }
 
     const detectedOpenTicket = getOpenTicketInfo();
