@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.3
+// @version      1.1.4
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -28,7 +28,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.3';
+  const VERSION = '1.1.4';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -112,6 +112,7 @@
     anchorStaleMs: 15000,
     anchorOpenPendingMs: 30000,
     anchorOpenCooldownMs: 120000,
+    autoAnchorLaunchEnabled: false,
     authHoldTtlMs: 20000,
     authRecoveryTimeoutMs: 90000,
     authEmptyCredentialsMs: 10000,
@@ -1860,6 +1861,11 @@
     if (!isCoordinatorOwner()) return;
     if (!state.apexWakeEnabled) {
       state.apexWakeStatus = 'Off';
+      return;
+    }
+
+    if (!CFG.autoAnchorLaunchEnabled) {
+      state.apexWakeStatus = 'Auto anchor launch disabled';
       return;
     }
 
