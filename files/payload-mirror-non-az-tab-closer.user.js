@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.10
+// @version      1.1.11
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -28,7 +28,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.10';
+  const VERSION = '1.1.11';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -148,6 +148,7 @@
     mirrored: false,
     closeAttempted: false,
     closeAttempts: 0,
+    closeRetryTimer: null,
     closeSignalKey: '',
     logsIntervalTimer: null,
     tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -237,6 +238,7 @@
   function cleanup() {
     if (state.destroyed) return;
     state.destroyed = true;
+    clearPendingCloseRetry();
     try { clearIgnoreCloseLeaseIfOwned(); } catch {}
     try { if (isAzHost()) clearAnchorLease('coordinator'); } catch {}
     try { clearAnchorLease(getAnchorRole()); } catch {}
@@ -262,6 +264,12 @@
       if (on) localStorage.removeItem(LS_KEYS.running);
       else localStorage.setItem(LS_KEYS.running, '0');
     } catch {}
+  }
+
+  function clearPendingCloseRetry() {
+    if (!state.closeRetryTimer) return;
+    try { clearTimeout(state.closeRetryTimer); } catch {}
+    state.closeRetryTimer = null;
   }
 
   function loadApexWakeEnabled() {
@@ -2871,6 +2879,7 @@
   }
 
   function attemptClose(signal = null) {
+    if (state.destroyed || !state.running) return;
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (isProtectedTab()) {
       setStatus('Protected tab');
@@ -2894,6 +2903,7 @@
     }
 
     state.closeAttempted = true;
+    state.countdownEndsAt = 0;
     writeSession(SS_KEYS.closeAttempted, '1');
     if (signalKey) markSignalHandled(signalKey);
 
@@ -2917,14 +2927,17 @@
     setStatus(`Attempting to close tab (${state.closeAttempts})`);
     tryCloseCurrentTab();
 
-    setTimeout(() => {
-      if (state.destroyed || window.closed) return;
+    clearPendingCloseRetry();
+    state.closeRetryTimer = setTimeout(() => {
+      state.closeRetryTimer = null;
+      if (state.destroyed || window.closed || !state.running) return;
       if (state.closeAttempts < CFG.maxCloseAttempts) {
-        attemptClose();
+        attemptClose(effectiveSignal);
         return;
       }
       log('Close blocked by browser after repeated attempts');
       setStatus('Close blocked');
+      state.countdownEndsAt = 0;
     }, CFG.closeRetryMs);
   }
 
@@ -2932,7 +2945,14 @@
     const signalKey = buildSignalKey(signal);
     if (!signalKey || shouldIgnoreSignal(signalKey)) return;
 
+    const signalAzId = norm(signal?.azId || '');
+    const sameAzCloseInFlight = !!signalAzId
+      && signalAzId === norm(state.activeSignal?.azId || '')
+      && (state.countdownEndsAt || state.closeAttempted || !!state.closeRetryTimer);
+    if (sameAzCloseInFlight) return;
+
     if (state.activeSignalKey !== signalKey) {
+      clearPendingCloseRetry();
       state.activeSignal = signal;
       state.activeSignalKey = signalKey;
       state.countdownEndsAt = 0;
@@ -3003,7 +3023,7 @@
     }
 
     if (state.countdownEndsAt) {
-      if (Date.now() >= state.countdownEndsAt) {
+      if (!state.closeAttempted && Date.now() >= state.countdownEndsAt) {
         publishCloseSignal(state.activeSignal || signal);
         if (closeSignalMatches(state.activeSignal || signal)) {
           if (shouldIgnoreCloseForActiveLease(state.activeSignal || signal)) {
@@ -3188,7 +3208,10 @@
       state.running = !state.running;
       saveRunning(state.running);
       if (!state.running) {
+        clearPendingCloseRetry();
         state.countdownEndsAt = 0;
+        state.closeAttempted = false;
+        state.closeAttempts = 0;
         setStatus('Stopped');
         log('Monitoring stopped');
       } else {
