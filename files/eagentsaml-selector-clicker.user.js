@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.0
+// @version      1.0.1
 // @description  Lets you pick one selector on the eAgent SAML login page and clicks it once every 10 seconds whenever it is visible.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,12 +18,11 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
     selector: 'tm_eagentsaml_selector_clicker_selector_v1',
-    enabled: 'tm_eagentsaml_selector_clicker_enabled_v1',
     panelPos: 'tm_eagentsaml_selector_clicker_panel_pos_v1'
   };
 
@@ -38,7 +37,7 @@
 
   const state = {
     destroyed: false,
-    running: readEnabled(),
+    running: true,
     selector: readSelector(),
     selectorMode: false,
     selectorListeners: [],
@@ -77,17 +76,8 @@
     try { delete window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__; } catch {}
   }
 
-  function readEnabled() {
-    try {
-      return localStorage.getItem(LS_KEYS.enabled) !== '0';
-    } catch {
-      return true;
-    }
-  }
-
   function saveEnabled(on) {
     state.running = !!on;
-    try { localStorage.setItem(LS_KEYS.enabled, on ? '1' : '0'); } catch {}
     renderAll();
   }
 
@@ -437,8 +427,6 @@
       }
       const target = selectableAt(event.clientX, event.clientY);
       if (!target) return;
-      event.preventDefault();
-      event.stopPropagation();
       saveSelectorFromElement(target);
     };
     const onKey = (event) => {
