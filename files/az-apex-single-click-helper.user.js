@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.5
+// @version      1.0.6
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://*.okta.com/*
+// @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -20,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.5';
+  const VERSION = '1.0.6';
 
   const CFG = {
     scanMs: 400,
@@ -144,8 +145,12 @@
     return /\.okta\.com$/i.test(location.host);
   }
 
+  function isEagentSamlHost() {
+    return /^eagentsaml\.farmersinsurance\.com$/i.test(location.host);
+  }
+
   function isApexAuthHost() {
-    return isApexHost() || isOktaHost();
+    return isApexHost() || isOktaHost() || isEagentSamlHost();
   }
 
   function isAgencyZoomHost() {

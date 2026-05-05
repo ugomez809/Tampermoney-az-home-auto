@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.4
+// @version      1.1.5
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://*.okta.com/*
+// @match        https://eagentsaml.farmersinsurance.com/*
 // @match        https://app.agencyzoom.com/*
 // @run-at       document-idle
 // @noframes
@@ -28,7 +29,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.4';
+  const VERSION = '1.1.5';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -342,6 +343,10 @@
 
   function isOktaHost() {
     return /\.okta\.com$/i.test(location.hostname);
+  }
+
+  function isEagentSamlHost() {
+    return /^eagentsaml\.farmersinsurance\.com$/i.test(location.hostname);
   }
 
   function isAzHost() {
@@ -1307,6 +1312,17 @@
     const currentRole = getAnchorRole();
     if (currentRole) return currentRole;
 
+    const lowerHref = lower(location.href || '');
+    if (
+      /salesforce|lightning\.force\.com|farmersagent\.(?:my\.salesforce|lightning\.force)\.com/.test(lowerHref)
+      || (isEagentSamlHost() && /farmersinsurance\.okta\.com\/app\/salesforce/.test(lowerHref))
+    ) {
+      return 'apex';
+    }
+    if (/policycenter|guidewire|loginpage\.do|j_security_check/.test(lowerHref)) {
+      return 'gwpc';
+    }
+
     const registry = readAnchorState();
     const apexPending = isAnchorPendingActive('apex', registry);
     const gwpcPending = isAnchorPendingActive('gwpc', registry);
@@ -1331,7 +1347,7 @@
     const agreeButton = findTrustedDeviceAgreeButton();
     const agreeVisible = !!agreeButton;
 
-    if (isLexHost() || (isOktaHost() && role === 'apex')) {
+    if (isLexHost() || ((isOktaHost() || isEagentSamlHost()) && role === 'apex')) {
       const hasLightningChrome = !!document.querySelector('one-app, .slds-context-bar, [data-aura-class*="oneApp"]');
       const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
       let sessionState = hasLightningChrome ? 'healthy' : 'recovering';
@@ -1367,7 +1383,7 @@
       };
     }
 
-    if (isGwpcHost() || (isOktaHost() && role === 'gwpc')) {
+    if (isGwpcHost() || ((isOktaHost() || isEagentSamlHost()) && role === 'gwpc')) {
       const hasGuidewireChrome = !!(getVisibleGuidewireHeader() || document.querySelector('.gw-TabBar, .gw-Wizard--Title, .gw-TitleBar--title'));
       const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
       let sessionState = hasGuidewireChrome ? 'healthy' : 'recovering';
