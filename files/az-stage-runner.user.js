@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.37
+// @version      2.5.38
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.37';
+  const VERSION = '2.5.38';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -1876,7 +1876,6 @@
 
     try {
       while (state.running && !state.destroyed) {
-        if (!(await waitForAuthHealthy('before opening tickets'))) return;
         await waitUntilFrontStable(CFG.frontStableMs);
 
         const stageWrap = getStageWrap();
@@ -1972,7 +1971,6 @@
         log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/${FIELD_ORDER.length}`, 'ok');
         clearFinisherCloseSignal();
 
-        if (!(await waitForAuthHealthy('before quote launch'))) return;
         const quoteStarted = await startQuoteFlow();
         if (!quoteStarted) {
           highlightCard(card, 'error');
