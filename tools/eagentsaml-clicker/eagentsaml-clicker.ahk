@@ -64,6 +64,9 @@ Tick() {
   if !WindowMatches(hwnd) {
     return
   }
+  if !TitleMatches(hwnd) {
+    return
+  }
   activeUrl := ReadActiveUrl(hwnd)
   if !UrlMatches(activeUrl) {
     return
@@ -82,6 +85,7 @@ LoadConfig() {
 
   cfg := Map()
   cfg["BrowserClass"] := IniRead(IniPath, "target", "BrowserClass", "Chrome_WidgetWin_1")
+  cfg["TitleNeedle"] := IniRead(IniPath, "target", "TitleNeedle", "sign in")
   cfg["UrlNeedle"] := IniRead(IniPath, "target", "UrlNeedle", "https://eagentsaml.farmersinsurance.com/")
   cfg["ClickRatioX"] := ReadIniFloat("target", "ClickRatioX", 0.50)
   cfg["ClickRatioY"] := ReadIniFloat("target", "ClickRatioY", 0.30)
@@ -179,6 +183,10 @@ CompleteBindClickPoint() {
     CancelBindClickPoint("Clicked window does not match configured browser class")
     return
   }
+  if !TitleMatches(hwnd) {
+    CancelBindClickPoint("Clicked tab title does not look like the Farmers sign-in page")
+    return
+  }
   activeUrl := ReadActiveUrl(hwnd)
   if !UrlMatches(activeUrl) {
     CancelBindClickPoint("Clicked tab is not on eagentsaml")
@@ -209,13 +217,17 @@ ClickNowHotkey(*) {
     ShowStatus("Active window is not the configured browser class")
     return
   }
+  if !TitleMatches(hwnd) {
+    ShowStatus("Active tab title does not look like the Farmers sign-in page")
+    return
+  }
   activeUrl := ReadActiveUrl(hwnd)
   if !UrlMatches(activeUrl) {
     ShowStatus("Active tab URL is not eagentsaml")
     return
   }
   if !HasClickPoint() {
-    ShowStatus("No click point saved yet. Press F7 and click anywhere on the page once.")
+    ShowStatus("No click point saved yet. Press F11 and click anywhere on the page once.")
     return
   }
   if PerformWindowClick(hwnd, "manual") {
@@ -253,6 +265,21 @@ WindowMatches(hwnd) {
     return false
   }
   return true
+}
+
+TitleMatches(hwnd) {
+  global Config
+
+  titleNeedle := StrLower(Trim(Config["TitleNeedle"]))
+  if (titleNeedle = "") {
+    return true
+  }
+
+  try title := WinGetTitle("ahk_id " . hwnd)
+  catch {
+    return false
+  }
+  return InStr(StrLower(Trim(title)), titleNeedle) > 0
 }
 
 UrlMatches(url) {

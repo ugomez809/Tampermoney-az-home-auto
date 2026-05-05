@@ -8,6 +8,7 @@ point inside the active Farmers sign-in browser window.
 ## What it does
 
 - Watches the active Chromium browser window.
+- First checks that the active tab title looks like the Farmers sign-in page.
 - Reads the active browser URL by copying the address bar, then checks for
   `https://eagentsaml.farmersinsurance.com/`.
 - If the active browser tab URL matches, it clicks a saved point every `10s`.
@@ -41,7 +42,8 @@ point inside the active Farmers sign-in browser window.
 ## Notes
 
 - The helper only clicks when the active window class matches `Chrome_WidgetWin_1`
-  and the copied address bar URL contains `https://eagentsaml.farmersinsurance.com/`.
+  and the tab title contains `sign in`, and the copied address bar URL contains
+  `https://eagentsaml.farmersinsurance.com/`.
 - The default click point in the INI is only a placeholder. Binding the real
   page point with `F7` is the intended path.
 - Because this reads the address bar, it briefly selects the browser URL every poll.
