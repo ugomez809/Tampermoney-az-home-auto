@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.3
+// @version      1.0.4
 // @description  Lets you pick one selector on the eAgent SAML login page and clicks it once every 10 seconds whenever it is visible.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
@@ -706,23 +706,15 @@
     if (!el || !visible(el) || !enabled(el)) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {}
-    prepareLoginForm(el);
-    let clicked = false;
     try {
-      dispatchPressSequence(el);
-      el.click?.();
-      clicked = true;
+      if (typeof el.click === 'function') {
+        el.click();
+      } else {
+        HTMLElement.prototype.click.call(el);
+      }
+      return true;
     } catch {}
-    try {
-      el.dispatchEvent(new MouseEvent('click', {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window
-      }));
-      clicked = true;
-    } catch {}
-    return clicked;
+    return false;
   }
 
   function findTarget(selector) {
@@ -753,26 +745,6 @@
     }
 
     state.lastSelectorMissLogKey = '';
-    const credentialWait = getCredentialWaitState(target);
-    if (credentialWait?.waiting) {
-      if (credentialWait.reason === 'credentials-empty') {
-        setStatus('Waiting for autofilled credentials');
-        if (state.lastCredentialWaitLogKey !== 'credentials-empty') {
-          state.lastCredentialWaitLogKey = 'credentials-empty';
-          log('Waiting for autofilled credentials');
-        }
-        return;
-      }
-
-      const waitKey = credentialWait.logKey || 'credentials-settling';
-      if (state.lastCredentialWaitLogKey !== waitKey) {
-        state.lastCredentialWaitLogKey = waitKey;
-        log(`Credentials detected; waiting ${Math.ceil((credentialWait.remainingMs || 0) / 1000)}s before click`);
-      }
-      setStatus(`Credentials settling; wait ${Math.ceil((credentialWait.remainingMs || 0) / 1000)}s`);
-      return;
-    }
-
     const visibleKey = `${selector}|${location.pathname}|${location.search}`;
     if (state.armedVisibleKey !== visibleKey) {
       state.armedVisibleKey = visibleKey;
