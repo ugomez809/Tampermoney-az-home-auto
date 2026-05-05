@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.3
+// @version      1.0.4
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
+// @match        https://*.okta.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -19,7 +20,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
 
   const CFG = {
     scanMs: 400,
@@ -139,6 +140,14 @@
     return /farmersagent\.(?:my\.salesforce|lightning\.force)\.com$/i.test(location.host);
   }
 
+  function isOktaHost() {
+    return /\.okta\.com$/i.test(location.host);
+  }
+
+  function isApexAuthHost() {
+    return isApexHost() || isOktaHost();
+  }
+
   function isAgencyZoomHost() {
     return /app\.agencyzoom\.com$/i.test(location.host);
   }
@@ -184,10 +193,28 @@
     }) || null;
   }
 
+  function isTrustedDeviceAgreeLabel(label) {
+    const text = lower(label);
+    if (!text) return false;
+    if (text === 'i agree') return true;
+    if (/\bagree\b/.test(text) && /\b(i|yes|trust|device|remember|recognize)\b/.test(text)) return true;
+    if (/\b(trust|remember|recognize)\b/.test(text) && /\b(device|browser|me)\b/.test(text)) return true;
+    return false;
+  }
+
   function findApexAgreeButton() {
-    const button = document.querySelector('#okta-signin-submit.button.button-primary[type="submit"]');
-    if (!button || !isVisible(button) || !isEnabled(button)) return null;
-    return lower(button.value) === 'i agree' ? button : null;
+    const buttons = Array.from(document.querySelectorAll('#okta-signin-submit, button, input[type="submit"], input[type="button"], [role="button"]'));
+    return buttons.find((el) => {
+      if (!isVisible(el) || !isEnabled(el)) return false;
+      const label = [
+        el.textContent,
+        el.value,
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('name')
+      ].filter(Boolean).join(' ');
+      return isTrustedDeviceAgreeLabel(label);
+    }) || null;
   }
 
   function findApexCredentialSubmitButton() {
@@ -291,7 +318,7 @@
   }
 
   function getSteps() {
-    if (isApexHost()) {
+    if (isApexAuthHost()) {
       return [
         { kind: KIND.APEX_LOGIN_SUBMIT, label: 'APEX Login Submit' },
         { kind: KIND.APEX_AGREE, label: 'APEX I AGREE' }

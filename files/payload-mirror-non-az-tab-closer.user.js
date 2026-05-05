@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.1
+// @version      1.1.2
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @match        https://farmersagent.lightning.force.com/*
+// @match        https://*.okta.com/*
 // @match        https://app.agencyzoom.com/*
 // @run-at       document-idle
 // @noframes
@@ -27,7 +28,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.1';
+  const VERSION = '1.1.2';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -335,6 +336,10 @@
 
   function isLexHost() {
     return /^farmersagent\.lightning\.force\.com$/i.test(location.hostname);
+  }
+
+  function isOktaHost() {
+    return /\.okta\.com$/i.test(location.hostname);
   }
 
   function isAzHost() {
@@ -1222,18 +1227,49 @@
     ].filter(Boolean).join(' '));
   }
 
+  function isTrustedDeviceAgreeLabel(label) {
+    const text = lower(label);
+    if (!text) return false;
+    if (text === 'i agree') return true;
+    if (/\bagree\b/.test(text) && /\b(i|yes|trust|device|remember|recognize)\b/.test(text)) return true;
+    if (/\b(trust|remember|recognize)\b/.test(text) && /\b(device|browser|me)\b/.test(text)) return true;
+    return false;
+  }
+
+  function findTrustedDeviceAgreeButton() {
+    const buttons = Array.from(document.querySelectorAll('#okta-signin-submit, button, input[type="submit"], input[type="button"], [role="button"]'));
+    return buttons.find((el) => visible(el) && isTrustedDeviceAgreeLabel(getElementLabel(el))) || null;
+  }
+
+  function inferExternalAuthRole() {
+    const currentRole = getAnchorRole();
+    if (currentRole) return currentRole;
+
+    const registry = readAnchorState();
+    const apexPending = isAnchorPendingActive('apex', registry);
+    const gwpcPending = isAnchorPendingActive('gwpc', registry);
+    if (apexPending && !gwpcPending) return 'apex';
+    if (gwpcPending && !apexPending) return 'gwpc';
+
+    const hold = getActiveAuthHold();
+    const holdSystem = norm(hold?.system || '');
+    if (holdSystem === 'apex' || holdSystem === 'gwpc') return holdSystem;
+
+    return '';
+  }
+
   function getCurrentSessionContext() {
-    const role = getAnchorRole();
+    const role = getAnchorRole() || inferExternalAuthRole();
     const title = norm(document.title || '');
     const href = String(location.href || '');
     const lowerHref = href.toLowerCase();
     const lowerTitle = title.toLowerCase();
     const bodyText = lower(norm(document.body?.innerText || '').slice(0, 2000));
     const loginForm = getVisibleLoginFormContext();
-    const agreeButton = document.querySelector('#okta-signin-submit.button.button-primary[type="submit"]');
-    const agreeVisible = !!(agreeButton && visible(agreeButton) && lower(getElementLabel(agreeButton)) === 'i agree');
+    const agreeButton = findTrustedDeviceAgreeButton();
+    const agreeVisible = !!agreeButton;
 
-    if (isLexHost()) {
+    if (isLexHost() || (isOktaHost() && role === 'apex')) {
       const hasLightningChrome = !!document.querySelector('one-app, .slds-context-bar, [data-aura-class*="oneApp"]');
       const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
       let sessionState = hasLightningChrome ? 'healthy' : 'recovering';
@@ -1269,7 +1305,7 @@
       };
     }
 
-    if (isGwpcHost()) {
+    if (isGwpcHost() || (isOktaHost() && role === 'gwpc')) {
       const hasGuidewireChrome = !!(getVisibleGuidewireHeader() || document.querySelector('.gw-TabBar, .gw-Wizard--Title, .gw-TitleBar--title'));
       const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
       let sessionState = hasGuidewireChrome ? 'healthy' : 'recovering';
