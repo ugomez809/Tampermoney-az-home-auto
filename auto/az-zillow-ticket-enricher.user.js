@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.5
+// @version      1.2.6
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.5';
+  const VERSION = '1.2.6';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1806,10 +1806,20 @@
     return factLabels.some((value) => !!norm(value));
   }
 
+  function hasVisibleCaptchaSignals(selectors) {
+    for (const selector of selectors) {
+      const matches = Array.from(document.querySelectorAll(selector));
+      if (matches.some((el) => visible(el))) return true;
+    }
+    return false;
+  }
+
   function detectZillowVerificationBlock(job) {
     const title = norm(document.title || '');
     const body = norm(document.body?.innerText || '');
     const text = lower([title, body].filter(Boolean).join(' '));
+    if (hasVisibleZillowContentSignals(job)) return '';
+
     const strongCaptchaSignals = [
       '[id*="px-captcha"]',
       '[class*="px-captcha"]',
@@ -1818,12 +1828,11 @@
       '[data-testid*="captcha"]'
     ];
 
-    if (strongCaptchaSignals.some((selector) => document.querySelector(selector))) {
+    if (hasVisibleCaptchaSignals(strongCaptchaSignals)) {
       return 'Zillow verification required (PerimeterX page)';
     }
 
     if (!text) return '';
-    if (hasVisibleZillowContentSignals(job)) return '';
 
     if (
       text.includes('access to this page has been denied') ||
