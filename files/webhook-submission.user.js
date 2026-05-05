@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.14
+// @version      1.18.15
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.14';
+  const VERSION = '1.18.15';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -42,6 +42,7 @@
   const FORCE_SEND_KEY = 'tm_pc_force_send_now_v1';
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const WEBHOOK_FATAL_HOLD_KEY = 'tm_pc_webhook_fatal_error_hold_v1';
+  const MISSING_PAYLOAD_TRIGGER_KEY = 'tm_az_missing_payload_fallback_trigger_v1';
 
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
   const LEGACY_SHARED_JOB_KEY = 'tm_shared_az_job_v1';
@@ -642,6 +643,58 @@
     return safeJsonParse(localStorage.getItem(HOME_KEY), null);
   }
 
+  function chooseNewerSignal(localSignal, gmSignal) {
+    const localOk = isPlainObject(localSignal);
+    const gmOk = isPlainObject(gmSignal);
+    if (localOk && !gmOk) return localSignal;
+    if (!localOk && gmOk) return gmSignal;
+    if (!localOk && !gmOk) return null;
+
+    const localMs = Date.parse(normalizeText(localSignal.requestedAt || ''));
+    const gmMs = Date.parse(normalizeText(gmSignal.requestedAt || ''));
+    if (Number.isFinite(localMs) && Number.isFinite(gmMs) && localMs !== gmMs) {
+      return localMs > gmMs ? localSignal : gmSignal;
+    }
+    return localSignal;
+  }
+
+  function readMissingPayloadTrigger() {
+    const local = safeJsonParse(localStorage.getItem(MISSING_PAYLOAD_TRIGGER_KEY), null);
+    let gm = null;
+    try { gm = GM_getValue(MISSING_PAYLOAD_TRIGGER_KEY, null); } catch {}
+    return chooseNewerSignal(local, gm);
+  }
+
+  function buildMissingPayloadTriggerKey(signal) {
+    return [
+      normalizeText(signal?.ticketId || signal?.azId || ''),
+      normalizeText(signal?.requestedAt || '')
+    ].join('|');
+  }
+
+  function getActiveMissingPayloadTrigger(expectedAzId = '') {
+    const signal = readMissingPayloadTrigger();
+    if (!isPlainObject(signal) || signal.ready !== true) return null;
+
+    const azId = normalizeText(signal.ticketId || signal.azId || '');
+    if (!azId) return null;
+
+    const requestedAt = normalizeText(signal.requestedAt || '');
+    const requestedMs = Date.parse(requestedAt);
+    if (Number.isFinite(requestedMs) && (Date.now() - requestedMs) > (10 * 60 * 1000)) return null;
+
+    const wanted = normalizeText(expectedAzId || '');
+    if (wanted && wanted !== azId) return null;
+
+    return {
+      ...signal,
+      ticketId: azId,
+      azId,
+      requestedAt: requestedAt || nowIso(),
+      triggerKey: buildMissingPayloadTriggerKey(signal)
+    };
+  }
+
   function hasMeaningfulHome(bundle) {
     return !!(bundle?.home?.ready && isPlainObject(bundle?.home?.data));
   }
@@ -769,24 +822,131 @@
     };
   }
 
+  function buildMissingPayloadTriggerEvent(job, trigger) {
+    const azId = normalizeText(trigger?.ticketId || trigger?.azId || job?.['AZ ID'] || '');
+    const reason = normalizeText(trigger?.reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED';
+    const selectorRuleId = normalizeText(trigger?.selectorRuleId || '');
+    const label = normalizeText(trigger?.label || '');
+    const triggerType = normalizeText(trigger?.triggerType || (selectorRuleId ? 'selector' : 'missing-payload')) || 'missing-payload';
+    const detectedAt = normalizeText(trigger?.requestedAt || nowIso());
+    const stableKey = [azId, detectedAt, reason, selectorRuleId, triggerType].join('|');
+    const eventId = `evt_${hashString(stableKey)}`;
+    return {
+      eventId,
+      id: eventId,
+      dedupeKey: [
+        triggerType,
+        azId,
+        'home',
+        selectorRuleId || normalizeText(reason).toLowerCase()
+      ].join('|'),
+      actionKey: selectorRuleId ? 'home_saved_selector_error' : 'home_missing_payload_error',
+      triggerType,
+      product: 'home',
+      productLabel: 'Homeowners',
+      errorType: selectorRuleId ? 'SavedSelectorMatch' : 'MissingPayloadTrigger',
+      errorName: label || (selectorRuleId ? 'Saved selector error' : 'Missing payload fallback'),
+      errorMessage: reason,
+      errorText: reason,
+      resultField: 'Done?',
+      resultValue: reason,
+      selectorRuleId,
+      detectedAt,
+      source: normalizeText(trigger?.source || 'Shared Failure Selector'),
+      sourceVersion: normalizeText(trigger?.version || ''),
+      page: {
+        url: normalizeText(trigger?.pageUrl || ''),
+        title: normalizeText(trigger?.pageTitle || '')
+      },
+      identity: {
+        'AZ ID': azId,
+        'Name': normalizeText(job?.['Name'] || ''),
+        'Mailing Address': normalizeText(job?.['Mailing Address'] || ''),
+        'SubmissionNumber': normalizeText(job?.SubmissionNumber || '')
+      }
+    };
+  }
+
+  function buildMissingPayloadTriggerBundle(job, trigger, baseBundle = null) {
+    const azId = normalizeText(job?.['AZ ID'] || trigger?.ticketId || trigger?.azId || '');
+    if (!azId) return null;
+
+    const next = isPlainObject(baseBundle)
+      ? deepClone(baseBundle)
+      : {
+          'AZ ID': azId,
+          home: { ready: false, data: null },
+          auto: { ready: false, data: null },
+          timeout: { ready: false, events: [] },
+          meta: {}
+        };
+
+    next['AZ ID'] = azId;
+    if (normalizeText(job?.['Name'] || '')) next['Name'] = normalizeText(job['Name']);
+    if (normalizeText(job?.['Mailing Address'] || '')) next['Mailing Address'] = normalizeText(job['Mailing Address']);
+    if (normalizeText(job?.SubmissionNumber || '')) next['SubmissionNumber'] = normalizeText(job.SubmissionNumber);
+    next.home = isPlainObject(next.home) ? next.home : { ready: false, data: null };
+    next.auto = { ready: false, data: null };
+    next.timeout = isPlainObject(next.timeout) ? next.timeout : {};
+    next.timeout.ready = true;
+    next.timeout.events = Array.isArray(next.timeout.events) ? next.timeout.events : [];
+
+    const event = buildMissingPayloadTriggerEvent(job, trigger);
+    const eventKey = `${normalizeText(event.dedupeKey || '')}|${normalizeText(event.detectedAt || '')}`;
+    if (!next.timeout.events.some((item) => (
+      `${normalizeText(item?.dedupeKey || '')}|${normalizeText(item?.detectedAt || '')}` === eventKey
+    ))) {
+      next.timeout.events.push(event);
+    }
+    next.timeout.lastEvent = event;
+    next.timeout.events = next.timeout.events.slice(-50);
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.synthetic = true;
+    next.meta.builtFrom = 'missing-payload-trigger';
+    next.meta.builtAt = nowIso();
+    next.meta.selectorFailure = {
+      triggerKey: normalizeText(trigger?.triggerKey || ''),
+      selectorRuleId: normalizeText(trigger?.selectorRuleId || ''),
+      reason: normalizeText(trigger?.reason || '')
+    };
+    return next;
+  }
+
   function getEffectiveBundle(job) {
     const rawBundle = readBundleRaw();
+    const directFailureTrigger = getActiveMissingPayloadTrigger(job?.['AZ ID'] || '');
+
+    let baseBundle = null;
+    let baseSource = '';
 
     if (isPlainObject(rawBundle) &&
         normalizeText(rawBundle['AZ ID']) === job['AZ ID'] &&
         (hasMeaningfulHome(rawBundle) || hasPendingTimeout(rawBundle))) {
-      return {
-        bundle: normalizeHomeOnlyBundle(rawBundle),
-        source: 'bundle'
-      };
+      baseBundle = normalizeHomeOnlyBundle(rawBundle);
+      baseSource = 'bundle';
     }
 
     const homePayload = readHomePayload();
     const synthetic = buildHomeOnlySyntheticBundle(job, homePayload);
-    if (synthetic) {
+    if (!baseBundle && synthetic) {
+      baseBundle = synthetic;
+      baseSource = 'home-payload';
+    }
+
+    if (directFailureTrigger) {
+      const triggeredBundle = buildMissingPayloadTriggerBundle(job, directFailureTrigger, baseBundle);
+      if (triggeredBundle) {
+        return {
+          bundle: triggeredBundle,
+          source: 'missing-payload-trigger'
+        };
+      }
+    }
+
+    if (baseBundle) {
       return {
-        bundle: synthetic,
-        source: 'home-payload'
+        bundle: baseBundle,
+        source: baseSource
       };
     }
 
@@ -1451,6 +1611,7 @@
     const resolved = getEffectiveBundle(rawJob);
     const bundle = resolved.bundle;
     const job = enrichCurrentJobFromBundle(rawJob, bundle);
+    const directFailureTrigger = resolved.source === 'missing-payload-trigger';
 
     if (!job['AZ ID']) {
       state.quoteSeenAt = 0;
@@ -1486,7 +1647,7 @@
       return;
     }
 
-    if (!forceSend) {
+    if (!forceSend && !directFailureTrigger) {
       const stageReady = matchesStage('home', 'sender', job['AZ ID']);
       if (!stageReady) {
         state.quoteSeenAt = 0;
