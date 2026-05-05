@@ -9,6 +9,7 @@ point inside the active Farmers sign-in browser window.
 
 - Watches the active Chromium browser window.
 - First checks that the active tab title looks like the Farmers sign-in page.
+  The default title keywords are `sign in|farmers|eagentsaml`.
 - Reads the active browser URL by copying the address bar, then checks for
   `https://eagentsaml.farmersinsurance.com/`.
 - If the active browser tab URL matches, it clicks a saved point every `10s`.

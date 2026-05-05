@@ -85,7 +85,7 @@ LoadConfig() {
 
   cfg := Map()
   cfg["BrowserClass"] := IniRead(IniPath, "target", "BrowserClass", "Chrome_WidgetWin_1")
-  cfg["TitleNeedle"] := IniRead(IniPath, "target", "TitleNeedle", "sign in")
+  cfg["TitleNeedle"] := IniRead(IniPath, "target", "TitleNeedle", "sign in|farmers|eagentsaml")
   cfg["UrlNeedle"] := IniRead(IniPath, "target", "UrlNeedle", "https://eagentsaml.farmersinsurance.com/")
   cfg["ClickRatioX"] := ReadIniFloat("target", "ClickRatioX", 0.50)
   cfg["ClickRatioY"] := ReadIniFloat("target", "ClickRatioY", 0.30)
@@ -270,8 +270,8 @@ WindowMatches(hwnd) {
 TitleMatches(hwnd) {
   global Config
 
-  titleNeedle := StrLower(Trim(Config["TitleNeedle"]))
-  if (titleNeedle = "") {
+  titleNeedlesRaw := StrLower(Trim(Config["TitleNeedle"]))
+  if (titleNeedlesRaw = "") {
     return true
   }
 
@@ -279,7 +279,14 @@ TitleMatches(hwnd) {
   catch {
     return false
   }
-  return InStr(StrLower(Trim(title)), titleNeedle) > 0
+  haystack := StrLower(Trim(title))
+  for needle in StrSplit(titleNeedlesRaw, "|") {
+    cleaned := StrLower(Trim(needle))
+    if (cleaned != "" && InStr(haystack, cleaned) > 0) {
+      return true
+    }
+  }
+  return false
 }
 
 UrlMatches(url) {
