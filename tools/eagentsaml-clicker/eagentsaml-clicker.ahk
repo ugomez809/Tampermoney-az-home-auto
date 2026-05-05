@@ -288,7 +288,8 @@ ReadActiveUrl(hwnd) {
     copiedUrl := ""
   }
   try A_Clipboard := savedClipboard
-  catch {}
+  catch {
+  }
   return Trim(copiedUrl)
 }
 
