@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.39
+// @version      2.5.40
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.39';
+  const VERSION = '2.5.40';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -2063,9 +2063,19 @@
           log(`Direct missing payload trigger received while waiting for finisher | ${ticketId} | ${reason}`, 'warn');
         }
 
-        if (options.card instanceof Element && (!isTicketDrawerOpen() || String(getOpenTicketInfo().ticketId || '') !== String(ticketId))) {
+        let openInfo = getOpenTicketInfo();
+        let ticketReadyForFinisher = isTicketDrawerOpen() && String(openInfo.ticketId || '') === String(ticketId);
+        if (!ticketReadyForFinisher && options.card instanceof Element) {
           const reopened = await openCard(options.card, ticketId);
           log(reopened ? `Reopened ticket for direct failed path | ${ticketId}` : `Could not reopen ticket for direct failed path | ${ticketId}`, reopened ? 'ok' : 'error');
+          openInfo = getOpenTicketInfo();
+          ticketReadyForFinisher = isTicketDrawerOpen() && String(openInfo.ticketId || '') === String(ticketId);
+        }
+
+        if (!ticketReadyForFinisher) {
+          setStatus('Waiting to reopen failed ticket');
+          await waitForWakeOrTimeout(CFG.ticketClosePollMs);
+          continue;
         }
 
         clearFinisherCloseSignal();
