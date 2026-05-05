@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.5
+// @version      1.1.6
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -29,7 +29,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.5';
+  const VERSION = '1.1.6';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -1283,6 +1283,47 @@
     };
   }
 
+  function setNativeInputValue(el, value) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    const setter = desc && typeof desc.set === 'function' ? desc.set : null;
+    if (!setter) return false;
+    try {
+      setter.call(el, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function dispatchAuthFieldLifecycle(el) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const value = String(el.value || '');
+    if (!value) return false;
+
+    try { el.focus({ preventScroll: true }); } catch {}
+    setNativeInputValue(el, value);
+    try { el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true })); } catch {}
+    try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Tab' })); } catch {}
+    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true, cancelable: false })); } catch {}
+    try { el.blur(); } catch {}
+    return true;
+  }
+
+  function prepareVisibleLoginForm(loginForm) {
+    if (!loginForm) return false;
+    let prepared = false;
+    if (loginForm.userInput && visible(loginForm.userInput) && norm(loginForm.userInput.value || '')) {
+      prepared = dispatchAuthFieldLifecycle(loginForm.userInput) || prepared;
+    }
+    if (loginForm.passwordInput && visible(loginForm.passwordInput) && norm(loginForm.passwordInput.value || '')) {
+      prepared = dispatchAuthFieldLifecycle(loginForm.passwordInput) || prepared;
+    }
+    return prepared;
+  }
+
   function getElementLabel(el) {
     if (!el || !(el instanceof Element)) return '';
     return norm([
@@ -1452,6 +1493,7 @@
     if (!context || (context.kind !== 'lex' && context.kind !== 'gwpc')) return context;
     const loginForm = context.loginForm;
     const agreeButton = context.agreeButton;
+    if (loginForm) prepareVisibleLoginForm(loginForm);
 
     if (agreeButton && visible(agreeButton)) {
       const actionKey = `agree|${buildSessionContextKey(context)}`;

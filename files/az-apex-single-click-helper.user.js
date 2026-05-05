@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.6
+// @version      1.0.7
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
 
   const CFG = {
     scanMs: 400,
@@ -135,6 +135,49 @@
       el.getAttribute('disabled') !== null ||
       el.getAttribute('aria-disabled') === 'true'
     );
+  }
+
+  function setNativeInputValue(el, value) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    const setter = desc && typeof desc.set === 'function' ? desc.set : null;
+    if (!setter) return false;
+    try {
+      setter.call(el, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function dispatchAuthFieldLifecycle(el) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const value = String(el.value || '');
+    if (!value) return false;
+
+    try { el.focus({ preventScroll: true }); } catch {}
+    setNativeInputValue(el, value);
+    try { el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true })); } catch {}
+    try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Tab' })); } catch {}
+    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true, cancelable: false })); } catch {}
+    try { el.blur(); } catch {}
+    return true;
+  }
+
+  function prepareApexAuthForm(triggerEl) {
+    const form = triggerEl?.closest?.('form') || document;
+    const passwordInputs = Array.from(form.querySelectorAll('input[type="password"]'))
+      .filter((el) => isVisible(el) && isEnabled(el) && normalizeText(el.value).length > 0);
+    const userInputs = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
+      .filter((el) => isVisible(el) && isEnabled(el) && !(el instanceof HTMLInputElement && el.type === 'password') && normalizeText(el.value).length > 0);
+
+    let prepared = false;
+    for (const input of [...userInputs, ...passwordInputs]) {
+      prepared = dispatchAuthFieldLifecycle(input) || prepared;
+    }
+    return prepared;
   }
 
   function isApexHost() {
@@ -294,11 +337,14 @@
     return true;
   }
 
-  function clickElement(el, label) {
+  function clickElement(el, label, kind = '') {
     if (!el || !isVisible(el) || !isEnabled(el)) return false;
 
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {}
+    if (kind === KIND.APEX_LOGIN_SUBMIT || kind === KIND.APEX_AGREE) {
+      prepareApexAuthForm(el);
+    }
 
     try {
       dispatchPressSequence(el);
@@ -376,7 +422,7 @@
 
       const el = step.el || findTarget(step.kind);
       if (!el) continue;
-      if (!clickElement(el, step.label)) continue;
+      if (!clickElement(el, step.label, step.kind)) continue;
 
       markClicked(step.kind);
       break;
