@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.16
-// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, only fast-tracks on a fresh timeout/selector send signal, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
+// @version      1.18.17
+// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, only fast-tracks on a fresh timeout/selector send signal, auto-rearms on AZ changes, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.16';
+  const VERSION = '1.18.17';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -89,6 +89,7 @@
     logLines: [],
     drag: null,
     fatalOverlay: null,
+    currentAzId: '',
     savedWebhookUrl: '',
     savedAgencyName: '',
     lastWaitKey: '',
@@ -1251,6 +1252,32 @@
     } catch {}
   }
 
+  function syncAzContext(job) {
+    const nextAzId = normalizeText(job?.['AZ ID'] || '');
+    if (!nextAzId || nextAzId === state.currentAzId) return;
+
+    const prevAzId = state.currentAzId;
+    state.currentAzId = nextAzId;
+
+    clearWaitLog();
+    state.quoteSeenAt = 0;
+
+    if (prevAzId) {
+      clearSentMeta();
+      clearFatalWebhookHold();
+      log(`Sender AZ context changed: ${prevAzId} -> ${nextAzId}`);
+    }
+
+    if (!state.running) {
+      state.running = true;
+      try { sessionStorage.removeItem(CFG.stoppedKey); } catch {}
+      renderButtons();
+      writeActivityState('idle', 'Running');
+      setStatus('Running');
+      log(`Sender auto-resumed for new AZ ${nextAzId}`);
+    }
+  }
+
   function isSameBundleAlreadySent(job, bundle) {
     const meta = getSentMeta();
     if (!meta || !meta.signature) return false;
@@ -1671,6 +1698,10 @@
       writeActivityState('working', state.lastStatus || 'Sending webhook');
       return;
     }
+
+    const rawJob = readCurrentJob();
+    syncAzContext(rawJob);
+
     const forceSendPending = hasForceSendRequest();
     if (isGloballyPaused() && !forceSendPending) {
       writeActivityState('paused', 'Paused by shared selector');
@@ -1685,7 +1716,6 @@
 
     writeActivityState('waiting', state.lastStatus || 'Waiting for sender trigger');
 
-    const rawJob = readCurrentJob();
     const resolved = getEffectiveBundle(rawJob);
     const bundle = resolved.bundle;
     const job = enrichCurrentJobFromBundle(rawJob, bundle);
