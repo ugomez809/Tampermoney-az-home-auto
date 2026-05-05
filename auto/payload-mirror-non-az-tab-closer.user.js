@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         11 AUTO GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    autoflow.payload-mirror-non-az-tab-closer
-// @version      1.0.19.2
-// @description  After webhook success, mirrors the final GWPC payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while ensuring LEX consumes each close signal only once and leaving AgencyZoom available with mirrored payload state on AZ.
+// @version      1.0.19.3
+// @description  After webhook success, mirrors the final GWPC payload into shared GM storage and leaves tab-closing disabled in the mirror script.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,8 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '11 AUTO GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.19.2';
+  const VERSION = '1.0.19.3';
+  const CLOSE_BEHAVIOR_ENABLED = false;
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration â€” runs on 4 origins; pick one key per origin.
@@ -142,6 +143,7 @@
 
     log(`Loaded v${VERSION}`);
     log(`Host: ${location.hostname}`);
+    log('Mirror-only mode: tab closing disabled');
     writeTabHeartbeat(true);
     if (isAzHost()) log(`APEX wake monitor ${state.apexWakeEnabled ? 'ON' : 'OFF'}`);
     setStatus(state.running ? 'Watching for webhook success' : 'Stopped');
@@ -159,17 +161,19 @@
         });
       } catch {}
 
-      try {
-        GM_addValueChangeListener(GM_KEYS.closeSignal, () => {
-          scheduleImmediateCheck('gm-close');
-        });
-      } catch {}
+      if (CLOSE_BEHAVIOR_ENABLED) {
+        try {
+          GM_addValueChangeListener(GM_KEYS.closeSignal, () => {
+            scheduleImmediateCheck('gm-close');
+          });
+        } catch {}
 
-      try {
-        GM_addValueChangeListener(GM_KEYS.ignoreCloseLease, () => {
-          scheduleImmediateCheck('gm-ignore-close');
-        });
-      } catch {}
+        try {
+          GM_addValueChangeListener(GM_KEYS.ignoreCloseLease, () => {
+            scheduleImmediateCheck('gm-ignore-close');
+          });
+        } catch {}
+      }
     }
 
     state.tickTimer = setInterval(() => tick(), CFG.tickMs);
@@ -866,6 +870,7 @@
   }
 
   function checkGwpcSamePageCloseWatchdog() {
+    if (!CLOSE_BEHAVIOR_ENABLED) return;
     if (!isGwpcHost()) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
     if (getActiveIgnoreCloseLease()) return;
@@ -1423,16 +1428,25 @@
     if (!signal || !buildSignalKey(signal)) return;
     if (state.countdownEndsAt) return;
 
+    state.mirrored = readyMatchesSignal(signal);
+    markSignalHandled(buildSignalKey(signal));
+    if (!CLOSE_BEHAVIOR_ENABLED) {
+      state.countdownEndsAt = 0;
+      state.closeAttempts = 0;
+      clearPendingCloseRetry();
+      log(`Mirror-only mode: close suppressed for AZ ${signal.azId}`);
+      setStatus('Payload mirrored');
+      return;
+    }
     state.countdownEndsAt = Date.now() + CFG.closeDelayMs;
     state.closeAttempted = false;
     state.closeAttempts = 0;
-    state.mirrored = readyMatchesSignal(signal);
-    markSignalHandled(buildSignalKey(signal));
     log(`Close countdown started for AZ ${signal.azId}`);
     setStatus('Closing non-AZ tab soon');
   }
 
   function publishCloseSignal(signal) {
+    if (!CLOSE_BEHAVIOR_ENABLED) return;
     const signalKey = buildSignalKey(signal);
     if (!signalKey || state.closeSignalKey === signalKey) return;
     state.closeSignalKey = signalKey;
@@ -1478,6 +1492,7 @@
   }
 
   function attemptClose(signal = null) {
+    if (!CLOSE_BEHAVIOR_ENABLED) return;
     if (state.destroyed || !state.running) return;
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
@@ -1605,7 +1620,7 @@
       activateForSignal(signal, reason);
     }
 
-    if (state.countdownEndsAt) {
+    if (CLOSE_BEHAVIOR_ENABLED && state.countdownEndsAt) {
       if (!state.closeAttempted && Date.now() >= state.countdownEndsAt) {
         publishCloseSignal(state.activeSignal || signal);
         if (closeSignalMatches(state.activeSignal || signal)) {
@@ -1616,7 +1631,7 @@
           attemptClose(state.activeSignal || signal);
         }
       }
-    } else if (!isAzHost() && isFreshCloseSignal(closeSignal) && !state.closeAttempted) {
+    } else if (CLOSE_BEHAVIOR_ENABLED && !isAzHost() && isFreshCloseSignal(closeSignal) && !state.closeAttempted) {
       if (shouldIgnoreCloseForActiveLease(closeSignal)) {
         renderAll();
         return;
@@ -1646,7 +1661,7 @@
     } else if (!signal) {
       if (!getActiveIgnoreCloseLease()) state.lastIgnoreCloseSignalKey = '';
       setStatus(getActiveIgnoreCloseLease() ? 'Ignoring shared close until refresh' : 'Watching for webhook success');
-    } else if (closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
+    } else if (CLOSE_BEHAVIOR_ENABLED && closeSignalMatches(state.activeSignal || signal) && !state.closeAttempted) {
       if (shouldIgnoreCloseForActiveLease(state.activeSignal || signal)) {
         renderAll();
         return;
@@ -1674,7 +1689,9 @@
     if (state.ui.mirrored) state.ui.mirrored.textContent = state.mirrored || readyMatchesSignal(state.activeSignal) ? 'Yes' : 'No';
 
     if (state.ui.countdown) {
-      if (state.countdownEndsAt) {
+      if (!CLOSE_BEHAVIOR_ENABLED) {
+        state.ui.countdown.textContent = 'Disabled';
+      } else if (state.countdownEndsAt) {
         const remaining = Math.max(0, state.countdownEndsAt - Date.now());
         state.ui.countdown.textContent = `${(remaining / 1000).toFixed(1)}s`;
       } else {
@@ -1695,14 +1712,24 @@
     }
 
     if (state.ui.ignoreClose) {
-      const lease = getActiveIgnoreCloseLease();
-      const active = !!lease;
-      const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
-      state.ui.ignoreClose.textContent = owned
-        ? 'IGNORE CLOSE ON'
-        : (active ? 'IGNORE CLOSE ACTIVE' : 'IGNORE CLOSE OFF');
-      state.ui.ignoreClose.style.background = owned ? '#b45309' : (active ? '#7c2d12' : '#475569');
-      state.ui.ignoreClose.style.opacity = active && !owned ? '.92' : '1';
+      if (!CLOSE_BEHAVIOR_ENABLED) {
+        state.ui.ignoreClose.textContent = 'CLOSE DISABLED';
+        state.ui.ignoreClose.disabled = true;
+        state.ui.ignoreClose.style.background = '#334155';
+        state.ui.ignoreClose.style.opacity = '.75';
+        state.ui.ignoreClose.style.cursor = 'not-allowed';
+      } else {
+        const lease = getActiveIgnoreCloseLease();
+        const active = !!lease;
+        const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
+        state.ui.ignoreClose.textContent = owned
+          ? 'IGNORE CLOSE ON'
+          : (active ? 'IGNORE CLOSE ACTIVE' : 'IGNORE CLOSE OFF');
+        state.ui.ignoreClose.disabled = false;
+        state.ui.ignoreClose.style.background = owned ? '#b45309' : (active ? '#7c2d12' : '#475569');
+        state.ui.ignoreClose.style.opacity = active && !owned ? '.92' : '1';
+        state.ui.ignoreClose.style.cursor = 'pointer';
+      }
     }
 
     if (state.ui.apexWake) {
@@ -1812,6 +1839,10 @@
     });
 
     state.ui.ignoreClose?.addEventListener('click', () => {
+      if (!CLOSE_BEHAVIOR_ENABLED) {
+        log('Close controls are disabled in mirror-only mode');
+        return;
+      }
       const lease = getActiveIgnoreCloseLease();
       const owned = isIgnoreCloseLeaseOwnedByThisTab(lease);
       setIgnoreCloseEnabledForThisPage(!owned);
