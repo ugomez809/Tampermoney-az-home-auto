@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.15
-// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
+// @version      1.18.16
+// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, only fast-tracks on a fresh timeout/selector send signal, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.15';
+  const VERSION = '1.18.16';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -60,6 +60,7 @@
     tickMs: 900,
     quoteVisibleDelayMs: 5000,
     requestTimeoutMs: 45000,
+    forceSendMaxAgeMs: 10 * 60 * 1000,
     maxSendAttempts: 3,
     maxLogLines: 140,
     panelWidth: 430,
@@ -1173,9 +1174,53 @@
     return safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
   }
 
+  function normalizeForceSendRequest(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    return {
+      requestedAt: normalizeText(raw.requestedAt || ''),
+      reason: normalizeText(raw.reason || ''),
+      source: normalizeText(raw.source || ''),
+      azId: normalizeText(raw.azId || raw.ticketId || ''),
+      product: normalizeText(raw.product || ''),
+      eventId: normalizeText(raw.eventId || raw.id || ''),
+      triggerType: normalizeText(raw.triggerType || '')
+    };
+  }
+
+  function getForceSendRequestAgeMs(request) {
+    const requestedMs = Date.parse(normalizeText(request?.requestedAt || ''));
+    if (!Number.isFinite(requestedMs)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, Date.now() - requestedMs);
+  }
+
+  function isManualForceSendRequest(request) {
+    const reason = normalizeText(request?.reason || '').toLowerCase();
+    const source = normalizeText(request?.source || '');
+    return reason === 'manual-send' || source === SCRIPT_NAME;
+  }
+
+  function getActiveForceSendRequest(expectedAzId = '') {
+    const request = normalizeForceSendRequest(readForceSendRequest());
+    if (!request?.requestedAt) return null;
+
+    if (getForceSendRequestAgeMs(request) > CFG.forceSendMaxAgeMs) {
+      clearForceSendRequest();
+      log('Cleared stale force-send request');
+      return null;
+    }
+
+    const wantedAzId = normalizeText(expectedAzId || '');
+    if (wantedAzId && request.azId && request.azId !== wantedAzId) {
+      clearForceSendRequest();
+      log(`Cleared force-send request for other AZ ${request.azId}`);
+      return null;
+    }
+
+    return request;
+  }
+
   function hasForceSendRequest() {
-    const request = readForceSendRequest();
-    return !!(request && typeof request === 'object' && request.requestedAt);
+    return !!getActiveForceSendRequest();
   }
 
   function requestForceSend(reason = 'manual-send') {
@@ -1473,6 +1518,39 @@
     return true;
   }
 
+  function findMatchingForceSendEvent(bundle, request) {
+    if (!isPlainObject(bundle) || !request) return null;
+
+    const requestAzId = normalizeText(request.azId || '');
+    const bundleAzId = normalizeText(bundle['AZ ID'] || '');
+    if (requestAzId && bundleAzId && requestAzId !== bundleAzId) return null;
+
+    const requestEventId = normalizeText(request.eventId || '');
+    const requestTriggerType = normalizeText(request.triggerType || '').toLowerCase();
+    const events = getTimeoutEvents(bundle);
+
+    return events.find((event) => {
+      if (!isPlainObject(event)) return false;
+      const eventAzId = normalizeText(event?.identity?.['AZ ID'] || bundleAzId || '');
+      const eventId = normalizeText(event.eventId || event.id || '');
+      const eventTriggerType = normalizeText(event.triggerType || '').toLowerCase();
+
+      if (requestAzId && eventAzId && requestAzId !== eventAzId) return false;
+      if (requestEventId && requestEventId !== eventId) return false;
+      if (requestTriggerType && eventTriggerType && requestTriggerType !== eventTriggerType) return false;
+      return !!(requestEventId || requestTriggerType || eventId || eventTriggerType);
+    }) || null;
+  }
+
+  function isForceSendBundleReady(request, bundle, directFailureTrigger = false) {
+    if (directFailureTrigger) return true;
+    if (!request) return false;
+    if (isManualForceSendRequest(request)) {
+      return !!(hasMeaningfulHome(bundle) || hasPendingTimeout(bundle));
+    }
+    return !!findMatchingForceSendEvent(bundle, request);
+  }
+
   async function sendBundle(force = false) {
     if (state.busy) {
       log('Send skipped: already busy');
@@ -1593,13 +1671,13 @@
       writeActivityState('working', state.lastStatus || 'Sending webhook');
       return;
     }
-    const forceSend = hasForceSendRequest();
-    if (isGloballyPaused() && !forceSend) {
+    const forceSendPending = hasForceSendRequest();
+    if (isGloballyPaused() && !forceSendPending) {
       writeActivityState('paused', 'Paused by shared selector');
       setStatus('Paused by shared selector');
       return;
     }
-    if (!state.running && !forceSend) {
+    if (!state.running && !forceSendPending) {
       writeActivityState('stopped', 'Stopped');
       setStatus('Stopped');
       return;
@@ -1612,11 +1690,13 @@
     const bundle = resolved.bundle;
     const job = enrichCurrentJobFromBundle(rawJob, bundle);
     const directFailureTrigger = resolved.source === 'missing-payload-trigger';
+    const forceSendRequest = getActiveForceSendRequest(job['AZ ID'] || '');
+    const forceSend = !!forceSendRequest;
 
     if (!job['AZ ID']) {
       state.quoteSeenAt = 0;
-      setStatus(forceSend ? 'Force send waiting for current job handoff' : 'Waiting for current job handoff');
-      logWait(forceSend ? 'force-wait-job' : 'wait-job', 'Waiting for tm_pc_current_job_v1 / AZ ID');
+      setStatus(forceSendPending ? 'Force send waiting for current job handoff' : 'Waiting for current job handoff');
+      logWait(forceSendPending ? 'force-wait-job' : 'wait-job', 'Waiting for tm_pc_current_job_v1 / AZ ID');
       return;
     }
 
@@ -1658,25 +1738,37 @@
     }
 
     if (forceSend) {
+      if (!isForceSendBundleReady(forceSendRequest, bundle, directFailureTrigger)) {
+        state.quoteSeenAt = 0;
+        if (isManualForceSendRequest(forceSendRequest)) {
+          setStatus('Force send waiting for gathered data');
+          logWait('wait-force-manual', 'Force send waiting for gathered data');
+        } else {
+          setStatus('Waiting for matching timeout signal');
+          logWait('wait-force-timeout', 'Waiting for matching timeout / selector failure signal');
+        }
+        return;
+      }
       setStatus('Force send ready');
       sendBundle(true);
       return;
     }
 
-    if (hasHomeError(bundle)) {
-      setStatus('Home error ready');
-      sendBundle(false);
-      return;
-    }
-
-    if (hasPendingTimeout(bundle)) {
-      setStatus('Timeout bundle ready');
+    if (directFailureTrigger) {
+      setStatus('Direct failure ready');
       sendBundle(false);
       return;
     }
 
     if (hasMeaningfulHome(bundle)) {
       sendBundle(false);
+      return;
+    }
+
+    if (hasHomeError(bundle) || hasPendingTimeout(bundle)) {
+      state.quoteSeenAt = 0;
+      setStatus('Waiting for timeout signal or final Home handoff');
+      logWait('wait-timeout-or-handoff', 'Waiting for fresh timeout signal or final Home handoff');
       return;
     }
 
