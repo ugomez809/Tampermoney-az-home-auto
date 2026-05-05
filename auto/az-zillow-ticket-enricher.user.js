@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.2
+// @version      1.2.3
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.2';
+  const VERSION = '1.2.3';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -85,6 +85,7 @@
     updateSettleMs: 1200,
     closeWaitMs: 5000,
     zillowWaitMs: 30000,
+    zillowCaptchaRefreshMs: 180000,
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
     zillowMaxLaunches: 0,
@@ -1441,6 +1442,10 @@
     return true;
   }
 
+  function getCaptchaRefreshBaseIso(job) {
+    return firstNonEmpty(job?.captchaLastRefreshAt, job?.captchaDetectedAt, job?.updatedAt, job?.createdAt, nowIso());
+  }
+
   function promoteJobToFallback(job, reason, overrides = null) {
     if (!isPlainObject(job)) return false;
     job.status = 'result-ready';
@@ -1550,6 +1555,15 @@
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = firstNonEmpty(norm(job?.error || ''), summarizeResult(job?.result));
       reportCaptchaWaitOnce(job);
+      if (getIsoAgeMs(getCaptchaRefreshBaseIso(job)) >= CFG.zillowCaptchaRefreshMs) {
+        job.captchaLastRefreshAt = nowIso();
+        job.updatedAt = nowIso();
+        saveJob(job);
+        setStatus(`Refreshing after Zillow captcha wait for ${state.activeTicketId}`);
+        log(`Refreshing page after 3 minutes waiting on Zillow captcha for AZ ${state.activeTicketId}`);
+        requestBootstrapReload(`captcha-wait-${state.activeTicketId}`);
+        return true;
+      }
       setStatus(`Waiting for human Zillow captcha for ${state.activeTicketId}`);
       return true;
     }
