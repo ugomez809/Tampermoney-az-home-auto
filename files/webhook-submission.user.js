@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.12
+// @version      1.18.14
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -22,9 +22,10 @@
 
   if (window.top !== window.self) return;
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.12';
+  const VERSION = '1.18.14';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -95,6 +96,18 @@
   };
 
   init();
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   function init() {
     clearStoppedForPageLoad();
@@ -588,6 +601,13 @@
     return job;
   }
 
+  function writeCurrentJob(job) {
+    const next = normalizeCurrentJob(job);
+    try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
+    try { GM_setValue(CURRENT_JOB_KEY, next); } catch {}
+    return next;
+  }
+
   function readFlowStage() {
     const stage = safeJsonParse(localStorage.getItem(FLOW_STAGE_KEY), null);
     return isPlainObject(stage) ? stage : {};
@@ -636,6 +656,52 @@
 
   function getTimeoutEvents(bundle) {
     return Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events : [];
+  }
+
+  function extractBundleIdentity(bundle) {
+    const timeoutEvents = getTimeoutEvents(bundle);
+    const latestTimeoutEvent = timeoutEvents.length
+      ? timeoutEvents[timeoutEvents.length - 1]
+      : (isPlainObject(bundle?.timeout?.lastEvent) ? bundle.timeout.lastEvent : null);
+    const timeoutIdentity = isPlainObject(latestTimeoutEvent?.identity) ? latestTimeoutEvent.identity : {};
+    const homeData = isPlainObject(bundle?.home?.data) ? bundle.home.data : {};
+    const homeRow = isPlainObject(homeData?.row) ? homeData.row : {};
+
+    return normalizeCurrentJob({
+      'AZ ID': bundle?.['AZ ID'] || timeoutIdentity['AZ ID'] || homeRow['AZ ID'] || homeData['AZ ID'] || '',
+      'Name': bundle?.['Name'] || homeRow['Name'] || homeData['Name'] || timeoutIdentity['Name'] || '',
+      'Mailing Address': bundle?.['Mailing Address'] || homeRow['Mailing Address'] || homeData['Mailing Address'] || timeoutIdentity['Mailing Address'] || '',
+      'SubmissionNumber': bundle?.['SubmissionNumber'] || homeRow['Submission Number'] || homeData['Submission Number'] || timeoutIdentity['SubmissionNumber'] || ''
+    });
+  }
+
+  function enrichCurrentJobFromBundle(job, bundle) {
+    const next = normalizeCurrentJob(job);
+    if (!isPlainObject(bundle)) return next;
+
+    const bundleIdentity = extractBundleIdentity(bundle);
+    const currentAzId = normalizeText(next['AZ ID'] || '');
+    const bundleAzId = normalizeText(bundleIdentity['AZ ID'] || '');
+    if (!currentAzId || !bundleAzId || currentAzId !== bundleAzId) return next;
+
+    let changed = false;
+    for (const field of ['Name', 'Mailing Address', 'SubmissionNumber']) {
+      if (!normalizeText(next[field] || '') && normalizeText(bundleIdentity[field] || '')) {
+        next[field] = bundleIdentity[field];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      next.updatedAt = nowIso();
+      writeCurrentJob(next);
+      log(
+        `Filled current job identity from bundle | AZ ${next['AZ ID']} | ` +
+        `name=${next['Name'] ? 'yes' : 'no'} | address=${next['Mailing Address'] ? 'yes' : 'no'}`
+      );
+    }
+
+    return next;
   }
 
   function hasSectionErrors(section) {
@@ -1193,15 +1259,16 @@
     persistWebhookFromUi(false);
     persistAgencyNameFromUi(false);
 
-    const job = readCurrentJob();
-    const resolved = getEffectiveBundle(job);
+    const rawJob = readCurrentJob();
+    const resolved = getEffectiveBundle(rawJob);
     const bundle = resolved.bundle || {
-      'AZ ID': job['AZ ID'] || '',
+      'AZ ID': rawJob['AZ ID'] || '',
       home: { ready: false, data: null },
       auto: { ready: false, data: null },
       timeout: { ready: false, events: [] },
       meta: { synthetic: true, builtAt: nowIso(), builtFrom: 'test-fallback' }
     };
+    const job = enrichCurrentJobFromBundle(rawJob, bundle);
 
     const requestBody = buildRequestBody(job, bundle, `test_${Date.now()}`, true);
 
@@ -1267,11 +1334,12 @@
     persistWebhookFromUi(false);
     persistAgencyNameFromUi(false);
 
-    const job = readCurrentJob();
-    const resolved = getEffectiveBundle(job);
+    const rawJob = readCurrentJob();
+    const resolved = getEffectiveBundle(rawJob);
     const bundle = resolved.bundle;
     const source = resolved.source || 'none';
     const shouldClearForceSendAfterFailure = force || hasForceSendRequest();
+    const job = enrichCurrentJobFromBundle(rawJob, bundle);
 
     const valid = validateCurrentJobAndBundle(job, bundle);
     if (!valid.ok) {
@@ -1379,9 +1447,10 @@
 
     writeActivityState('waiting', state.lastStatus || 'Waiting for sender trigger');
 
-    const job = readCurrentJob();
-    const resolved = getEffectiveBundle(job);
+    const rawJob = readCurrentJob();
+    const resolved = getEffectiveBundle(rawJob);
     const bundle = resolved.bundle;
+    const job = enrichCurrentJobFromBundle(rawJob, bundle);
 
     if (!job['AZ ID']) {
       state.quoteSeenAt = 0;
@@ -1390,17 +1459,17 @@
       return;
     }
 
-    if (!job['Name'] || !job['Mailing Address']) {
-      state.quoteSeenAt = 0;
-      setStatus(forceSend ? 'Force send waiting for full current job' : 'Waiting for full current job');
-      logWait(forceSend ? 'force-wait-job-identity' : 'wait-job-identity', 'Waiting for tm_pc_current_job_v1 identity');
-      return;
-    }
-
     if (!bundle) {
       state.quoteSeenAt = 0;
       setStatus(forceSend ? 'Force send waiting for payload / bundle' : 'Waiting for home payload / bundle');
       logWait(forceSend ? 'force-wait-payload' : 'wait-payload', 'Waiting for tm_pc_home_quote_grab_payload_v1 or tm_pc_webhook_bundle_v1');
+      return;
+    }
+
+    if (!job['Name'] || !job['Mailing Address']) {
+      state.quoteSeenAt = 0;
+      setStatus(forceSend ? 'Force send waiting for full current job' : 'Waiting for full current job');
+      logWait(forceSend ? 'force-wait-job-identity' : 'wait-job-identity', 'Waiting for tm_pc_current_job_v1 or bundle identity');
       return;
     }
 

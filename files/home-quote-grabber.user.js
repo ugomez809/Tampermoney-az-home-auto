@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.18
+// @version      4.1.20
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,9 +20,10 @@
 
   if (window.top !== window.self) return;
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.18';
+  const VERSION = '4.1.20';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -171,6 +172,18 @@
     customFieldPickerClick: null,
     customFieldPickerKeydown: null
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   const SNAPSHOT_EVERY_TICKS = 10;
   const OPTIONAL_FINAL_HOME_ROW_KEYS = new Set([
@@ -790,6 +803,7 @@
       };
 
     localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
+    renderProgressPanel();
 
     const bundleSave = saveBundleSection('home', next, next.currentJob, {
       submissionNumber: next.row['Submission Number'] || next.currentJob['SubmissionNumber'] || '',
@@ -3509,6 +3523,7 @@
           <button id="hb-home-quote-grabber-clearcustom" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#4b5563;color:#fff;">CLEAR EXTRA</button>
         </div>
         <div id="hb-home-quote-grabber-status" style="margin-bottom:8px;padding:6px 8px;border-radius:8px;background:#1f2937;">Waiting...</div>
+        <div id="hb-home-quote-grabber-progress" style="margin-bottom:8px;padding:8px;border-radius:8px;background:#0f172a;border:1px solid #243041;"></div>
         <div id="hb-home-quote-grabber-logs" style="max-height:220px;overflow:auto;background:#0b1220;border:1px solid #243041;border-radius:8px;padding:6px;"></div>
       </div>
     `;
@@ -3584,15 +3599,85 @@
       addCustomBtn,
       clearCustomBtn,
       status: panel.querySelector('#hb-home-quote-grabber-status'),
+      progress: panel.querySelector('#hb-home-quote-grabber-progress'),
       logs: panel.querySelector('#hb-home-quote-grabber-logs')
     };
     updateCustomFieldButtons();
+    renderProgressPanel();
   }
 
   function setStatus(text) {
     state.lastStatus = text;
     if (state.ui?.status) state.ui.status.textContent = text;
+    renderProgressPanel();
     writeActivityState(state.activityState, text);
+  }
+
+  function escapeProgressValue(value) {
+    return escapeHtml(normalizeText(value || '') || '(blank)');
+  }
+
+  function getProgressPanelSnapshot() {
+    const payload = readHomePayloadRaw();
+    const row = isPlainObject(payload?.row) ? payload.row : {};
+    const progress = {
+      ...emptyHomeProgress(),
+      ...(isPlainObject(payload?.meta?.progress) ? payload.meta.progress : {})
+    };
+    const currentJob = readCurrentJob();
+    const azId = normalizeText(currentJob['AZ ID'] || payload?.['AZ ID'] || payload?.currentJob?.['AZ ID'] || state.currentAzId || '');
+    const phase = normalizeText(payload?.meta?.phase || '') || 'idle';
+    const ready = payload?.ready === true;
+    const pass1Ready = progress.pass1PricingCaptured === true
+      || (!!normalizeText(row['Standard Pricing No Auto Discount']) && !!normalizeText(row['Enhance Pricing No Auto Discount']));
+    const pass2Ready = progress.pass2PricingCaptured === true
+      || (!!normalizeText(row['Standard Pricing Auto Discount']) && !!normalizeText(row['Enhance Pricing Auto Discount']));
+    const finalRefreshReady = progress.finalRefreshComplete === true;
+    return {
+      azId,
+      phase,
+      ready,
+      progress,
+      pass1Ready,
+      pass2Ready,
+      finalRefreshReady,
+      submissionNumber: normalizeText(row['Submission Number'] || payload?.currentJob?.SubmissionNumber || ''),
+      accountNumber: normalizeText(row['Account Number'] || payload?.currentJob?.['Account Number'] || ''),
+      doneValue: normalizeText(row['Done?'] || ''),
+      resultValue: normalizeText(row.Result || ''),
+      updatedAt: normalizeText(payload?.meta?.updatedAt || payload?.savedAt || '')
+    };
+  }
+
+  function renderProgressFlag(label, ready, accent = '#22c55e') {
+    const bg = ready ? accent : '#374151';
+    const color = ready ? '#052e16' : '#e5e7eb';
+    return `<span style="display:inline-block;padding:2px 6px;border-radius:999px;background:${bg};color:${color};font-weight:700;">${escapeHtml(label)}: ${ready ? 'YES' : 'NO'}</span>`;
+  }
+
+  function renderProgressPanel() {
+    if (!state.ui?.progress) return;
+    const snap = getProgressPanelSnapshot();
+    const rawFlags = [
+      renderProgressFlag('Policy', snap.progress.earlyPolicyInfoCaptured === true, '#86efac'),
+      renderProgressFlag('Dwelling', snap.progress.earlyDwellingCaptured === true, '#93c5fd'),
+      renderProgressFlag('Pass 1', snap.pass1Ready, '#fde68a'),
+      renderProgressFlag('Pass 2', snap.pass2Ready, '#f9a8d4'),
+      renderProgressFlag('Final', snap.finalRefreshReady, '#c4b5fd'),
+      renderProgressFlag('Ready', snap.ready, '#22c55e')
+    ].join(' ');
+
+    state.ui.progress.innerHTML = [
+      '<div style="font-weight:800;color:#93c5fd;margin-bottom:6px;">Raw Data Progress</div>',
+      `<div style="margin-bottom:4px;"><strong>AZ ID:</strong> ${escapeProgressValue(snap.azId)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Phase:</strong> ${escapeProgressValue(snap.phase)}</div>`,
+      `<div style="margin-bottom:6px;"><strong>Updated:</strong> ${escapeProgressValue(snap.updatedAt)}</div>`,
+      `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">${rawFlags}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Submission:</strong> ${escapeProgressValue(snap.submissionNumber)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Account:</strong> ${escapeProgressValue(snap.accountNumber)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Done?:</strong> ${escapeProgressValue(snap.doneValue)}</div>`,
+      `<div><strong>Result:</strong> ${escapeProgressValue(snap.resultValue)}</div>`
+    ].join('');
   }
 
   function readScriptActivityMap() {
@@ -3639,6 +3724,7 @@
         .map((x) => `<div style="margin-bottom:4px;">${escapeHtml(x)}</div>`)
         .join('');
     }
+    renderProgressPanel();
     persistLogsThrottled();
   }
 

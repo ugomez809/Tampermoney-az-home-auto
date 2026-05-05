@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.16
+// @version      2.3.19
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,9 +21,10 @@
 
   if (window.top !== window.self) return;
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.16';
+  const VERSION = '2.3.19';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -68,6 +69,7 @@
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
     timeoutRetryLimit: 3,
+    timeoutRetryRequestMaxWaitMs: 60000,
     timeoutRetryCloseDelayMs: 800,
     timeoutRetryCloseRetryMs: 1200,
     timeoutRetryCloseAttempts: 6,
@@ -143,6 +145,18 @@
     selectorSkipLogKeys: new Map(),
     last360ValueLogKeys: new Set()
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   boot();
 
@@ -830,6 +844,17 @@
     }
 
     if (activeRequest?.ready === true && activeRequestScope === current.scope) {
+      const requestedMs = Date.parse(normalizeText(activeRequest.requestedAt || ''));
+      const requestAgeMs = Number.isFinite(requestedMs) ? (Date.now() - requestedMs) : 0;
+      if (requestAgeMs >= CFG.timeoutRetryRequestMaxWaitMs) {
+        log(
+          `Launcher retry wait exceeded ${Math.round(CFG.timeoutRetryRequestMaxWaitMs / 1000)}s; ` +
+          `continuing normal timeout flow | ${context.product.toUpperCase()} | AZ ${context.job['AZ ID']} | ${context.header}`
+        );
+        clearTimeoutRetryRequest();
+        writeTimeoutRetryRequestedContext('');
+        return false;
+      }
       setStatus(`Waiting for launcher retry (${Math.max(1, activeRequest.attempt || current.retries)}/${CFG.timeoutRetryLimit})`);
       return true;
     }
@@ -1165,6 +1190,7 @@
 
     log(
       `Selector rule matched | ruleId=${normalizeText(rule?.ruleId || '')} | label=${quoteLogValue(ruleLabel, 160)} | ` +
+      `textDrift=${matchInfo?.textDriftTolerated === true ? 'yes' : 'no'} | ` +
       `sentError=${quoteLogValue(sentError, 280)} | selector=${quoteLogValue(selector, 260)} | ` +
       `matchedTag=${quoteLogValue(meta.tag, 80)} | matchedClass=${quoteLogValue(meta.className, 160)} | matchedId=${quoteLogValue(meta.id, 120)} | ` +
       `matchedText=${quoteLogValue(matchedText, 320)} | header=${quoteLogValue(header, 120)} | ` +
@@ -3686,8 +3712,9 @@
     renderAll();
   }
 
-  function matchRuleToElement(rule, el) {
+  function matchRuleToElement(rule, el, options = {}) {
     const meta = buildElementLogMeta(el);
+    const allowTextDrift = options.allowTextDrift === true;
     const fail = (reason) => ({
       ok: false,
       reason,
@@ -3703,41 +3730,65 @@
     if (!isVisible(el)) return fail('candidate not visible');
 
     const matchedText = getVisibleElementLogText(el, 600);
-    if (!matchedText) return fail('visible element text empty');
-
     const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
     const current = buildElementFingerprint(el);
 
     let required = 0;
     let score = 0;
+    let structuralRequired = 0;
+    let structuralScore = 0;
     let textRequired = false;
     let textMatches = false;
 
     if (fingerprint.tag) {
       required += 1;
-      if (fingerprint.tag === current.tag) score += 1;
+      structuralRequired += 1;
+      if (fingerprint.tag === current.tag) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (fingerprint.id) {
       required += 1;
-      if (fingerprint.id === current.id) score += 1;
+      structuralRequired += 1;
+      if (fingerprint.id === current.id) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (fingerprint.name) {
       required += 1;
-      if (fingerprint.name === current.name) score += 1;
+      structuralRequired += 1;
+      if (fingerprint.name === current.name) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (fingerprint.role) {
       required += 1;
-      if (fingerprint.role === current.role) score += 1;
+      structuralRequired += 1;
+      if (fingerprint.role === current.role) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (fingerprint.ariaLabel) {
       required += 1;
-      if (fingerprint.ariaLabel === current.ariaLabel) score += 1;
+      structuralRequired += 1;
+      if (fingerprint.ariaLabel === current.ariaLabel) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (Array.isArray(fingerprint.classTokens) && fingerprint.classTokens.length) {
       required += 1;
+      structuralRequired += 1;
       const currentSet = new Set(current.classTokens || []);
       const allFound = fingerprint.classTokens.every((token) => currentSet.has(token));
-      if (allFound) score += 1;
+      if (allFound) {
+        score += 1;
+        structuralScore += 1;
+      }
     }
     if (fingerprint.textFingerprint) {
       required += 1;
@@ -3750,11 +3801,22 @@
       }
     }
 
-    if (textRequired && !textMatches) return fail('text fingerprint not found on visible element');
     if (required === 0) return fail('fingerprint empty');
 
+    const textDriftTolerated = textRequired
+      && !textMatches
+      && allowTextDrift
+      && structuralRequired > 0
+      && structuralScore === structuralRequired;
+
+    if (textRequired && !textMatches && !textDriftTolerated) {
+      return fail(matchedText ? 'text fingerprint not found on visible element' : 'visible element text empty');
+    }
+
     let ok = false;
-    if (textRequired) {
+    if (textDriftTolerated) {
+      ok = true;
+    } else if (textRequired) {
       if (required === 1) ok = score === 1;
       else if (required <= 3) ok = score === required;
       else ok = score >= (required - 1);
@@ -3771,6 +3833,7 @@
       reason: '',
       element: el,
       matchedText,
+      textDriftTolerated,
       elementTag: meta.tag,
       elementId: meta.id,
       elementClass: meta.className
@@ -3904,6 +3967,7 @@
 
     let bestFailure = null;
     let sawNodes = false;
+    const visibleCandidates = [];
     for (const doc of getAllDocs()) {
       let nodes = [];
       try {
@@ -3923,6 +3987,9 @@
       }
       if (nodes.length) sawNodes = true;
       for (const node of nodes) {
+        if (node instanceof Element && !isScriptUiElement(node) && isVisible(node)) {
+          visibleCandidates.push(node);
+        }
         const result = matchRuleToElement(rule, node);
         if (result.ok) {
           return {
@@ -3935,6 +4002,20 @@
           selector
         });
       }
+    }
+
+    if (visibleCandidates.length === 1) {
+      const driftResult = matchRuleToElement(rule, visibleCandidates[0], { allowTextDrift: true });
+      if (driftResult.ok) {
+        return {
+          ...driftResult,
+          selector
+        };
+      }
+      bestFailure = pickBetterSelectorFailure(bestFailure, {
+        ...driftResult,
+        selector
+      });
     }
 
     return bestFailure || {

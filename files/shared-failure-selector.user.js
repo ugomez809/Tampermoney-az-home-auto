@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.0
+// @version      1.0.1
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -23,9 +23,10 @@
 
   if (window.top !== window.self) return;
   try { window.__TM_SHARED_FAILURE_SELECTOR_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -73,6 +74,18 @@
     syncBusy: false,
     lastMatchLogKey: ''
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   boot();
 

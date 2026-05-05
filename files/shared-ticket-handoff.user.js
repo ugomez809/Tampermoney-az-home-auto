@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.7
+// @version      1.9.8
 // @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,9 +20,10 @@
   'use strict';
 
   if (window.top !== window.self) return;
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.7';
+  const VERSION = '1.9.8';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -74,6 +75,18 @@
     panelRight: 12,
     panelBottom: 12
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   const state = {
     running: true,

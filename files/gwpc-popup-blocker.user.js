@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Popup Blocker
 // @namespace    homebot.gwpc-popup-blocker
-// @version      1.1.3
-// @description  Blocks GWPC alert/confirm/prompt and beforeunload leave-reload prompts across all 3 PolicyCenter hosts.
+// @version      1.1.4
+// @description  Blocks GWPC alert/confirm/prompt dialogs across all 3 PolicyCenter hosts without globally wiping unload hooks.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -17,9 +17,8 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Popup Blocker';
-  const VERSION = '1.1.3';
+  const VERSION = '1.1.4';
   const PATCH_FLAG = '__HB_GWPC_POPUP_BLOCKER_PATCHED__';
-  const LOOP_MS = 250;
 
   // Only the top frame persists logs (this script runs in every frame via
   // @all-frames for dialog patching). Sub-frames still patch dialogs,
@@ -97,15 +96,6 @@
       window.addEventListener('storage', handleLogClearStorageEvent, true);
       persistLogsThrottled();
     }
-
-    setInterval(() => {
-      try {
-        for (const win of getAllWindows()) {
-          patchWindow(win);
-          clearUnloadHooks(win);
-        }
-      } catch {}
-    }, LOOP_MS);
   }
 
   function getAllWindows(root = null, out = []) {
@@ -166,12 +156,7 @@
         win[PATCH_FLAG] = true;
 
         patchDialogs(win);
-        patchBeforeUnloadProperty(win);
-        patchWindowAddEventListener(win);
-        installCaptureBlocker(win);
       }
-
-      clearUnloadHooks(win);
       patchDialogs(win);
     } catch {}
   }
@@ -191,90 +176,6 @@
       win.prompt = function (_msg, defValue = '') {
         return String(defValue ?? '');
       };
-    } catch {}
-  }
-
-  function patchBeforeUnloadProperty(win) {
-    try {
-      Object.defineProperty(win, 'onbeforeunload', {
-        configurable: true,
-        enumerable: true,
-        get() {
-          return null;
-        },
-        set(_value) {
-          return true;
-        }
-      });
-    } catch {
-      try { win.onbeforeunload = null; } catch {}
-    }
-  }
-
-  function patchWindowAddEventListener(win) {
-    try {
-      if (win.__HB_GWPC_POPUP_BLOCKER_ADD_LISTENER_PATCHED__) return;
-      win.__HB_GWPC_POPUP_BLOCKER_ADD_LISTENER_PATCHED__ = true;
-
-      const nativeAdd = win.addEventListener.bind(win);
-      const nativeRemove = win.removeEventListener.bind(win);
-
-      win.addEventListener = function (type, listener, options) {
-        const t = String(type || '').toLowerCase();
-
-        if (t === 'beforeunload') {
-          return;
-        }
-
-        return nativeAdd(type, listener, options);
-      };
-
-      win.removeEventListener = function (type, listener, options) {
-        const t = String(type || '').toLowerCase();
-
-        if (t === 'beforeunload') {
-          return;
-        }
-
-        return nativeRemove(type, listener, options);
-      };
-    } catch {}
-  }
-
-  function installCaptureBlocker(win) {
-    try {
-      if (win.__HB_GWPC_POPUP_BLOCKER_CAPTURE_INSTALLED__) return;
-      win.__HB_GWPC_POPUP_BLOCKER_CAPTURE_INSTALLED__ = true;
-
-      win.addEventListener('beforeunload', function (e) {
-        try { e.stopImmediatePropagation(); } catch {}
-        try { e.stopPropagation(); } catch {}
-        try { e.preventDefault(); } catch {}
-        try { e.returnValue = undefined; } catch {}
-        return undefined;
-      }, true);
-    } catch {}
-  }
-
-  function clearUnloadHooks(win) {
-    try { win.onbeforeunload = null; } catch {}
-
-    try {
-      if (win.document) {
-        win.document.onbeforeunload = null;
-      }
-    } catch {}
-
-    try {
-      if (win.document && win.document.body) {
-        win.document.body.onbeforeunload = null;
-      }
-    } catch {}
-
-    try {
-      if (win.document && win.document.documentElement) {
-        win.document.documentElement.onbeforeunload = null;
-      }
     } catch {}
   }
 

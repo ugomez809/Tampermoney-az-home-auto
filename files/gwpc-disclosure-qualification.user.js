@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.3.5
+// @version      2.3.6
 // @description  HOME-only Disclosure & Qualification flow. On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,9 +17,11 @@
   'use strict';
 
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
+  if (window.top !== window.self) return;
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Disclosure Qualification';
-  const VERSION = '2.3.5';
+  const VERSION = '2.3.6';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_disclosure_qualification_logs_v1';
@@ -77,6 +79,19 @@
     persistLogsThrottled();
     checkLogClearRequest();
   }
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
+
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 

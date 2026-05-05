@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.2
-// @description  Clicks the first visible AgencyZoom login control or APEX I AGREE button once per page load, using a robust click sequence for the AZ modal trigger and only advancing after the prior control disappears.
+// @version      1.0.3
+// @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
 
   const CFG = {
     scanMs: 400,
@@ -28,12 +28,14 @@
   };
 
   const KIND = {
+    APEX_LOGIN_SUBMIT: 'apex-login-submit',
     APEX_AGREE: 'apex-agree',
     AZ_LOGIN_LINK: 'az-login-link',
     AZ_LOGIN_BUTTON: 'az-login-button'
   };
 
   const TIE_BREAK_RANK = {
+    [KIND.APEX_LOGIN_SUBMIT]: 0,
     [KIND.AZ_LOGIN_BUTTON]: 0,
     [KIND.AZ_LOGIN_LINK]: 1,
     [KIND.APEX_AGREE]: 2
@@ -188,7 +190,37 @@
     return lower(button.value) === 'i agree' ? button : null;
   }
 
+  function findApexCredentialSubmitButton() {
+    const passwordInputs = Array.from(document.querySelectorAll('input[type="password"]'))
+      .filter((el) => isVisible(el) && isEnabled(el));
+    if (!passwordInputs.length) return null;
+
+    const passwordInput = passwordInputs.find((el) => normalizeText(el.value).length > 0) || passwordInputs[0];
+    const form = passwordInput.closest('form') || document;
+
+    const userInputs = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
+      .filter((el) => isVisible(el) && isEnabled(el) && el !== passwordInput);
+    const hasFilledUser = userInputs.some((el) => normalizeText(el.value).length > 0);
+    const hasFilledPassword = normalizeText(passwordInput.value).length > 0;
+    if (!hasFilledPassword || !hasFilledUser) return null;
+
+    const buttons = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+    return buttons.find((el) => {
+      if (!isVisible(el) || !isEnabled(el)) return false;
+      const label = lower([
+        el.textContent,
+        el.value,
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('name')
+      ].filter(Boolean).join(' '));
+      if (label === 'i agree') return false;
+      return /\b(sign in|login|log in|submit|continue)\b/.test(label) || el.id === 'okta-signin-submit';
+    }) || null;
+  }
+
   function findTarget(kind) {
+    if (kind === KIND.APEX_LOGIN_SUBMIT) return findApexCredentialSubmitButton();
     if (kind === KIND.APEX_AGREE) return findApexAgreeButton();
     if (kind === KIND.AZ_LOGIN_LINK) return findAgencyZoomLoginLink();
     if (kind === KIND.AZ_LOGIN_BUTTON) return findAgencyZoomLoginButton();
@@ -261,6 +293,7 @@
   function getSteps() {
     if (isApexHost()) {
       return [
+        { kind: KIND.APEX_LOGIN_SUBMIT, label: 'APEX Login Submit' },
         { kind: KIND.APEX_AGREE, label: 'APEX I AGREE' }
       ];
     }

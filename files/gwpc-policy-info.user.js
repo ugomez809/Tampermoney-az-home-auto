@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Policy Info Prefill
 // @namespace    homebot.gwpc-policy-info
-// @version      2.3.5
+// @version      2.3.6
 // @description  HOME-only Policy Info flow. Keeps the Home Bot Policy Info actions without clicking Home Auto discount, switches Gender to Male if the Non-Binary/Flex error appears, uses DT2 Next retry if stuck, and hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -16,8 +16,11 @@
 (function () {
   'use strict';
 
+  if (window.top !== window.self) return;
+  if (isAnchorTab()) return;
+
   const SCRIPT_NAME = 'GWPC Policy Info Prefill';
-  const VERSION = '2.3.5';
+  const VERSION = '2.3.6';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_policy_info_logs_v1';
@@ -75,6 +78,19 @@
     persistLogsThrottled();
     checkLogClearRequest();
   }
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
+
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
   const CURRENT_JOB_KEY = 'tm_pc_current_job_v1';
 

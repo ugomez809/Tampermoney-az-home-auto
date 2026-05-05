@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8.5
+// @version      1.8.6
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning, and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -17,9 +17,10 @@
 
   if (window.top !== window.self) return;
   try { window.__APEX_DUPLICATES_CONTINUE_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Duplicate Check Continue';
-  const VERSION = '1.8.5';
+  const VERSION = '1.8.6';
 
   // Log-export integration — this script's log() renders directly to DOM
   // without an in-memory array, so we add state.logLines below in parallel
@@ -71,6 +72,18 @@
     forceCloseTimer: null,
     logLines: []
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   /******************************************************************
    * UI

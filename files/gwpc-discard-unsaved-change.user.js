@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Unsaved Change Discard Clicker
 // @namespace    homebot.gwpc-discard-unsaved-change
-// @version      1.0.3
+// @version      1.0.4
 // @description  When the GWPC "Discard Unsaved Change" action becomes visible, clicks it automatically.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,8 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Unsaved Change Discard Clicker';
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
+  if (isAnchorTab()) return;
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_discard_unsaved_change_logs_v1';
@@ -107,6 +108,18 @@
 
   function norm(s) {
     return String(s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
   }
 
   function strongClick(el) {

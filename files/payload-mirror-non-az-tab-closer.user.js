@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.23
-// @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
+// @version      1.1.1
+// @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -14,6 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
 // ==/UserScript==
@@ -25,8 +27,14 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.23';
+  const VERSION = '1.1.1';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
+  const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
+  const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
+  const ANCHOR_QUERY_KEY = 'hb_anchor';
+  const ANCHOR_ROLE_QUERY_KEY = 'hb_anchor_role';
+  const ANCHOR_TOKEN_QUERY_KEY = 'hb_anchor_token';
+  const WATCH_ALERT_MESSAGE = 'Bot is not botting. Check it.';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
   const LOG_PERSIST_KEY = (() => {
@@ -51,6 +59,9 @@
     webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
     tabHeartbeats: 'tm_payload_mirror_tab_heartbeats_v1',
     apexWakeState: 'tm_payload_mirror_apex_wake_state_v1',
+    anchorState: 'tm_shared_anchor_state_v1',
+    authHold: 'tm_shared_auth_hold_v1',
+    tabOpenRequest: 'tm_shared_tab_open_request_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
     azCurrentJob: 'tm_az_current_job_v1',
@@ -66,7 +77,10 @@
 
   const SS_KEYS = {
     handledSignal: 'tm_pc_payload_mirror_last_handled_signal_v1',
-    closeAttempted: 'tm_pc_payload_mirror_close_attempted_v1'
+    closeAttempted: 'tm_pc_payload_mirror_close_attempted_v1',
+    anchorRole: 'tm_anchor_role_v1',
+    anchorToken: 'tm_anchor_token_v1',
+    authLastSubmitKey: 'tm_payload_mirror_auth_submit_key_v1'
   };
 
   const GWPC_KEYS = [
@@ -92,13 +106,25 @@
       'https://farmersagent.lightning.force.com/',
       'https://farmersagent.lightning.force.com/lightning/page/home'
     ],
+    anchorLeaseHeartbeatMs: 5000,
+    anchorLeaseTtlMs: 20000,
+    anchorStaleMs: 15000,
+    anchorOpenPendingMs: 30000,
+    authHoldTtlMs: 20000,
+    authRecoveryTimeoutMs: 90000,
+    authEmptyCredentialsMs: 10000,
+    authBlockedAlertRepeatMs: 15000,
+    anchorProbeMs: 4 * 60 * 1000,
+    anchorRefreshMs: 8 * 60 * 1000,
+    openRequestTtlMs: 30000,
     ignoreCloseLeaseTtlMs: 8000,
     ignoreCloseLeaseHeartbeatMs: 1500,
     maxLogLines: 70,
     zIndex: 2147483647,
     panelWidth: 330,
     closeRetryMs: 1200,
-    maxCloseAttempts: 6
+    maxCloseAttempts: 6,
+    lexFrontMaxOpenMs: 60000
   };
 
   const state = {
@@ -124,6 +150,8 @@
     apexWakeMonitorStartedAt: Date.now(),
     apexWakeTab: null,
     apexWakeCloseAt: 0,
+    apexWakeSelfCloseAt: 0,
+    apexWakeSelfCloseId: '',
     apexWakeStatus: '',
     lastTabHeartbeatAt: 0,
     lastApexWakeLogKey: '',
@@ -134,12 +162,24 @@
     samePageSinceAt: 0,
     samePageCloseAttempted: false,
     samePageLoggedArmed: false,
-    lexSnagHandledKey: ''
+    lexSnagHandledKey: '',
+    lexFrontActiveSinceAt: 0,
+    lexFrontArmedLogged: false,
+    lexFrontHandledKey: '',
+    lastSessionContext: null,
+    lastAnchorHeartbeatAt: 0,
+    lastAnchorProbeAt: 0,
+    lastAnchorRefreshAt: 0,
+    lastAuthAlertAt: 0,
+    lastAuthGateLogKey: '',
+    lastBridgedOpenRequestKey: '',
+    authBannerEl: null
   };
 
   init();
 
   function init() {
+    adoptAnchorMarkerFromUrl();
     buildUi();
     bindUi();
     restorePanelPos();
@@ -148,7 +188,7 @@
     log(`Loaded v${VERSION}`);
     log(`Host: ${location.hostname}`);
     writeTabHeartbeat(true);
-    if (isAzHost()) log(`APEX wake monitor ${state.apexWakeEnabled ? 'ON' : 'OFF'}`);
+    if (isAzHost()) log(`Session supervisor ${state.apexWakeEnabled ? 'ON' : 'OFF'}`);
     setStatus(state.running ? 'Watching for webhook success' : 'Stopped');
 
     if (typeof GM_addValueChangeListener === 'function') {
@@ -193,6 +233,8 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearIgnoreCloseLeaseIfOwned(); } catch {}
+    try { if (isAzHost()) clearAnchorLease('coordinator'); } catch {}
+    try { clearAnchorLease(getAnchorRole()); } catch {}
     try { clearInterval(state.tickTimer); } catch {}
     try { clearInterval(state.logsIntervalTimer); } catch {}
     try { window.removeEventListener('beforeunload', handlePageUnload, true); } catch {}
@@ -200,6 +242,7 @@
     try { window.removeEventListener('resize', keepPanelInView, true); } catch {}
     try { window.removeEventListener('storage', handleLogClearStorageEvent, true); } catch {}
     try { state.panel?.remove(); } catch {}
+    try { state.authBannerEl?.remove(); } catch {}
     try { delete window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__; } catch {}
   }
 
@@ -247,6 +290,10 @@
     return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  function lower(value) {
+    return norm(value).toLowerCase();
+  }
+
   function hashString(value) {
     let hash = 0;
     const text = String(value == null ? '' : value);
@@ -267,6 +314,10 @@
     } catch {
       return false;
     }
+  }
+
+  function isFrontActiveTab() {
+    return document.visibilityState === 'visible' && document.hasFocus();
   }
 
   function nowIso() {
@@ -290,6 +341,308 @@
     return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
   }
 
+  function getAnchorRole() {
+    const role = norm(readSession(SS_KEYS.anchorRole));
+    if (role) return role;
+
+    try {
+      const roleFromUrl = norm(new URL(location.href).searchParams.get(ANCHOR_ROLE_QUERY_KEY));
+      if (roleFromUrl) return roleFromUrl;
+    } catch {}
+
+    return '';
+  }
+
+  function getAnchorToken() {
+    const token = norm(readSession(SS_KEYS.anchorToken));
+    if (token) return token;
+
+    try {
+      return norm(new URL(location.href).searchParams.get(ANCHOR_TOKEN_QUERY_KEY));
+    } catch {
+      return '';
+    }
+  }
+
+  function isAnchorTab() {
+    return !!getAnchorRole();
+  }
+
+  function adoptAnchorMarkerFromUrl() {
+    let url;
+    try {
+      url = new URL(location.href);
+    } catch {
+      return;
+    }
+
+    if (url.searchParams.get(ANCHOR_QUERY_KEY) !== '1') return;
+
+    const role = norm(url.searchParams.get(ANCHOR_ROLE_QUERY_KEY));
+    const token = norm(url.searchParams.get(ANCHOR_TOKEN_QUERY_KEY));
+    if (!role) return;
+
+    writeSession(SS_KEYS.anchorRole, role);
+    if (token) writeSession(SS_KEYS.anchorToken, token);
+
+    url.searchParams.delete(ANCHOR_QUERY_KEY);
+    url.searchParams.delete(ANCHOR_ROLE_QUERY_KEY);
+    url.searchParams.delete(ANCHOR_TOKEN_QUERY_KEY);
+
+    try {
+      history.replaceState(history.state, document.title, url.toString());
+    } catch {}
+  }
+
+  function readAnchorState() {
+    const value = readGM(GM_KEYS.anchorState, null);
+    return isPlainObject(value) ? value : {};
+  }
+
+  function writeAnchorState(next) {
+    writeGM(GM_KEYS.anchorState, isPlainObject(next) ? next : {});
+  }
+
+  function readAuthHold() {
+    const value = readGM(GM_KEYS.authHold, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function writeAuthHold(next) {
+    writeGM(GM_KEYS.authHold, isPlainObject(next) ? next : null);
+  }
+
+  function readSharedTabOpenRequest() {
+    const value = readGM(GM_KEYS.tabOpenRequest, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function writeSharedTabOpenRequest(next) {
+    writeGM(GM_KEYS.tabOpenRequest, isPlainObject(next) ? next : null);
+  }
+
+  function bridgeSharedKeyToLocal(key, value) {
+    const current = readLocalJson(key);
+    const currentText = current == null ? '' : JSON.stringify(current);
+    const nextText = value == null ? '' : JSON.stringify(value);
+    if (currentText === nextText) return false;
+    writeLocalJson(key, value);
+    return true;
+  }
+
+  function bridgeSupervisorStateToLocal() {
+    bridgeSharedKeyToLocal(GM_KEYS.anchorState, readAnchorState());
+    bridgeSharedKeyToLocal(GM_KEYS.authHold, readAuthHold());
+    bridgeSharedKeyToLocal(GM_KEYS.tabOpenRequest, readSharedTabOpenRequest());
+  }
+
+  function getAnchorPendingMap(registry = null) {
+    const source = isPlainObject(registry) ? registry : readAnchorState();
+    return isPlainObject(source.pendingOpen) ? source.pendingOpen : {};
+  }
+
+  function getAnchorPendingEntry(role, registry = null) {
+    if (!role) return null;
+    const pending = getAnchorPendingMap(registry);
+    return isPlainObject(pending[role]) ? pending[role] : null;
+  }
+
+  function isAnchorPendingActive(role, registry = null) {
+    const entry = getAnchorPendingEntry(role, registry);
+    if (!entry) return false;
+    const requestedAtMs = parseTimeMs(entry.requestedAt || entry.updatedAt || '');
+    if (!requestedAtMs) return false;
+    return (Date.now() - requestedAtMs) <= CFG.anchorOpenPendingMs;
+  }
+
+  function setAnchorPendingOpen(role, patch = {}) {
+    if (!role) return null;
+    const registry = readAnchorState();
+    const pending = getAnchorPendingMap(registry);
+    const prior = isPlainObject(pending[role]) ? pending[role] : {};
+    const next = {
+      ...prior,
+      role,
+      requestedByTabId: state.tabId,
+      requestedAt: norm(prior.requestedAt || '') || nowIso(),
+      updatedAt: nowIso(),
+      expiresAt: new Date(Date.now() + CFG.anchorOpenPendingMs).toISOString(),
+      ...patch
+    };
+    writeAnchorState({
+      ...registry,
+      pendingOpen: {
+        ...pending,
+        [role]: next
+      }
+    });
+    return next;
+  }
+
+  function clearAnchorPendingOpen(role) {
+    if (!role) return false;
+    const registry = readAnchorState();
+    const pending = getAnchorPendingMap(registry);
+    if (!isPlainObject(pending[role])) return false;
+    const nextPending = { ...pending };
+    delete nextPending[role];
+    const nextRegistry = { ...registry };
+    if (Object.keys(nextPending).length) {
+      nextRegistry.pendingOpen = nextPending;
+    } else {
+      delete nextRegistry.pendingOpen;
+    }
+    writeAnchorState(nextRegistry);
+    return true;
+  }
+
+  function compareTabIds(left, right) {
+    return String(left || '').localeCompare(String(right || ''));
+  }
+
+  function isLeaseActive(entry, ttlMs = CFG.anchorLeaseTtlMs) {
+    if (!isPlainObject(entry)) return false;
+    const updatedAtMs = parseTimeMs(entry.updatedAt || entry.claimedAt || '');
+    if (!updatedAtMs) return false;
+    return (Date.now() - updatedAtMs) <= ttlMs;
+  }
+
+  function claimAnchorLease(role, patch = {}) {
+    if (!role) return null;
+    const registry = readAnchorState();
+    const current = isPlainObject(registry[role]) ? registry[role] : null;
+    const currentTabId = norm(current?.tabId || '');
+
+    if (isLeaseActive(current) && currentTabId && currentTabId !== state.tabId) {
+      return current;
+    }
+
+    const now = nowIso();
+    const next = {
+      ...(current || {}),
+      ...patch,
+      role,
+      tabId: state.tabId,
+      host: location.hostname,
+      url: location.href,
+      claimedAt: norm(current?.claimedAt || '') || now,
+      updatedAt: now,
+      expiresAt: new Date(Date.now() + CFG.anchorLeaseTtlMs).toISOString(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+
+    const nextRegistry = {
+      ...registry,
+      [role]: next
+    };
+    writeAnchorState(nextRegistry);
+
+    let confirmed = readAnchorState()?.[role];
+    if (isPlainObject(confirmed) && norm(confirmed.tabId || '') === state.tabId) {
+      return confirmed;
+    }
+
+    const confirmedTabId = norm(confirmed?.tabId || '');
+    if (confirmedTabId && compareTabIds(state.tabId, confirmedTabId) < 0) {
+      const retryRegistry = readAnchorState();
+      const retryCurrent = isPlainObject(retryRegistry[role]) ? retryRegistry[role] : null;
+      if (!isLeaseActive(retryCurrent) || compareTabIds(state.tabId, norm(retryCurrent?.tabId || '')) < 0) {
+        const retryNow = nowIso();
+        const retryNext = {
+          ...(retryCurrent || next),
+          ...patch,
+          role,
+          tabId: state.tabId,
+          host: location.hostname,
+          url: location.href,
+          claimedAt: norm(next.claimedAt || '') || retryNow,
+          updatedAt: retryNow,
+          expiresAt: new Date(Date.now() + CFG.anchorLeaseTtlMs).toISOString(),
+          source: SCRIPT_NAME,
+          version: VERSION
+        };
+        writeAnchorState({
+          ...retryRegistry,
+          [role]: retryNext
+        });
+        confirmed = readAnchorState()?.[role];
+        if (isPlainObject(confirmed) && norm(confirmed.tabId || '') === state.tabId) {
+          return confirmed;
+        }
+      }
+    }
+
+    return isPlainObject(confirmed) ? confirmed : next;
+  }
+
+  function clearAnchorLease(role) {
+    if (!role) return false;
+    const registry = readAnchorState();
+    const current = isPlainObject(registry[role]) ? registry[role] : null;
+    if (!current || norm(current.tabId || '') !== state.tabId) return false;
+    delete registry[role];
+    writeAnchorState(registry);
+    return true;
+  }
+
+  function readPreferredGwpcHost() {
+    const registry = readAnchorState();
+    const preferred = norm(registry.preferredGwpcHost || '');
+    if (preferred) return preferred;
+    const gwpcEntry = registry.gwpc;
+    if (norm(gwpcEntry?.host || '')) return norm(gwpcEntry.host);
+    return 'policycenter.farmersinsurance.com';
+  }
+
+  function rememberPreferredGwpcHost(hostname) {
+    const host = norm(hostname || '');
+    if (!host) return;
+    const registry = readAnchorState();
+    if (norm(registry.preferredGwpcHost || '') === host) return;
+    writeAnchorState({
+      ...registry,
+      preferredGwpcHost: host,
+      preferredGwpcHostUpdatedAt: nowIso()
+    });
+  }
+
+  function getActiveAuthHold() {
+    const hold = readAuthHold();
+    const holdState = lower(hold?.state || '');
+    if (holdState !== 'recovering' && holdState !== 'blocked') return null;
+    if (!isLeaseActive(hold, CFG.authHoldTtlMs)) return null;
+    return hold;
+  }
+
+  function isProtectedTab() {
+    if (isAnchorTab()) return true;
+    const hold = getActiveAuthHold();
+    return !!hold && norm(hold.ownerTabId || '') === state.tabId;
+  }
+
+  function buildAnchorUrl(role, hostOverride = '') {
+    if (role === 'apex') {
+      const baseUrl = chooseApexWakeUrl();
+      const url = new URL(baseUrl, location.href);
+      url.searchParams.set(ANCHOR_QUERY_KEY, '1');
+      url.searchParams.set(ANCHOR_ROLE_QUERY_KEY, 'apex');
+      url.searchParams.set(ANCHOR_TOKEN_QUERY_KEY, `apex_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
+      return url.toString();
+    }
+
+    if (role === 'gwpc') {
+      const host = norm(hostOverride || readPreferredGwpcHost()) || 'policycenter.farmersinsurance.com';
+      const url = new URL(`https://${host}/pc/PolicyCenter.do`);
+      url.searchParams.set(ANCHOR_QUERY_KEY, '1');
+      url.searchParams.set(ANCHOR_ROLE_QUERY_KEY, 'gwpc');
+      url.searchParams.set(ANCHOR_TOKEN_QUERY_KEY, `gwpc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
+      return url.toString();
+    }
+
+    return '';
+  }
+
   function readGM(key, fallback = null) {
     try { return readJson(GM_getValue(key, fallback), fallback); }
     catch { return fallback; }
@@ -304,6 +657,16 @@
     catch { return null; }
   }
 
+  function writeLocalJson(key, value) {
+    try {
+      if (value == null || value === '') {
+        localStorage.removeItem(key);
+        return;
+      }
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  }
+
   function writeSession(key, value) {
     try { sessionStorage.setItem(key, value); } catch {}
   }
@@ -311,6 +674,10 @@
   function readSession(key) {
     try { return sessionStorage.getItem(key) || ''; }
     catch { return ''; }
+  }
+
+  function clearSession(key) {
+    try { sessionStorage.removeItem(key); } catch {}
   }
 
   function log(message) {
@@ -371,6 +738,7 @@
 
   function handlePageUnload() {
     clearIgnoreCloseLeaseIfOwned();
+    clearAnchorLease(getAnchorRole());
     persistPanelPos();
   }
 
@@ -678,27 +1046,46 @@
     return true;
   }
 
-  function closeLexTabAfterSnag(azId = '') {
+  function closeLexTabWithReason(options = {}) {
+    if (isProtectedTab()) {
+      setStatus('Protected APEX tab');
+      return;
+    }
+    const azId = norm(options.azId || '');
+    const attemptLabel = norm(options.attemptLabel || 'LEX close requested') || 'LEX close requested';
+    const statusText = norm(options.statusText || 'Closing LEX tab') || 'Closing LEX tab';
+    const blockedLabel = norm(options.blockedLabel || 'Close blocked by browser after LEX close request') || 'Close blocked by browser after LEX close request';
+
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
     state.closeAttempts += 1;
 
-    log(`LEX snag detected. Closing tab${azId ? ` | AZ ${azId}` : ''} (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
-    setStatus('LEX snag -> failed path');
+    log(`${attemptLabel}${azId ? ` | AZ ${azId}` : ''} (${state.closeAttempts}/${CFG.maxCloseAttempts})`);
+    setStatus(statusText);
     tryCloseCurrentTab();
 
     setTimeout(() => {
       if (state.destroyed || window.closed) return;
       if (state.closeAttempts < CFG.maxCloseAttempts) {
-        closeLexTabAfterSnag(azId);
+        closeLexTabWithReason(options);
         return;
       }
-      log('Close blocked by browser after LEX snag');
+      log(blockedLabel);
       setStatus('Close blocked');
     }, CFG.closeRetryMs);
   }
 
+  function closeLexTabAfterSnag(azId = '') {
+    closeLexTabWithReason({
+      azId,
+      attemptLabel: 'LEX snag detected. Closing tab',
+      statusText: 'LEX snag -> failed path',
+      blockedLabel: 'Close blocked by browser after LEX snag'
+    });
+  }
+
   function checkLexSnagFailure() {
+    if (isProtectedTab()) return false;
     const snag = findLexSnagMessage();
     if (!snag) return false;
 
@@ -715,6 +1102,44 @@
     }
 
     closeLexTabAfterSnag(azId);
+    return true;
+  }
+
+  function checkLexFrontTabFailsafe() {
+    if (!isLexHost()) return false;
+    if (isProtectedTab()) return false;
+    if (state.closeAttempted) return false;
+
+    if (!isFrontActiveTab()) {
+      state.lexFrontActiveSinceAt = 0;
+      state.lexFrontArmedLogged = false;
+      return false;
+    }
+
+    if (!state.lexFrontActiveSinceAt) {
+      state.lexFrontActiveSinceAt = Date.now();
+      if (!state.lexFrontArmedLogged) {
+        state.lexFrontArmedLogged = true;
+        log(`LEX front-tab failsafe armed for ${Math.round(CFG.lexFrontMaxOpenMs / 1000)}s`);
+      }
+      return false;
+    }
+
+    const ageMs = Date.now() - state.lexFrontActiveSinceAt;
+    if (ageMs < CFG.lexFrontMaxOpenMs) return false;
+
+    const azId = readCurrentAzIdForLexFailure();
+    const handledKey = `${azId || '(missing)'}|lex-front-open`;
+    if (state.lexFrontHandledKey === handledKey) return false;
+    state.lexFrontHandledKey = handledKey;
+
+    log(`LEX stayed open in front for ${Math.round(ageMs / 1000)}s; closing tab${azId ? ` | AZ ${azId}` : ''}`);
+    closeLexTabWithReason({
+      azId,
+      attemptLabel: 'LEX 1-minute front-tab failsafe reached. Closing tab',
+      statusText: 'LEX front-tab failsafe',
+      blockedLabel: 'Close blocked by browser after LEX 1-minute front-tab failsafe'
+    });
     return true;
   }
 
@@ -741,6 +1166,7 @@
     const now = Date.now();
     if (!force && (now - Number(state.lastTabHeartbeatAt || 0)) < CFG.tabHeartbeatMs) return;
     state.lastTabHeartbeatAt = now;
+    const sessionContext = state.lastSessionContext || getCurrentSessionContext();
 
     const heartbeats = readTabHeartbeats();
     heartbeats[kind] = {
@@ -749,6 +1175,11 @@
       host: location.hostname,
       url: location.href,
       title: document.title,
+      sessionState: norm(sessionContext?.sessionState || 'healthy') || 'healthy',
+      pageKind: norm(sessionContext?.pageKind || '') || kind,
+      authMarker: norm(sessionContext?.authMarker || ''),
+      anchorRole: norm(sessionContext?.role || ''),
+      anchorToken: getAnchorToken(),
       updatedAt: nowIso(),
       source: SCRIPT_NAME,
       version: VERSION
@@ -761,6 +1192,393 @@
     return parseTimeMs(value?.[kind]?.updatedAt);
   }
 
+  function getVisibleLoginFormContext() {
+    const passwordInput = Array.from(document.querySelectorAll('input[type="password"]'))
+      .find((el) => visible(el));
+    if (!passwordInput) return null;
+
+    const form = passwordInput.closest('form') || document;
+    const userInput = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
+      .find((el) => visible(el) && el !== passwordInput) || null;
+    const submitButton = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'))
+      .find((el) => visible(el) && !el.disabled);
+
+    return {
+      form,
+      userInput,
+      passwordInput,
+      submitButton
+    };
+  }
+
+  function getElementLabel(el) {
+    if (!el || !(el instanceof Element)) return '';
+    return norm([
+      el.textContent,
+      el.getAttribute?.('title'),
+      el.getAttribute?.('aria-label'),
+      el.getAttribute?.('value'),
+      el.getAttribute?.('name')
+    ].filter(Boolean).join(' '));
+  }
+
+  function getCurrentSessionContext() {
+    const role = getAnchorRole();
+    const title = norm(document.title || '');
+    const href = String(location.href || '');
+    const lowerHref = href.toLowerCase();
+    const lowerTitle = title.toLowerCase();
+    const bodyText = lower(norm(document.body?.innerText || '').slice(0, 2000));
+    const loginForm = getVisibleLoginFormContext();
+    const agreeButton = document.querySelector('#okta-signin-submit.button.button-primary[type="submit"]');
+    const agreeVisible = !!(agreeButton && visible(agreeButton) && lower(getElementLabel(agreeButton)) === 'i agree');
+
+    if (isLexHost()) {
+      const hasLightningChrome = !!document.querySelector('one-app, .slds-context-bar, [data-aura-class*="oneApp"]');
+      const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
+      let sessionState = hasLightningChrome ? 'healthy' : 'recovering';
+      let pageKind = hasLightningChrome ? 'lightning' : 'loading';
+      let authMarker = '';
+
+      if (agreeVisible) {
+        sessionState = 'recovering';
+        pageKind = 'trusted-device';
+        authMarker = 'i-agree';
+      } else if (loginForm) {
+        sessionState = 'login_required';
+        pageKind = 'credential-form';
+        authMarker = 'credential-form';
+      } else if (/\/login|sign[\s-]?in|okta|saml|frontdoor/i.test(lowerHref) || /sign in|okta/i.test(lowerTitle)) {
+        sessionState = 'login_required';
+        pageKind = 'login';
+        authMarker = 'login-route';
+      } else if (hasChallengeText) {
+        sessionState = 'blocked';
+        pageKind = 'challenge';
+        authMarker = 'unexpected-challenge';
+      }
+
+      return {
+        kind: 'lex',
+        role,
+        sessionState,
+        pageKind,
+        authMarker,
+        loginForm,
+        agreeButton: agreeVisible ? agreeButton : null
+      };
+    }
+
+    if (isGwpcHost()) {
+      const hasGuidewireChrome = !!(getVisibleGuidewireHeader() || document.querySelector('.gw-TabBar, .gw-Wizard--Title, .gw-TitleBar--title'));
+      const hasChallengeText = /verify|multifactor|security code|challenge/.test(bodyText);
+      let sessionState = hasGuidewireChrome ? 'healthy' : 'recovering';
+      let pageKind = hasGuidewireChrome ? 'guidewire' : 'loading';
+      let authMarker = '';
+
+      if (loginForm) {
+        sessionState = 'login_required';
+        pageKind = 'credential-form';
+        authMarker = 'credential-form';
+      } else if (/loginpage\.do|\/login|j_security_check|sign[\s-]?in/.test(lowerHref) || /sign in|login/.test(lowerTitle)) {
+        sessionState = 'login_required';
+        pageKind = 'login';
+        authMarker = 'login-route';
+      } else if (hasChallengeText) {
+        sessionState = 'blocked';
+        pageKind = 'challenge';
+        authMarker = 'unexpected-challenge';
+      }
+
+      return {
+        kind: 'gwpc',
+        role,
+        sessionState,
+        pageKind,
+        authMarker,
+        loginForm,
+        agreeButton: null
+      };
+    }
+
+    if (isAzHost()) {
+      return {
+        kind: 'az',
+        role,
+        sessionState: 'healthy',
+        pageKind: 'agencyzoom',
+        authMarker: '',
+        loginForm: null,
+        agreeButton: null
+      };
+    }
+
+    return {
+      kind: '',
+      role,
+      sessionState: 'healthy',
+      pageKind: '',
+      authMarker: '',
+      loginForm: null,
+      agreeButton: null
+    };
+  }
+
+  function buildSessionContextKey(context) {
+    return [
+      norm(context?.kind || ''),
+      norm(context?.pageKind || ''),
+      norm(context?.authMarker || ''),
+      norm(location.pathname || ''),
+      norm(location.search || '')
+    ].join('|');
+  }
+
+  function maybeAutoSubmitCurrentLogin(context) {
+    if (!context || (context.kind !== 'lex' && context.kind !== 'gwpc')) return context;
+    const loginForm = context.loginForm;
+    const agreeButton = context.agreeButton;
+
+    if (agreeButton && visible(agreeButton)) {
+      const actionKey = `agree|${buildSessionContextKey(context)}`;
+      if (readSession(SS_KEYS.authLastSubmitKey) !== actionKey) {
+        try { agreeButton.click?.(); } catch {}
+        try { agreeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window })); } catch {}
+        writeSession(SS_KEYS.authLastSubmitKey, actionKey);
+        context.sessionState = 'recovering';
+        context.authMarker = 'i-agree-submit';
+      }
+      return context;
+    }
+
+    if (!loginForm?.submitButton) return context;
+
+    const userValue = norm(loginForm.userInput?.value || '');
+    const passwordValue = norm(loginForm.passwordInput?.value || '');
+    if ((!userValue && loginForm.userInput) || !passwordValue) return context;
+
+    const actionKey = `login|${buildSessionContextKey(context)}|${userValue.length}|${passwordValue.length}`;
+    if (readSession(SS_KEYS.authLastSubmitKey) === actionKey) return context;
+
+    try { loginForm.submitButton.click?.(); } catch {}
+    try {
+      loginForm.submitButton.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      }));
+    } catch {}
+    writeSession(SS_KEYS.authLastSubmitKey, actionKey);
+    context.sessionState = 'recovering';
+    context.authMarker = 'autofill-submit';
+    return context;
+  }
+
+  function updateAuthHoldFromContext(context) {
+    if (!context?.role || (context.role !== 'apex' && context.role !== 'gwpc')) return;
+
+    const current = readAuthHold();
+    const sameOwner = norm(current?.ownerTabId || '') === state.tabId;
+    const sameSystem = norm(current?.system || '') === context.role;
+    const baseClaimedAt = sameOwner || sameSystem ? norm(current?.claimedAt || '') : '';
+    const claimedAt = baseClaimedAt || nowIso();
+    const claimedAtMs = parseTimeMs(claimedAt);
+    const hasAutofill = !!(
+      norm(context.loginForm?.passwordInput?.value || '')
+      && (!context.loginForm?.userInput || norm(context.loginForm.userInput.value || ''))
+    );
+    const emptyCredentialsTooLong = !!context.loginForm && !hasAutofill && claimedAtMs && (Date.now() - claimedAtMs) >= CFG.authEmptyCredentialsMs;
+
+    let holdState = context.sessionState === 'blocked' ? 'blocked' : 'recovering';
+    let reason = norm(context.authMarker || context.pageKind || context.sessionState || 'auth-recovery');
+
+    if (emptyCredentialsTooLong) {
+      holdState = 'blocked';
+      reason = 'credentials not autofilled';
+    }
+
+    if (claimedAtMs && (Date.now() - claimedAtMs) >= CFG.authRecoveryTimeoutMs) {
+      holdState = 'blocked';
+      reason = 'auth recovery timed out';
+    }
+
+    writeAuthHold({
+      system: context.role,
+      state: holdState,
+      ownerTabId: state.tabId,
+      claimedAt,
+      updatedAt: nowIso(),
+      expiresAt: new Date(Date.now() + CFG.authHoldTtlMs).toISOString(),
+      reason,
+      host: location.hostname,
+      url: location.href,
+      title: document.title,
+      attempt: Number(current?.attempt || 0) + (sameOwner ? 0 : 1),
+      requestId: norm(current?.requestId || '') || `auth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    });
+  }
+
+  function upsertCoordinatorAuthHold(system, reason, preferredState = 'recovering') {
+    const current = readAuthHold();
+    const sameSystem = norm(current?.system || '') === norm(system || '');
+    const claimedAt = sameSystem ? norm(current?.claimedAt || '') : '';
+    const baseClaimedAt = claimedAt || nowIso();
+    const claimedAtMs = parseTimeMs(baseClaimedAt);
+
+    let holdState = preferredState === 'blocked' ? 'blocked' : 'recovering';
+    let holdReason = norm(reason || `${system} auth recovery`) || `${system} auth recovery`;
+    if (holdState !== 'blocked' && claimedAtMs && (Date.now() - claimedAtMs) >= CFG.authRecoveryTimeoutMs) {
+      holdState = 'blocked';
+      holdReason = `${String(system || 'anchor').toUpperCase()} anchor recovery timed out`;
+    }
+
+    const next = {
+      system,
+      state: holdState,
+      ownerTabId: state.tabId,
+      claimedAt: baseClaimedAt,
+      updatedAt: nowIso(),
+      expiresAt: new Date(Date.now() + CFG.authHoldTtlMs).toISOString(),
+      reason: holdReason,
+      host: location.hostname,
+      url: location.href,
+      title: document.title,
+      attempt: sameSystem ? Math.max(1, Number(current?.attempt || 1)) : (Math.max(0, Number(current?.attempt || 0)) + 1),
+      requestId: sameSystem ? norm(current?.requestId || '') || `auth_${Date.now().toString(36)}` : `auth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    };
+    writeAuthHold(next);
+    return next;
+  }
+
+  function clearAuthHoldForRole(role) {
+    const current = readAuthHold();
+    if (!current) return;
+    if (norm(current.system || '') !== norm(role || '')) return;
+    writeAuthHold(null);
+  }
+
+  function clearStaleAuthHoldIfNeeded() {
+    const hold = readAuthHold();
+    if (!hold) return false;
+    const holdState = lower(hold.state || '');
+    if (holdState !== 'recovering' && holdState !== 'blocked') return false;
+    if (isLeaseActive(hold, CFG.authHoldTtlMs)) return false;
+    writeAuthHold(null);
+    log(`Cleared stale auth hold for ${norm(hold.system || 'unknown').toUpperCase() || 'UNKNOWN'}`);
+    return true;
+  }
+
+  function ensureAuthBanner(text, blocked = false) {
+    const message = norm(text || '');
+    if (!message) {
+      try { state.authBannerEl?.remove(); } catch {}
+      state.authBannerEl = null;
+      return;
+    }
+
+    let banner = state.authBannerEl;
+    if (!banner || !banner.isConnected) {
+      banner = document.createElement('div');
+      Object.assign(banner.style, {
+        position: 'fixed',
+        top: '12px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: String(CFG.zIndex),
+        maxWidth: 'min(92vw, 640px)',
+        padding: '12px 16px',
+        borderRadius: '12px',
+        boxShadow: '0 8px 24px rgba(0,0,0,.28)',
+        font: '700 13px/1.4 Arial, sans-serif',
+        color: '#fff',
+        textAlign: 'center'
+      });
+      document.documentElement.appendChild(banner);
+      state.authBannerEl = banner;
+    }
+
+    banner.style.background = blocked ? '#991b1b' : '#92400e';
+    banner.textContent = message;
+  }
+
+  function getWatchAlertWebhookUrl() {
+    try {
+      const localValue = localStorage.getItem('tm_pc_header_timeout_watch_alert_webhook_url_v1') || '';
+      return norm(readGM('tm_pc_header_timeout_watch_alert_webhook_url_v1', '') || localValue || '');
+    } catch {
+      return norm(readGM('tm_pc_header_timeout_watch_alert_webhook_url_v1', '') || '');
+    }
+  }
+
+  function sendAuthBlockedAlert(reason) {
+    if ((Date.now() - Number(state.lastAuthAlertAt || 0)) < CFG.authBlockedAlertRepeatMs) return;
+    state.lastAuthAlertAt = Date.now();
+
+    const endpoint = getWatchAlertWebhookUrl();
+    if (!endpoint || typeof GM_xmlhttpRequest !== 'function') return;
+
+    try {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: endpoint,
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        data: JSON.stringify({
+          message: WATCH_ALERT_MESSAGE,
+          event: 'home_auth_blocked',
+          source: SCRIPT_NAME,
+          version: VERSION,
+          host: location.hostname,
+          reason: norm(reason || 'auth blocked'),
+          url: location.href,
+          detectedAt: nowIso()
+        }),
+        timeout: 20000
+      });
+    } catch {}
+  }
+
+  function syncCurrentTabSessionState() {
+    adoptAnchorMarkerFromUrl();
+    let context = getCurrentSessionContext();
+    context = maybeAutoSubmitCurrentLogin(context);
+    state.lastSessionContext = context;
+
+    if (context.kind === 'gwpc' && context.sessionState === 'healthy') {
+      rememberPreferredGwpcHost(location.hostname);
+    }
+
+    if (context.role === 'apex' || context.role === 'gwpc') {
+      const existingLease = readAnchorState()?.[context.role];
+      claimAnchorLease(context.role, {
+        anchorToken: getAnchorToken(),
+        sessionState: context.sessionState,
+        pageKind: context.pageKind,
+        authMarker: context.authMarker,
+        lastHealthyAt: context.sessionState === 'healthy' ? nowIso() : norm(existingLease?.lastHealthyAt || ''),
+        lastLoginRequiredAt: context.sessionState !== 'healthy' ? nowIso() : norm(existingLease?.lastLoginRequiredAt || '')
+      });
+      clearAnchorPendingOpen(context.role);
+
+      if (context.sessionState === 'healthy') {
+        clearAuthHoldForRole(context.role);
+        ensureAuthBanner('', false);
+      } else {
+        updateAuthHoldFromContext(context);
+        ensureAuthBanner(`${context.role.toUpperCase()} ${context.sessionState.replace(/_/g, ' ')}: ${context.authMarker || context.pageKind || 'login required'}`, context.sessionState === 'blocked');
+        if (context.sessionState === 'blocked') {
+          sendAuthBlockedAlert(context.authMarker || context.pageKind || 'auth blocked');
+        }
+      }
+    }
+
+    if (!isAnchorTab()) {
+      ensureAuthBanner('', false);
+    }
+  }
+
   function readApexWakeState() {
     const value = readGM(GM_KEYS.apexWakeState, null);
     return isPlainObject(value) ? value : {};
@@ -768,6 +1586,229 @@
 
   function saveApexWakeState(next) {
     writeGM(GM_KEYS.apexWakeState, isPlainObject(next) ? next : {});
+  }
+
+  function ensureCoordinatorLease() {
+    if (!isAzHost()) return null;
+    return claimAnchorLease('coordinator', {
+      sessionState: 'healthy',
+      pageKind: 'agencyzoom',
+      authMarker: '',
+      lastHealthyAt: nowIso()
+    });
+  }
+
+  function isCoordinatorOwner() {
+    const registry = readAnchorState();
+    return isLeaseActive(registry.coordinator) && norm(registry.coordinator?.tabId || '') === state.tabId;
+  }
+
+  function syncLocalOpenRequestToShared() {
+    const localRequest = readLocalJson(GM_KEYS.tabOpenRequest);
+    if (!isPlainObject(localRequest) || !norm(localRequest.requestId || '')) return;
+    const requestKey = `${norm(localRequest.requestId || '')}|${norm(localRequest.status || '')}|${norm(localRequest.requestedAt || '')}`;
+    if (state.lastBridgedOpenRequestKey === requestKey) return;
+
+    const current = readSharedTabOpenRequest();
+    const currentRequestedMs = parseTimeMs(current?.requestedAt || '');
+    const nextRequestedMs = parseTimeMs(localRequest?.requestedAt || '');
+    if (!current || nextRequestedMs >= currentRequestedMs || norm(current.requestId || '') === norm(localRequest.requestId || '')) {
+      writeSharedTabOpenRequest(localRequest);
+      state.lastBridgedOpenRequestKey = requestKey;
+    }
+  }
+
+  function setSharedOpenRequestStatus(request, status, patch = {}) {
+    if (!isPlainObject(request) || !norm(request.requestId || '')) return null;
+    const next = {
+      ...request,
+      ...patch,
+      status,
+      updatedAt: nowIso()
+    };
+    writeSharedTabOpenRequest(next);
+    bridgeSharedKeyToLocal(GM_KEYS.tabOpenRequest, next);
+    return next;
+  }
+
+  function fulfillSharedTabOpenRequest() {
+    if (!isCoordinatorOwner()) return;
+    const request = readSharedTabOpenRequest();
+    if (!isPlainObject(request) || !norm(request.requestId || '')) return;
+
+    const requestedAtMs = parseTimeMs(request.requestedAt || '');
+    if (requestedAtMs && (Date.now() - requestedAtMs) > CFG.openRequestTtlMs) {
+      setSharedOpenRequestStatus(request, 'expired', {
+        error: 'open request expired'
+      });
+      upsertCoordinatorAuthHold(norm(request.target || 'gwpc') || 'gwpc', 'tab open request expired', 'blocked');
+      return;
+    }
+
+    const status = norm(request.status || '');
+    if (status === 'opened' || status === 'failed' || status === 'expired') return;
+    if (status === 'claimed' && norm(request.claimedByTabId || '') !== state.tabId) return;
+
+    const claimed = setSharedOpenRequestStatus(request, 'claimed', {
+      claimedByTabId: state.tabId,
+      claimedAt: nowIso()
+    });
+
+    if (!claimed) return;
+    if (typeof GM_openInTab !== 'function') {
+      setSharedOpenRequestStatus(claimed, 'failed', {
+        error: 'GM_openInTab unavailable'
+      });
+      upsertCoordinatorAuthHold(norm(claimed.target || 'gwpc') || 'gwpc', 'GM_openInTab unavailable', 'blocked');
+      return;
+    }
+
+    try {
+      GM_openInTab(claimed.url, {
+        active: true,
+        insert: true,
+        setParent: true
+      });
+      setSharedOpenRequestStatus(claimed, 'opened', {
+        openedAt: nowIso(),
+        openedByTabId: state.tabId
+      });
+      log(`Supervisor opened ${claimed.target || 'tab'} request ${claimed.requestId}`);
+    } catch (err) {
+      setSharedOpenRequestStatus(claimed, 'failed', {
+        error: norm(err?.message || err || 'open failed')
+      });
+      upsertCoordinatorAuthHold(norm(claimed.target || 'gwpc') || 'gwpc', `tab open failed: ${norm(err?.message || err || 'open failed')}`, 'blocked');
+      log(`Supervisor failed tab-open request ${claimed.requestId}: ${err?.message || err}`);
+    }
+  }
+
+  function shouldOpenAnchor(role) {
+    const registry = readAnchorState();
+    const entry = isPlainObject(registry[role]) ? registry[role] : null;
+    if (isAnchorPendingActive(role, registry)) return false;
+    return !isLeaseActive(entry, CFG.anchorStaleMs);
+  }
+
+  function openAnchorTab(role, reason = '', hostOverride = '') {
+    if (typeof GM_openInTab !== 'function') return false;
+    const url = buildAnchorUrl(role, hostOverride);
+    if (!url) return false;
+
+    let token = '';
+    try {
+      token = norm(new URL(url).searchParams.get(ANCHOR_TOKEN_QUERY_KEY));
+    } catch {}
+
+    setAnchorPendingOpen(role, {
+      status: 'opening',
+      host: norm(hostOverride || location.hostname),
+      url,
+      anchorToken: token,
+      reason: norm(reason || '')
+    });
+
+    try {
+      GM_openInTab(url, {
+        active: false,
+        insert: true,
+        setParent: true
+      });
+      setAnchorPendingOpen(role, {
+        status: 'opened',
+        host: norm(hostOverride || location.hostname),
+        url,
+        anchorToken: token,
+        reason: norm(reason || '')
+      });
+      log(`Opened ${role.toUpperCase()} anchor${reason ? ` | ${reason}` : ''}`);
+      return true;
+    } catch (err) {
+      setAnchorPendingOpen(role, {
+        status: 'failed',
+        host: norm(hostOverride || location.hostname),
+        url,
+        anchorToken: token,
+        reason: norm(err?.message || err || 'open failed')
+      });
+      log(`Failed to open ${role.toUpperCase()} anchor: ${err?.message || err}`);
+      return false;
+    }
+  }
+
+  function ensureAnchorTabsFromCoordinator() {
+    if (!isCoordinatorOwner()) return;
+    if (!state.apexWakeEnabled) {
+      state.apexWakeStatus = 'Off';
+      return;
+    }
+
+    const gwpcHost = readPreferredGwpcHost();
+    let statusParts = [];
+
+    if (shouldOpenAnchor('apex')) {
+      const hold = upsertCoordinatorAuthHold('apex', 'apex anchor missing', 'recovering');
+      const opened = hold.state !== 'blocked' ? openAnchorTab('apex', 'stale or missing') : false;
+      if (!opened && hold.state !== 'blocked') {
+        upsertCoordinatorAuthHold('apex', 'apex anchor open failed', 'blocked');
+        statusParts.push('APEX anchor blocked');
+      } else {
+        statusParts.push(`APEX anchor ${hold.state}`);
+      }
+    } else {
+      statusParts.push('APEX anchor healthy');
+    }
+
+    if (shouldOpenAnchor('gwpc')) {
+      const hold = upsertCoordinatorAuthHold('gwpc', 'gwpc anchor missing', 'recovering');
+      const opened = hold.state !== 'blocked' ? openAnchorTab('gwpc', 'stale or missing', gwpcHost) : false;
+      if (!opened && hold.state !== 'blocked') {
+        upsertCoordinatorAuthHold('gwpc', 'gwpc anchor open failed', 'blocked');
+        statusParts.push(`GWPC anchor ${gwpcHost} blocked`);
+      } else {
+        statusParts.push(`GWPC anchor ${gwpcHost} ${hold.state}`);
+      }
+    } else {
+      statusParts.push(`GWPC anchor ${gwpcHost}`);
+    }
+
+    state.apexWakeStatus = statusParts.join(' | ');
+  }
+
+  async function probeAnchorSession(context) {
+    try {
+      if (context.role === 'apex') {
+        await fetch('/services/data/', {
+          credentials: 'include',
+          cache: 'no-store',
+          redirect: 'follow'
+        });
+      } else if (context.role === 'gwpc') {
+        await fetch('/pc/PolicyCenter.do?hb_anchor_probe=1', {
+          credentials: 'include',
+          cache: 'no-store',
+          redirect: 'follow'
+        });
+      }
+    } catch {}
+  }
+
+  function maybeMaintainCurrentAnchor(context) {
+    if (!context?.role || context.sessionState !== 'healthy') return;
+
+    if (!state.lastAnchorProbeAt) state.lastAnchorProbeAt = Date.now();
+    if (!state.lastAnchorRefreshAt) state.lastAnchorRefreshAt = Date.now();
+
+    if ((Date.now() - Number(state.lastAnchorProbeAt || 0)) >= CFG.anchorProbeMs) {
+      state.lastAnchorProbeAt = Date.now();
+      probeAnchorSession(context).catch(() => {});
+    }
+
+    if ((Date.now() - Number(state.lastAnchorRefreshAt || 0)) >= CFG.anchorRefreshMs) {
+      state.lastAnchorRefreshAt = Date.now();
+      log(`${context.role.toUpperCase()} anchor idle refresh`);
+      try { location.reload(); } catch {}
+    }
   }
 
   function chooseApexWakeUrl() {
@@ -784,159 +1825,36 @@
   }
 
   function closeOwnedApexWakeTabIfReady() {
-    if (!state.apexWakeCloseAt || Date.now() < state.apexWakeCloseAt) return;
-
-    let closeOk = false;
-    try {
-      if (state.apexWakeTab && typeof state.apexWakeTab.close === 'function') {
-        state.apexWakeTab.close();
-        closeOk = true;
-      }
-    } catch {}
-
-    const wakeState = readApexWakeState();
-    if (norm(wakeState.ownerTabId || '') === state.tabId) {
-      saveApexWakeState({
-        ...wakeState,
-        wakeActive: false,
-        wakeClosedAt: nowIso(),
-        closeOk,
-        missingSinceAt: nowIso(),
-        source: SCRIPT_NAME,
-        version: VERSION
-      });
-    }
-
-    state.apexWakeTab = null;
-    state.apexWakeCloseAt = 0;
-    state.apexWakeStatus = closeOk ? 'Wake tab closed' : 'Wake close attempted';
-    log(closeOk ? 'APEX wake tab closed after 20s' : 'APEX wake tab close attempted, but no closable tab handle was available');
+    // Dedicated anchors stay open until they are replaced or the user closes them.
   }
 
   function openApexWakeTab() {
-    if (typeof GM_openInTab !== 'function') {
-      state.apexWakeStatus = 'GM_openInTab unavailable';
-      log('APEX wake skipped: GM_openInTab unavailable');
-      return false;
-    }
-
-    const now = Date.now();
-    const startedAt = nowIso();
-    const wakeUrl = chooseApexWakeUrl();
-    const closeAt = new Date(now + CFG.apexWakeOpenMs).toISOString();
-    const wakeState = {
-      wakeActive: true,
-      ownerTabId: state.tabId,
-      ownerHost: location.hostname,
-      ownerUrl: location.href,
-      wakeUrl,
-      wakeStartedAt: startedAt,
-      wakeCloseAt: closeAt,
-      lastWakeAt: startedAt,
-      source: SCRIPT_NAME,
-      version: VERSION
-    };
-
-    saveApexWakeState(wakeState);
-
-    try {
-      state.apexWakeTab = GM_openInTab(wakeUrl, {
-        active: false,
-        insert: true,
-        setParent: true
-      });
-      state.apexWakeCloseAt = now + CFG.apexWakeOpenMs;
-      state.apexWakeStatus = 'Wake tab open';
-      log(`APEX wake opened for 20s | ${wakeUrl}`);
-      return true;
-    } catch (err) {
-      saveApexWakeState({
-        ...wakeState,
-        wakeActive: false,
-        wakeFailedAt: nowIso(),
-        error: norm(err?.message || err || 'open failed')
-      });
-      state.apexWakeStatus = 'Wake open failed';
-      log(`APEX wake open failed: ${err?.message || err}`);
-      return false;
-    }
+    return openAnchorTab('apex', 'manual supervisor open');
   }
 
   function checkApexWakeMonitor() {
-    closeOwnedApexWakeTabIfReady();
-    if (!isAzHost()) {
-      state.apexWakeStatus = 'AZ only';
-      return;
-    }
-    if (!state.apexWakeEnabled) {
-      state.apexWakeStatus = 'Off';
-      return;
-    }
-
-    const heartbeats = readTabHeartbeats();
-    const lastLexMs = getLastHeartbeatMsForKind('lex', heartbeats);
-    const lastGwpcMs = getLastHeartbeatMsForKind('gwpc', heartbeats);
-    const wakeState = readApexWakeState();
-
-    if (lastLexMs && (Date.now() - lastLexMs) < CFG.apexWakeMissingMs) {
-      if (norm(wakeState.missingSinceAt || '')) {
-        saveApexWakeState({
-          ...wakeState,
-          missingSinceAt: '',
-          lastHealthyAt: nowIso(),
-          source: SCRIPT_NAME,
-          version: VERSION
-        });
-      }
-      state.apexWakeStatus = `LEX healthy ${formatAge(Date.now() - lastLexMs)} ago`;
-      state.lastApexWakeLogKey = '';
+    if (isAzHost()) {
+      clearStaleAuthHoldIfNeeded();
+      ensureCoordinatorLease();
+      fulfillSharedTabOpenRequest();
+      ensureAnchorTabsFromCoordinator();
+      bridgeSupervisorStateToLocal();
       return;
     }
 
-    let missingSinceMs = parseTimeMs(wakeState.missingSinceAt);
-    const derivedMissingSinceMs = Math.max(lastLexMs || missingSinceMs || Date.now(), Number(state.apexWakeMonitorStartedAt || 0));
-    if (!missingSinceMs || Math.abs(missingSinceMs - derivedMissingSinceMs) > 1000) {
-      missingSinceMs = derivedMissingSinceMs;
-      saveApexWakeState({
-        ...wakeState,
-        missingSinceAt: new Date(missingSinceMs).toISOString(),
-        source: SCRIPT_NAME,
-        version: VERSION
-      });
-    }
-
-    const now = Date.now();
-    const missingMs = now - missingSinceMs;
-    const lastWakeMs = parseTimeMs(wakeState.lastWakeAt || wakeState.wakeStartedAt);
-    const maxGapRemainingMs = lastWakeMs
-      ? Math.max(0, CFG.apexWakeMaxWithoutOpenMs - (now - lastWakeMs))
-      : Number.POSITIVE_INFINITY;
-    const remainingMs = Math.max(0, Math.min(CFG.apexWakeMissingMs - missingMs, maxGapRemainingMs));
-    const gwpcTail = lastGwpcMs
-      ? ` | GWPC healthy ${formatAge(now - lastGwpcMs)} ago`
-      : ' | GWPC missing';
-    if (remainingMs > 0) {
-      state.apexWakeStatus = `LEX missing, wake in ${formatAge(remainingMs)}${gwpcTail}`;
+    const context = state.lastSessionContext || getCurrentSessionContext();
+    if (isAnchorTab()) {
+      maybeMaintainCurrentAnchor(context);
+      state.apexWakeStatus = `${context.role.toUpperCase()} anchor ${context.sessionState}`;
       return;
     }
 
-    if (isWakeStateActive(wakeState)) {
-      state.apexWakeStatus = `Wake already active${gwpcTail}`;
+    if (context.kind === 'lex' || context.kind === 'gwpc') {
+      state.apexWakeStatus = `${context.kind.toUpperCase()} ${context.sessionState}`;
       return;
     }
 
-    const lastWakeAgeMs = lastWakeMs ? now - lastWakeMs : Number.POSITIVE_INFINITY;
-    if (lastWakeMs && lastWakeAgeMs < CFG.apexWakeCooldownMs && lastWakeAgeMs < CFG.apexWakeMaxWithoutOpenMs) {
-      state.apexWakeStatus = `Cooldown ${formatAge(CFG.apexWakeCooldownMs - lastWakeAgeMs)}${gwpcTail}`;
-      return;
-    }
-
-    const logKey = `missing-${Math.floor(missingSinceMs / 1000)}`;
-    if (state.lastApexWakeLogKey !== logKey) {
-      state.lastApexWakeLogKey = logKey;
-      log(`No APEX/LEX heartbeat; opening APEX wake tab (max ${Math.round(CFG.apexWakeMaxWithoutOpenMs / 60000)}m without wake)`);
-    }
-    openApexWakeTab();
+    state.apexWakeStatus = isAzHost() ? 'Supervisor active' : 'Watching';
   }
 
   function readWebhookFatalHold() {
@@ -994,6 +1912,14 @@
 
   function checkGwpcSamePageCloseWatchdog() {
     if (!isGwpcHost()) return;
+    const context = state.lastSessionContext || getCurrentSessionContext();
+    if (context.sessionState !== 'healthy') {
+      resetSamePageWatch('');
+      if (context.sessionState === 'blocked') {
+        state.apexWakeStatus = `GWPC blocked: ${context.authMarker || context.pageKind || 'login required'}`;
+      }
+      return;
+    }
     if (shouldHoldOpenForWebhookFatalError()) return;
     if (getActiveIgnoreCloseLease()) return;
     if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
@@ -1549,6 +2475,10 @@
   }
 
   function tryCloseCurrentTab() {
+    if (isProtectedTab()) {
+      log('Close skipped: protected tab');
+      return;
+    }
     const wasClosed = !!window.closed;
     try { window.close(); } catch {}
     if (window.closed || wasClosed) return;
@@ -1575,6 +2505,10 @@
 
   function attemptClose(signal = null) {
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
+    if (isProtectedTab()) {
+      setStatus('Protected tab');
+      return;
+    }
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
     if (shouldIgnoreCloseForActiveLease(effectiveSignal)) return;
@@ -1657,10 +2591,17 @@
 
   function tick(reason = 'tick') {
     if (state.destroyed) return;
+    syncCurrentTabSessionState();
+    syncLocalOpenRequestToShared();
+    bridgeSupervisorStateToLocal();
     writeTabHeartbeat();
     closeOwnedApexWakeTabIfReady();
     refreshIgnoreCloseLeaseHeartbeat();
     if (checkLexSnagFailure()) {
+      renderAll();
+      return;
+    }
+    if (checkLexFrontTabFailsafe()) {
       renderAll();
       return;
     }
@@ -1794,7 +2735,7 @@
     }
 
     if (state.ui.apexWake) {
-      state.ui.apexWake.textContent = state.apexWakeEnabled ? 'APEX WAKE ON' : 'APEX WAKE OFF';
+      state.ui.apexWake.textContent = state.apexWakeEnabled ? 'SESSION SUPERVISOR ON' : 'SESSION SUPERVISOR OFF';
       state.ui.apexWake.style.background = state.apexWakeEnabled ? '#0f766e' : '#475569';
       state.ui.apexWake.disabled = !isAzHost();
       state.ui.apexWake.style.opacity = isAzHost() ? '1' : '.55';
@@ -1845,14 +2786,14 @@
           <button id="tm-payload-mirror-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button id="tm-payload-mirror-download" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#1d4ed8;color:#fff;font-weight:800;cursor:pointer;">DOWNLOAD MIRROR</button>
           <button id="tm-payload-mirror-ignore-close" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">IGNORE CLOSE OFF</button>
-          <button id="tm-payload-mirror-apex-wake" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">APEX WAKE ON</button>
+        <button id="tm-payload-mirror-apex-wake" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SESSION SUPERVISOR ON</button>
         </div>
         <div id="tm-payload-mirror-status" style="font-weight:800;color:#86efac;margin-bottom:10px;">Watching for webhook success</div>
         <div style="display:grid;grid-template-columns:110px 1fr;gap:6px 8px;margin-bottom:10px;">
           <div style="opacity:.72;">AZ ID</div><div id="tm-payload-mirror-azid">-</div>
           <div style="opacity:.72;">Payload mirrored</div><div id="tm-payload-mirror-mirrored">No</div>
           <div style="opacity:.72;">Close countdown</div><div id="tm-payload-mirror-countdown">-</div>
-          <div style="opacity:.72;">APEX wake</div><div id="tm-payload-mirror-apex-wake-status">Watching</div>
+        <div style="opacity:.72;">Session supervisor</div><div id="tm-payload-mirror-apex-wake-status">Watching</div>
         </div>
         <textarea id="tm-payload-mirror-logs" readonly style="width:100%;min-height:140px;max-height:190px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
@@ -1905,18 +2846,19 @@
 
     state.ui.apexWake?.addEventListener('click', () => {
       if (!isAzHost()) {
-        log('APEX wake toggle is only active on AgencyZoom');
+        log('Session supervisor toggle is only active on AgencyZoom');
         return;
       }
       state.apexWakeEnabled = !state.apexWakeEnabled;
       saveApexWakeEnabled(state.apexWakeEnabled);
       if (!state.apexWakeEnabled) {
         state.apexWakeStatus = 'Off';
-        log('APEX wake monitor OFF');
+        writeAuthHold(null);
+        log('Session supervisor OFF');
       } else {
         state.apexWakeMonitorStartedAt = Date.now();
         state.apexWakeStatus = 'Watching';
-        log('APEX wake monitor ON');
+        log('Session supervisor ON');
         checkApexWakeMonitor();
       }
       renderAll();
