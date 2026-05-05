@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.7
+// @version      1.1.8
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -29,7 +29,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.7';
+  const VERSION = '1.1.8';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -1299,6 +1299,17 @@
     }
   }
 
+  function syncFrameworkValueTracker(el, previousValue) {
+    const tracker = el?._valueTracker;
+    if (!tracker || typeof tracker.setValue !== 'function') return false;
+    try {
+      tracker.setValue(String(previousValue ?? ''));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function getInputType(el) {
     return lower(el?.getAttribute?.('type') || el?.type || '');
   }
@@ -1365,27 +1376,52 @@
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const value = String(el.value || '');
     if (!value) return false;
+    const lastChar = value.slice(-1) || ' ';
 
     try { el.focus({ preventScroll: true }); } catch {}
     try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
-    try { setNativeInputValue(el, ''); } catch {}
+    try { setNativeInputValue(el, ''); syncFrameworkValueTracker(el, value); } catch {}
     try { el.setAttribute('value', ''); } catch {}
-    setNativeInputValue(el, value);
-    try { el.setAttribute('value', value); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || ' ' })); } catch {}
     try {
       if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value.slice(-1) || null, inputType: 'insertText' }));
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: null, inputType: 'deleteContentBackward' }));
       } else {
         el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       }
     } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Tab' })); } catch {}
+    setNativeInputValue(el, value);
+    syncFrameworkValueTracker(el, '');
+    try { el.setAttribute('value', value); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}
     return true;
+  }
+
+  function forceNativeFormSubmit(form) {
+    if (!form || !(form instanceof HTMLFormElement)) return false;
+    try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch {}
+    try {
+      HTMLFormElement.prototype.submit.call(form);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function prepareVisibleLoginForm(loginForm) {
@@ -1579,8 +1615,9 @@
     writeSession(SS_KEYS.authLastSubmitAt, String(Date.now()));
   }
 
-  function activateSubmitElement(el) {
+  function activateSubmitElement(el, options = {}) {
     if (!el || !(el instanceof Element)) return false;
+    const forceNativeSubmit = options.forceNativeSubmit === true;
     let activated = false;
 
     try { dispatchPressSequence(el); } catch {}
@@ -1605,6 +1642,9 @@
         activated = true;
       } catch {}
     }
+    if (forceNativeSubmit && form) {
+      activated = forceNativeFormSubmit(form) || activated;
+    }
 
     return activated;
   }
@@ -1623,7 +1663,7 @@
       const actionKey = `login|${buildSessionContextKey(context)}|${userValue.length}|${passwordValue.length}`;
       if (!canRetrySessionAuthAction(actionKey)) return context;
 
-      if (activateSubmitElement(loginForm.submitButton)) {
+      if (activateSubmitElement(loginForm.submitButton, { forceNativeSubmit: true })) {
         markSessionAuthAction(actionKey);
         context.sessionState = 'recovering';
         context.authMarker = 'autofill-submit';

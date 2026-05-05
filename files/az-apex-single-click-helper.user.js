@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.8
+// @version      1.0.9
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.8';
+  const VERSION = '1.0.9';
 
   const CFG = {
     scanMs: 400,
@@ -211,31 +211,67 @@
     }
   }
 
+  function syncFrameworkValueTracker(el, previousValue) {
+    const tracker = el?._valueTracker;
+    if (!tracker || typeof tracker.setValue !== 'function') return false;
+    try {
+      tracker.setValue(String(previousValue ?? ''));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function dispatchAuthFieldLifecycle(el) {
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const value = String(el.value || '');
     if (!value) return false;
+    const lastChar = value.slice(-1) || ' ';
 
     try { el.focus({ preventScroll: true }); } catch {}
     try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
-    try { setNativeInputValue(el, ''); } catch {}
+    try { setNativeInputValue(el, ''); syncFrameworkValueTracker(el, value); } catch {}
     try { el.setAttribute('value', ''); } catch {}
-    setNativeInputValue(el, value);
-    try { el.setAttribute('value', value); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || ' ' })); } catch {}
     try {
       if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value.slice(-1) || null, inputType: 'insertText' }));
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: null, inputType: 'deleteContentBackward' }));
       } else {
         el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       }
     } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Tab' })); } catch {}
+    setNativeInputValue(el, value);
+    syncFrameworkValueTracker(el, '');
+    try { el.setAttribute('value', value); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}
     return true;
+  }
+
+  function forceNativeFormSubmit(form) {
+    if (!form || !(form instanceof HTMLFormElement)) return false;
+    try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch {}
+    try {
+      HTMLFormElement.prototype.submit.call(form);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function prepareApexAuthForm(triggerEl) {
@@ -427,6 +463,9 @@
           form.requestSubmit(el instanceof HTMLElement ? el : undefined);
           activated = true;
         } catch {}
+      }
+      if (form) {
+        activated = forceNativeFormSubmit(form) || activated;
       }
     }
 
