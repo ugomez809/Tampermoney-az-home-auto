@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.3
+// @version      1.2.4
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.3';
+  const VERSION = '1.2.4';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -151,8 +151,9 @@
 
   function init() {
     const legacyJobStateCleared = clearLegacyJobState();
-    const staleJobReset = resetStaleActiveJobOnBoot();
     const resumedAfterReload = consumeBootstrapReloadToken();
+    const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
+    const staleJobReset = azJobReset ? '' : resetStaleActiveJobOnBoot();
 
     if (isAzOrigin()) {
       buildUi();
@@ -165,6 +166,9 @@
     log(`Loaded v${VERSION} on ${location.hostname}`);
     if (legacyJobStateCleared) {
       log('Cleared legacy Zillow job state');
+    }
+    if (azJobReset) {
+      log(azJobReset);
     }
     if (staleJobReset) {
       log(staleJobReset);
@@ -1377,6 +1381,15 @@
     const ticketId = norm(job?.ticketId || '');
     clearJob();
     return `Cleared stale Zillow job${ticketId ? ` for AZ ${ticketId}` : ''}`;
+  }
+
+  function clearStoredJobOnAzLoad() {
+    const job = getJob();
+    if (!isPlainObject(job)) return '';
+    const ticketId = norm(job?.ticketId || '');
+    const status = norm(job?.status || '');
+    clearJob();
+    return `Cleared stored Zillow job on AgencyZoom load${ticketId ? ` for AZ ${ticketId}` : ''}${status ? ` (${status})` : ''}`;
   }
 
   function hasZillowJobProgress(job) {
