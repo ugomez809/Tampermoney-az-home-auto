@@ -3730,7 +3730,7 @@
 
   function savePanelPos(pos) {
     try {
-      localStorage.setItem(KEYS.panelPos, JSON.stringify(pos));s
+      localStorage.setItem(KEYS.panelPos, JSON.stringify(pos));
     } catch {}
   }
 
