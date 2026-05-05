@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.2
+// @version      1.1.3
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -28,7 +28,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.2';
+  const VERSION = '1.1.3';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -111,6 +111,7 @@
     anchorLeaseTtlMs: 20000,
     anchorStaleMs: 15000,
     anchorOpenPendingMs: 30000,
+    anchorOpenCooldownMs: 120000,
     authHoldTtlMs: 20000,
     authRecoveryTimeoutMs: 90000,
     authEmptyCredentialsMs: 10000,
@@ -496,6 +497,66 @@
       nextRegistry.pendingOpen = nextPending;
     } else {
       delete nextRegistry.pendingOpen;
+    }
+    writeAnchorState(nextRegistry);
+    return true;
+  }
+
+  function getAnchorOpenAttemptMap(registry = null) {
+    const source = isPlainObject(registry) ? registry : readAnchorState();
+    return isPlainObject(source.openAttempts) ? source.openAttempts : {};
+  }
+
+  function getAnchorOpenAttemptEntry(role, registry = null) {
+    if (!role) return null;
+    const attempts = getAnchorOpenAttemptMap(registry);
+    return isPlainObject(attempts[role]) ? attempts[role] : null;
+  }
+
+  function isAnchorOpenCooldownActive(role, registry = null) {
+    const entry = getAnchorOpenAttemptEntry(role, registry);
+    if (!entry) return false;
+    const attemptedAtMs = parseTimeMs(entry.attemptedAt || entry.updatedAt || '');
+    if (!attemptedAtMs) return false;
+    return (Date.now() - attemptedAtMs) <= CFG.anchorOpenCooldownMs;
+  }
+
+  function setAnchorOpenAttempt(role, patch = {}) {
+    if (!role) return null;
+    const registry = readAnchorState();
+    const attempts = getAnchorOpenAttemptMap(registry);
+    const prior = isPlainObject(attempts[role]) ? attempts[role] : {};
+    const next = {
+      ...prior,
+      role,
+      attemptedByTabId: state.tabId,
+      attemptedAt: norm(prior.attemptedAt || '') || nowIso(),
+      updatedAt: nowIso(),
+      expiresAt: new Date(Date.now() + CFG.anchorOpenCooldownMs).toISOString(),
+      ...patch
+    };
+    writeAnchorState({
+      ...registry,
+      openAttempts: {
+        ...attempts,
+        [role]: next
+      }
+    });
+    return next;
+  }
+
+  function clearAnchorOpenAttempt(role) {
+    if (!role) return false;
+    const registry = readAnchorState();
+    const attempts = getAnchorOpenAttemptMap(registry);
+    if (!isPlainObject(attempts[role])) return false;
+    const nextAttempts = { ...attempts };
+    delete nextAttempts[role];
+    const nextRegistry = { ...registry };
+    if (Object.keys(nextAttempts).length) {
+      nextRegistry.openAttempts = nextAttempts;
+    } else {
+      delete nextRegistry.openAttempts;
     }
     writeAnchorState(nextRegistry);
     return true;
@@ -1597,6 +1658,7 @@
         lastLoginRequiredAt: context.sessionState !== 'healthy' ? nowIso() : norm(existingLease?.lastLoginRequiredAt || '')
       });
       clearAnchorPendingOpen(context.role);
+      clearAnchorOpenAttempt(context.role);
 
       if (context.sessionState === 'healthy') {
         clearAuthHoldForRole(context.role);
@@ -1723,6 +1785,7 @@
     const registry = readAnchorState();
     const entry = isPlainObject(registry[role]) ? registry[role] : null;
     if (isAnchorPendingActive(role, registry)) return false;
+    if (isAnchorOpenCooldownActive(role, registry)) return false;
     return !isLeaseActive(entry, CFG.anchorStaleMs);
   }
 
@@ -1736,6 +1799,13 @@
       token = norm(new URL(url).searchParams.get(ANCHOR_TOKEN_QUERY_KEY));
     } catch {}
 
+    setAnchorOpenAttempt(role, {
+      status: 'attempting',
+      host: norm(hostOverride || location.hostname),
+      url,
+      anchorToken: token,
+      reason: norm(reason || '')
+    });
     setAnchorPendingOpen(role, {
       status: 'opening',
       host: norm(hostOverride || location.hostname),
@@ -1757,10 +1827,24 @@
         anchorToken: token,
         reason: norm(reason || '')
       });
+      setAnchorOpenAttempt(role, {
+        status: 'opened',
+        host: norm(hostOverride || location.hostname),
+        url,
+        anchorToken: token,
+        reason: norm(reason || '')
+      });
       log(`Opened ${role.toUpperCase()} anchor${reason ? ` | ${reason}` : ''}`);
       return true;
     } catch (err) {
       setAnchorPendingOpen(role, {
+        status: 'failed',
+        host: norm(hostOverride || location.hostname),
+        url,
+        anchorToken: token,
+        reason: norm(err?.message || err || 'open failed')
+      });
+      setAnchorOpenAttempt(role, {
         status: 'failed',
         host: norm(hostOverride || location.hostname),
         url,
@@ -1779,8 +1863,17 @@
       return;
     }
 
+    const activeHold = getActiveAuthHold();
+    const activeHoldSystem = norm(activeHold?.system || '');
+    const activeHoldState = lower(activeHold?.state || '');
     const gwpcHost = readPreferredGwpcHost();
     let statusParts = [];
+    const apexPending = isAnchorPendingActive('apex');
+    const gwpcPending = isAnchorPendingActive('gwpc');
+    const apexCooldown = isAnchorOpenCooldownActive('apex');
+    const gwpcCooldown = isAnchorOpenCooldownActive('gwpc');
+    const apexBlockedByRecovery = activeHoldState === 'recovering' && activeHoldSystem === 'apex';
+    const gwpcBlockedByRecovery = activeHoldState === 'recovering' && activeHoldSystem === 'gwpc';
 
     if (shouldOpenAnchor('apex')) {
       const hold = upsertCoordinatorAuthHold('apex', 'apex anchor missing', 'recovering');
@@ -1791,9 +1884,18 @@
       } else {
         statusParts.push(`APEX anchor ${hold.state}`);
       }
-    } else {
-      statusParts.push('APEX anchor healthy');
+      state.apexWakeStatus = statusParts.join(' | ');
+      return;
     }
+
+    if (apexPending || apexCooldown || apexBlockedByRecovery) {
+      statusParts.push(apexBlockedByRecovery ? 'APEX anchor recovering' : 'APEX anchor waiting');
+      statusParts.push('GWPC anchor paused while APEX settles');
+      state.apexWakeStatus = statusParts.join(' | ');
+      return;
+    }
+
+    statusParts.push('APEX anchor healthy');
 
     if (shouldOpenAnchor('gwpc')) {
       const hold = upsertCoordinatorAuthHold('gwpc', 'gwpc anchor missing', 'recovering');
@@ -1804,10 +1906,17 @@
       } else {
         statusParts.push(`GWPC anchor ${gwpcHost} ${hold.state}`);
       }
-    } else {
-      statusParts.push(`GWPC anchor ${gwpcHost}`);
+      state.apexWakeStatus = statusParts.join(' | ');
+      return;
     }
 
+    if (gwpcPending || gwpcCooldown || gwpcBlockedByRecovery) {
+      statusParts.push(`GWPC anchor ${gwpcHost} waiting`);
+      state.apexWakeStatus = statusParts.join(' | ');
+      return;
+    }
+
+    statusParts.push(`GWPC anchor ${gwpcHost}`);
     state.apexWakeStatus = statusParts.join(' | ');
   }
 
