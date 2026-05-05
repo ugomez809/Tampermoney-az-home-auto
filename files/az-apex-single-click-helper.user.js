@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.7
+// @version      1.0.8
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.8';
 
   const CFG = {
     scanMs: 400,
@@ -137,6 +137,66 @@
     );
   }
 
+  function getInputType(el) {
+    return lower(el?.getAttribute?.('type') || el?.type || '');
+  }
+
+  function isLikelyCredentialUserInput(el) {
+    if (!el || !isVisible(el) || !isEnabled(el)) return false;
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+
+    const type = getInputType(el);
+    if (!type || type === 'text' || type === 'email' || type === 'search' || type === 'tel') return true;
+    return false;
+  }
+
+  function getCredentialUserScore(el) {
+    if (!el) return Number.NEGATIVE_INFINITY;
+    const meta = lower([
+      el.getAttribute?.('autocomplete'),
+      el.getAttribute?.('name'),
+      el.getAttribute?.('id'),
+      el.getAttribute?.('placeholder'),
+      el.getAttribute?.('aria-label'),
+      el.labels?.[0]?.textContent,
+      el.closest?.('label')?.textContent
+    ].filter(Boolean).join(' '));
+    let score = 0;
+    if (/\busername\b/.test(meta)) score += 30;
+    if (/\bemail\b/.test(meta)) score += 20;
+    if (/\buser\b/.test(meta)) score += 10;
+    if (/\blogin\b/.test(meta)) score += 8;
+    if (lower(el.getAttribute?.('autocomplete') || '') === 'username') score += 25;
+    if (getInputType(el) === 'email') score += 5;
+    return score;
+  }
+
+  function getVisibleCredentialUserInputs(root) {
+    return Array.from((root || document).querySelectorAll('input, textarea'))
+      .filter((el) => isLikelyCredentialUserInput(el))
+      .sort((a, b) => getCredentialUserScore(b) - getCredentialUserScore(a));
+  }
+
+  function getVisibleApexLoginFormContext(root = document) {
+    const passwordInput = Array.from((root || document).querySelectorAll('input[type="password"]'))
+      .find((el) => isVisible(el) && isEnabled(el));
+    if (!passwordInput) return null;
+
+    const form = passwordInput.closest('form') || root || document;
+    const userInput = getVisibleCredentialUserInputs(form)
+      .find((el) => el !== passwordInput) || null;
+    const submitButton = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'))
+      .find((el) => isVisible(el) && isEnabled(el)) || null;
+
+    return {
+      form,
+      userInput,
+      passwordInput,
+      submitButton
+    };
+  }
+
   function setNativeInputValue(el, value) {
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -157,24 +217,34 @@
     if (!value) return false;
 
     try { el.focus({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
+    try { setNativeInputValue(el, ''); } catch {}
+    try { el.setAttribute('value', ''); } catch {}
     setNativeInputValue(el, value);
-    try { el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true })); } catch {}
+    try { el.setAttribute('value', value); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || ' ' })); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value.slice(-1) || null, inputType: 'insertText' }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Tab' })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Tab' })); } catch {}
-    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true, cancelable: false })); } catch {}
+    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}
     return true;
   }
 
   function prepareApexAuthForm(triggerEl) {
-    const form = triggerEl?.closest?.('form') || document;
-    const passwordInputs = Array.from(form.querySelectorAll('input[type="password"]'))
-      .filter((el) => isVisible(el) && isEnabled(el) && normalizeText(el.value).length > 0);
-    const userInputs = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
-      .filter((el) => isVisible(el) && isEnabled(el) && !(el instanceof HTMLInputElement && el.type === 'password') && normalizeText(el.value).length > 0);
+    const formContext = getVisibleApexLoginFormContext(triggerEl?.closest?.('form') || document);
+    if (!formContext) return false;
 
     let prepared = false;
-    for (const input of [...userInputs, ...passwordInputs]) {
+    for (const input of [formContext.userInput, formContext.passwordInput].filter(Boolean)) {
+      if (!normalizeText(input.value).length) continue;
       prepared = dispatchAuthFieldLifecycle(input) || prepared;
     }
     return prepared;
@@ -251,6 +321,9 @@
   }
 
   function findApexAgreeButton() {
+    const loginForm = getVisibleApexLoginFormContext(document);
+    if (loginForm?.passwordInput && loginForm?.userInput) return null;
+
     const bodyText = lower(document.body?.innerText || '');
     const looksLikeTrustedDevicePage = /\b(i agree|trust|trusted|remember|recognize|recognized|this device|this browser)\b/.test(bodyText);
     const exact = document.querySelector('#okta-signin-submit');
@@ -280,20 +353,14 @@
   }
 
   function findApexCredentialSubmitButton() {
-    const passwordInputs = Array.from(document.querySelectorAll('input[type="password"]'))
-      .filter((el) => isVisible(el) && isEnabled(el));
-    if (!passwordInputs.length) return null;
+    const loginForm = getVisibleApexLoginFormContext(document);
+    if (!loginForm?.passwordInput || !loginForm?.userInput) return null;
 
-    const passwordInput = passwordInputs.find((el) => normalizeText(el.value).length > 0) || passwordInputs[0];
-    const form = passwordInput.closest('form') || document;
-
-    const userInputs = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
-      .filter((el) => isVisible(el) && isEnabled(el) && el !== passwordInput);
-    const hasFilledUser = userInputs.some((el) => normalizeText(el.value).length > 0);
-    const hasFilledPassword = normalizeText(passwordInput.value).length > 0;
+    const hasFilledUser = normalizeText(loginForm.userInput.value).length > 0;
+    const hasFilledPassword = normalizeText(loginForm.passwordInput.value).length > 0;
     if (!hasFilledPassword || !hasFilledUser) return null;
 
-    const buttons = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+    const buttons = Array.from(loginForm.form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
     return buttons.find((el) => {
       if (!isVisible(el) || !isEnabled(el)) return false;
       const label = lower([
@@ -324,7 +391,7 @@
 
   function canClickKind(kind) {
     if (state.clickedKinds.has(kind)) {
-      if (kind !== KIND.APEX_AGREE) return false;
+      if (kind !== KIND.APEX_AGREE && kind !== KIND.APEX_LOGIN_SUBMIT) return false;
       if (!findTarget(kind)) return false;
     }
     if ((now() - state.lastClickAt) < CFG.clickCooldownMs) return false;
@@ -346,15 +413,30 @@
       prepareApexAuthForm(el);
     }
 
+    let activated = false;
     try {
       dispatchPressSequence(el);
       el.click();
+      activated = true;
+    } catch {}
+
+    if (kind === KIND.APEX_LOGIN_SUBMIT) {
+      const form = el.closest?.('form');
+      if (form && typeof form.requestSubmit === 'function') {
+        try {
+          form.requestSubmit(el instanceof HTMLElement ? el : undefined);
+          activated = true;
+        } catch {}
+      }
+    }
+
+    if (activated) {
       log(`Clicked ${label}`);
       return true;
-    } catch (err) {
-      log(`Click failed for ${label}: ${err?.message || err}`);
-      return false;
     }
+
+    log(`Click failed for ${label}`);
+    return false;
   }
 
   function markClicked(kind) {

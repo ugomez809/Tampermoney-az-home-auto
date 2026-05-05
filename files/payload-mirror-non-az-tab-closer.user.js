@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.6
+// @version      1.1.7
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -29,7 +29,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.6';
+  const VERSION = '1.1.7';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -82,7 +82,8 @@
     closeAttempted: 'tm_pc_payload_mirror_close_attempted_v1',
     anchorRole: 'tm_anchor_role_v1',
     anchorToken: 'tm_anchor_token_v1',
-    authLastSubmitKey: 'tm_payload_mirror_auth_submit_key_v1'
+    authLastSubmitKey: 'tm_payload_mirror_auth_submit_key_v1',
+    authLastSubmitAt: 'tm_payload_mirror_auth_submit_at_v1'
   };
 
   const GWPC_KEYS = [
@@ -117,6 +118,7 @@
     authHoldTtlMs: 20000,
     authRecoveryTimeoutMs: 90000,
     authEmptyCredentialsMs: 10000,
+    authRetryMs: 1800,
     authBlockedAlertRepeatMs: 15000,
     anchorProbeMs: 4 * 60 * 1000,
     anchorRefreshMs: 8 * 60 * 1000,
@@ -1266,12 +1268,12 @@
 
   function getVisibleLoginFormContext() {
     const passwordInput = Array.from(document.querySelectorAll('input[type="password"]'))
-      .find((el) => visible(el));
+      .find((el) => visible(el) && !el.disabled);
     if (!passwordInput) return null;
 
     const form = passwordInput.closest('form') || document;
-    const userInput = Array.from(form.querySelectorAll('input[type="text"], input[type="email"], input[name], input[id]'))
-      .find((el) => visible(el) && el !== passwordInput) || null;
+    const userInput = getVisibleCredentialUserInputs(form)
+      .find((el) => el !== passwordInput) || null;
     const submitButton = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'))
       .find((el) => visible(el) && !el.disabled);
 
@@ -1297,17 +1299,91 @@
     }
   }
 
+  function getInputType(el) {
+    return lower(el?.getAttribute?.('type') || el?.type || '');
+  }
+
+  function isLikelyCredentialUserInput(el) {
+    if (!el || !visible(el) || el.disabled) return false;
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+    const type = getInputType(el);
+    if (!type || type === 'text' || type === 'email' || type === 'search' || type === 'tel') return true;
+    return false;
+  }
+
+  function getCredentialUserScore(el) {
+    if (!el) return Number.NEGATIVE_INFINITY;
+    const meta = lower([
+      el.getAttribute?.('autocomplete'),
+      el.getAttribute?.('name'),
+      el.getAttribute?.('id'),
+      el.getAttribute?.('placeholder'),
+      el.getAttribute?.('aria-label'),
+      el.labels?.[0]?.textContent,
+      el.closest?.('label')?.textContent
+    ].filter(Boolean).join(' '));
+    let score = 0;
+    if (/\busername\b/.test(meta)) score += 30;
+    if (/\bemail\b/.test(meta)) score += 20;
+    if (/\buser\b/.test(meta)) score += 10;
+    if (/\blogin\b/.test(meta)) score += 8;
+    if (lower(el.getAttribute?.('autocomplete') || '') === 'username') score += 25;
+    if (getInputType(el) === 'email') score += 5;
+    return score;
+  }
+
+  function getVisibleCredentialUserInputs(root) {
+    return Array.from((root || document).querySelectorAll('input, textarea'))
+      .filter((el) => isLikelyCredentialUserInput(el))
+      .sort((a, b) => getCredentialUserScore(b) - getCredentialUserScore(a));
+  }
+
+  function dispatchPressSequence(el) {
+    const mouseInit = {
+      view: window,
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    };
+
+    try {
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...mouseInit, pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 1 }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', { ...mouseInit, button: 0, buttons: 1 })); } catch {}
+    try {
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerup', { ...mouseInit, pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 0 }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { ...mouseInit, button: 0, buttons: 0 })); } catch {}
+  }
+
   function dispatchAuthFieldLifecycle(el) {
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const value = String(el.value || '');
     if (!value) return false;
 
     try { el.focus({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
+    try { setNativeInputValue(el, ''); } catch {}
+    try { el.setAttribute('value', ''); } catch {}
     setNativeInputValue(el, value);
-    try { el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true })); } catch {}
+    try { el.setAttribute('value', value); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || ' ' })); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value.slice(-1) || null, inputType: 'insertText' }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Tab' })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Tab' })); } catch {}
-    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true, cancelable: false })); } catch {}
+    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}
     return true;
   }
@@ -1345,6 +1421,8 @@
   }
 
   function findTrustedDeviceAgreeButton() {
+    const loginForm = getVisibleLoginFormContext();
+    if (loginForm?.passwordInput && loginForm?.userInput) return null;
     const buttons = Array.from(document.querySelectorAll('#okta-signin-submit, button, input[type="submit"], input[type="button"], [role="button"]'));
     return buttons.find((el) => visible(el) && isTrustedDeviceAgreeLabel(getElementLabel(el))) || null;
   }
@@ -1385,7 +1463,7 @@
     const lowerTitle = title.toLowerCase();
     const bodyText = lower(norm(document.body?.innerText || '').slice(0, 2000));
     const loginForm = getVisibleLoginFormContext();
-    const agreeButton = findTrustedDeviceAgreeButton();
+    const agreeButton = loginForm?.passwordInput && loginForm?.userInput ? null : findTrustedDeviceAgreeButton();
     const agreeVisible = !!agreeButton;
 
     if (isLexHost() || ((isOktaHost() || isEagentSamlHost()) && role === 'apex')) {
@@ -1395,14 +1473,14 @@
       let pageKind = hasLightningChrome ? 'lightning' : 'loading';
       let authMarker = '';
 
-      if (agreeVisible) {
-        sessionState = 'recovering';
-        pageKind = 'trusted-device';
-        authMarker = 'i-agree';
-      } else if (loginForm) {
+      if (loginForm?.passwordInput && loginForm?.userInput) {
         sessionState = 'login_required';
         pageKind = 'credential-form';
         authMarker = 'credential-form';
+      } else if (agreeVisible) {
+        sessionState = 'recovering';
+        pageKind = 'trusted-device';
+        authMarker = 'i-agree';
       } else if (/\/login|sign[\s-]?in|okta|saml|frontdoor/i.test(lowerHref) || /sign in|okta/i.test(lowerTitle)) {
         sessionState = 'login_required';
         pageKind = 'login';
@@ -1489,45 +1567,81 @@
     ].join('|');
   }
 
+  function canRetrySessionAuthAction(actionKey) {
+    const lastKey = readSession(SS_KEYS.authLastSubmitKey);
+    if (lastKey !== actionKey) return true;
+    const lastAt = Number(readSession(SS_KEYS.authLastSubmitAt) || 0);
+    return !lastAt || (Date.now() - lastAt) >= CFG.authRetryMs;
+  }
+
+  function markSessionAuthAction(actionKey) {
+    writeSession(SS_KEYS.authLastSubmitKey, actionKey);
+    writeSession(SS_KEYS.authLastSubmitAt, String(Date.now()));
+  }
+
+  function activateSubmitElement(el) {
+    if (!el || !(el instanceof Element)) return false;
+    let activated = false;
+
+    try { dispatchPressSequence(el); } catch {}
+    try {
+      el.click?.();
+      activated = true;
+    } catch {}
+    try {
+      el.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      }));
+      activated = true;
+    } catch {}
+
+    const form = el.closest?.('form');
+    if (form && typeof form.requestSubmit === 'function') {
+      try {
+        form.requestSubmit(el instanceof HTMLElement ? el : undefined);
+        activated = true;
+      } catch {}
+    }
+
+    return activated;
+  }
+
   function maybeAutoSubmitCurrentLogin(context) {
     if (!context || (context.kind !== 'lex' && context.kind !== 'gwpc')) return context;
     const loginForm = context.loginForm;
     const agreeButton = context.agreeButton;
     if (loginForm) prepareVisibleLoginForm(loginForm);
 
+    if (loginForm?.submitButton) {
+      const userValue = norm(loginForm.userInput?.value || '');
+      const passwordValue = norm(loginForm.passwordInput?.value || '');
+      if ((!userValue && loginForm.userInput) || !passwordValue) return context;
+
+      const actionKey = `login|${buildSessionContextKey(context)}|${userValue.length}|${passwordValue.length}`;
+      if (!canRetrySessionAuthAction(actionKey)) return context;
+
+      if (activateSubmitElement(loginForm.submitButton)) {
+        markSessionAuthAction(actionKey);
+        context.sessionState = 'recovering';
+        context.authMarker = 'autofill-submit';
+      }
+      return context;
+    }
+
     if (agreeButton && visible(agreeButton)) {
       const actionKey = `agree|${buildSessionContextKey(context)}`;
-      if (readSession(SS_KEYS.authLastSubmitKey) !== actionKey) {
-        try { agreeButton.click?.(); } catch {}
-        try { agreeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window })); } catch {}
-        writeSession(SS_KEYS.authLastSubmitKey, actionKey);
+      if (!canRetrySessionAuthAction(actionKey)) return context;
+      if (activateSubmitElement(agreeButton)) {
+        markSessionAuthAction(actionKey);
         context.sessionState = 'recovering';
         context.authMarker = 'i-agree-submit';
       }
       return context;
     }
 
-    if (!loginForm?.submitButton) return context;
-
-    const userValue = norm(loginForm.userInput?.value || '');
-    const passwordValue = norm(loginForm.passwordInput?.value || '');
-    if ((!userValue && loginForm.userInput) || !passwordValue) return context;
-
-    const actionKey = `login|${buildSessionContextKey(context)}|${userValue.length}|${passwordValue.length}`;
-    if (readSession(SS_KEYS.authLastSubmitKey) === actionKey) return context;
-
-    try { loginForm.submitButton.click?.(); } catch {}
-    try {
-      loginForm.submitButton.dispatchEvent(new MouseEvent('click', {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window
-      }));
-    } catch {}
-    writeSession(SS_KEYS.authLastSubmitKey, actionKey);
-    context.sessionState = 'recovering';
-    context.authMarker = 'autofill-submit';
     return context;
   }
 
