@@ -33,10 +33,10 @@ point inside the active Farmers sign-in browser window.
 
 ## Hotkeys
 
-- `F7`: bind the page click point from your next click
-- `F8`: click the saved point now
-- `F9`: pause or resume
-- `Ctrl+Alt+F7/F8/F9`: fallback versions if the plain function keys conflict
+- `F11`: bind the page click point from your next click
+- `F12`: click the saved point now
+- `Pause`: pause or resume
+- `Ctrl+Alt+F11/F12/Pause`: fallback versions if the plain keys conflict
 
 ## Notes
 

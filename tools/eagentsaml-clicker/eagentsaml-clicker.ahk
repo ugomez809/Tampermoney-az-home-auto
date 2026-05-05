@@ -12,25 +12,25 @@ global State := Map(
 )
 
 InitializeTray()
-ShowStatus("Running | F7 bind click point | F8 click now | F9 pause")
+ShowStatus("Running | F11 bind click point | F12 click now | Pause pause")
 SetTimer Tick, Config["PollMs"]
 
-F7:: {
+F11:: {
   BeginBindClickPoint()
 }
-F8:: {
+F12:: {
   ClickNowHotkey()
 }
-F9:: {
+Pause:: {
   TogglePauseHotkey()
 }
-^!F7:: {
+^!F11:: {
   BeginBindClickPoint()
 }
-^!F8:: {
+^!F12:: {
   ClickNowHotkey()
 }
-^!F9:: {
+^!Pause:: {
   TogglePauseHotkey()
 }
 
@@ -135,9 +135,9 @@ ReadIniBool(section, key, defaultValue) {
 
 InitializeTray() {
   A_TrayMenu.Delete()
-  A_TrayMenu.Add("Bind Click Point`tF7", BeginBindClickPoint)
-  A_TrayMenu.Add("Click Now`tF8", ClickNowHotkey)
-  A_TrayMenu.Add("Pause / Resume`tF9", TogglePauseHotkey)
+  A_TrayMenu.Add("Bind Click Point`tF11", BeginBindClickPoint)
+  A_TrayMenu.Add("Click Now`tF12", ClickNowHotkey)
+  A_TrayMenu.Add("Pause / Resume`tPause", TogglePauseHotkey)
   A_TrayMenu.Add()
   A_TrayMenu.Add("Exit", ExitAppMenu)
   A_IconTip := "Farmers SAML Clicker"
