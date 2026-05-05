@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.7
+// @version      1.0.9
 // @description  Clicks #okta-signin-submit on the eAgent SAML login page every 10 seconds while running.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.9';
   const TARGET_SELECTOR = '#okta-signin-submit';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
@@ -28,6 +28,7 @@
 
   const CFG = {
     tickMs: 10000,
+    userGestureCooldownMs: 1200,
     panelWidth: 340,
     zIndex: 2147483647,
     maxLogLines: 16
@@ -41,7 +42,9 @@
     toggleBtn: null,
     logEl: null,
     tickTimer: null,
-    logs: []
+    logs: [],
+    gestureHandler: null,
+    lastGestureSubmitAt: 0
   };
 
   boot();
@@ -54,6 +57,7 @@
     log(`Watching ${TARGET_SELECTOR}`);
     window.setTimeout(tick, 1000);
     state.tickTimer = window.setInterval(tick, CFG.tickMs);
+    installGestureBridge();
     window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__ = cleanup;
   }
 
@@ -61,6 +65,9 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    try {
+      if (state.gestureHandler) document.removeEventListener('pointerdown', state.gestureHandler, true);
+    } catch {}
     try { state.panel?.remove(); } catch {}
     try { delete window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__; } catch {}
   }
@@ -162,6 +169,85 @@
       .replace(/'/g, '&#39;');
   }
 
+  function norm(value) {
+    return String(value == null ? '' : value).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function lower(value) {
+    return norm(value).toLowerCase();
+  }
+
+  function visible(el) {
+    if (!el || !(el instanceof Element)) return false;
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function enabled(el) {
+    if (!el || !(el instanceof Element)) return false;
+    return !(el.disabled || el.getAttribute('disabled') !== null || el.getAttribute('aria-disabled') === 'true');
+  }
+
+  function getInputType(el) {
+    return lower(el?.getAttribute?.('type') || el?.type || '');
+  }
+
+  function getInputCurrentValue(el) {
+    if (!el) return '';
+    const propValue = norm(el.value || '');
+    if (propValue) return propValue;
+    const attrValue = norm(el.getAttribute?.('value') || '');
+    if (attrValue) return attrValue;
+    return '';
+  }
+
+  function isLikelyCredentialUserInput(el) {
+    if (!el || !visible(el) || !enabled(el)) return false;
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+    const type = getInputType(el);
+    return !type || type === 'text' || type === 'email' || type === 'search' || type === 'tel';
+  }
+
+  function getCredentialUserScore(el) {
+    if (!el) return Number.NEGATIVE_INFINITY;
+    const meta = lower([
+      el.getAttribute?.('autocomplete'),
+      el.getAttribute?.('name'),
+      el.getAttribute?.('id'),
+      el.getAttribute?.('placeholder'),
+      el.getAttribute?.('aria-label'),
+      el.labels?.[0]?.textContent,
+      el.closest?.('label')?.textContent
+    ].filter(Boolean).join(' '));
+    let score = 0;
+    if (/\busername\b/.test(meta)) score += 30;
+    if (/\bemail\b/.test(meta)) score += 20;
+    if (/\buser\b/.test(meta)) score += 10;
+    if (/\blogin\b/.test(meta)) score += 8;
+    if (lower(el.getAttribute?.('autocomplete') || '') === 'username') score += 25;
+    if (getInputType(el) === 'email') score += 5;
+    return score;
+  }
+
+  function getVisibleCredentialUserInput(root, passwordInput) {
+    return Array.from((root || document).querySelectorAll('input, textarea'))
+      .filter((el) => el !== passwordInput)
+      .filter((el) => isLikelyCredentialUserInput(el))
+      .sort((a, b) => getCredentialUserScore(b) - getCredentialUserScore(a))[0] || null;
+  }
+
+  function getVisiblePasswordInput(root) {
+    return Array.from((root || document).querySelectorAll('input[type="password"]'))
+      .find((el) => visible(el) && enabled(el)) || null;
+  }
+
   function readPanelPos() {
     try {
       const parsed = JSON.parse(localStorage.getItem(LS_KEYS.panelPos) || 'null');
@@ -230,6 +316,28 @@
     }, true);
   }
 
+  function installGestureBridge() {
+    const onPointerDown = (event) => {
+      if (state.destroyed || !state.running) return;
+      const now = Date.now();
+      if ((now - state.lastGestureSubmitAt) < CFG.userGestureCooldownMs) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest?.(`#tm-eagentsaml-selector-clicker-toggle`)) return;
+      if (target?.closest?.(`[${UI_ATTR}="1"]`) && target?.closest?.('button')) return;
+
+      const btn = document.querySelector(TARGET_SELECTOR);
+      if (!btn) return;
+
+      state.lastGestureSubmitAt = now;
+      setStatus('User click detected; trying login');
+      log('User gesture detected; trying login click');
+      clickButton('gesture');
+    };
+
+    state.gestureHandler = onPointerDown;
+    document.addEventListener('pointerdown', onPointerDown, true);
+  }
+
   function clickButton(source) {
     let btn = null;
     try {
@@ -245,16 +353,14 @@
 
     if (source === 'auto') {
       const form = btn.closest('form');
-      const passwordInput = form?.querySelector?.('input[type="password"]') || null;
-      const userInput = form
-        ? Array.from(form.querySelectorAll('input, textarea')).find((el) => el !== passwordInput && !el.disabled)
-        : null;
+      const passwordInput = getVisiblePasswordInput(form || document);
+      const userInput = getVisibleCredentialUserInput(form || document, passwordInput);
 
-      const userValue = String(userInput?.value || '').trim();
-      const passValue = String(passwordInput?.value || '');
+      const userValue = getInputCurrentValue(userInput);
+      const passValue = getInputCurrentValue(passwordInput);
       if (!userValue || !passValue) {
         setStatus('Waiting for filled login fields');
-        log('Skipping auto submit: login fields still empty');
+        log(`Skipping auto submit: login fields still empty | user=${userValue ? 'filled' : 'empty'}${userInput ? ` (${userInput.name || userInput.id || userInput.type || userInput.tagName})` : ' (missing)'} | pass=${passValue ? 'filled' : 'empty'}${passwordInput ? ` (${passwordInput.name || passwordInput.id || passwordInput.type || passwordInput.tagName})` : ' (missing)'}`);
         return false;
       }
 
@@ -283,8 +389,8 @@
 
     try {
       btn.click?.();
-      setStatus(source === 'manual' ? 'Manual click sent' : 'Auto click sent');
-      log(`Clicked ${TARGET_SELECTOR}${source === 'manual' ? ' (manual)' : ''}`);
+      setStatus(source === 'manual' ? 'Manual click sent' : source === 'gesture' ? 'Gesture click sent' : 'Auto click sent');
+      log(`Clicked ${TARGET_SELECTOR}${source === 'manual' ? ' (manual)' : source === 'gesture' ? ' (gesture)' : ''}`);
       return true;
     } catch (error) {
       setStatus('Click failed');
