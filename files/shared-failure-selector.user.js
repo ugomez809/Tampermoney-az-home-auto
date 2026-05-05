@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.4
+// @version      1.0.5
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -26,7 +26,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -72,6 +72,7 @@
     lastLogClearAt: '',
     lastSyncAt: 0,
     syncBusy: false,
+    bootSyncPending: false,
     lastMatchLogKey: ''
   };
 
@@ -93,7 +94,8 @@
     buildPanel();
     readLocalRules();
     log(`Loaded v${VERSION}`);
-    setStatus(hostLabel());
+    state.bootSyncPending = true;
+    setStatus('Waiting for shared rules sync...');
     syncSharedRules('boot').catch((err) => log(`Shared sync failed: ${err?.message || err}`));
 
     state.scanTimer = setInterval(scanRules, CFG.scanMs);
@@ -409,10 +411,15 @@
       const rules = Array.isArray(response.rules) ? response.rules.map(normalizeRule).filter(Boolean) : [];
       writeLocalRules(rules.filter((rule) => rule.enabled !== false));
       state.lastSyncAt = Date.now();
+      const releaseBootGate = state.bootSyncPending;
+      state.bootSyncPending = false;
       log(`Shared rules sync complete | ${state.rules.length} rule(s)${reason ? ` | ${reason}` : ''}`);
+      if (releaseBootGate && !state.destroyed) {
+        setTimeout(() => scanRules(), 0);
+      }
     } finally {
       state.syncBusy = false;
-      setStatus(`${hostLabel()} | ${state.rules.length} rule(s)`);
+      setStatus(state.bootSyncPending ? 'Waiting for shared rules sync...' : `${hostLabel()} | ${state.rules.length} rule(s)`);
     }
   }
 
@@ -963,7 +970,7 @@
   }
 
   function scanRules() {
-    if (state.destroyed || state.selectorMode || state.syncBusy) return;
+    if (state.destroyed || state.selectorMode || state.syncBusy || state.bootSyncPending) return;
     if (!state.rules.length) return;
 
     const kind = hostKind();
