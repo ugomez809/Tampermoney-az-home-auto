@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.1
+// @version      1.0.3
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -26,7 +26,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.3';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -450,11 +450,25 @@
     next.push(normalized);
     writeLocalRules(next);
     log(`Saved shared selector rule | ${normalized.ruleId} | ${normalized.savedErrorText}`);
+    return normalized;
   }
 
   function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
     return String(value).replace(/([ #;?%&,.+*~':"!^$[\]()=>|\/@])/g, '\\$1');
+  }
+
+  function looksGeneratedId(value) {
+    const id = norm(value || '');
+    if (!id) return false;
+    if (/^dialog-(?:body|title)-id-\d+(?:-\d+)+$/i.test(id)) return true;
+    if (/^[a-z][a-z0-9]*(?:-[a-z0-9]+)+-\d+(?:-\d+)+$/i.test(id)) return true;
+    return false;
+  }
+
+  function hasStableId(el) {
+    const id = norm(el?.id || '');
+    return !!id && !looksGeneratedId(id);
   }
 
   function stableClassTokens(el) {
@@ -464,9 +478,41 @@
       .slice(0, 4);
   }
 
+  function scoreRuleTarget(el) {
+    if (!(el instanceof Element) || !visible(el) || isUi(el)) return Number.NEGATIVE_INFINITY;
+    const text = norm(el.innerText || el.textContent || '');
+    let score = 0;
+    if (/insert failed|cannot_execute_flow_trigger|too many soql queries|error id:|exception/i.test(text)) score += 40;
+    if (el.matches('li, [role="alert"], .slds-popover__body, .slds-notify, .slds-form-element__help')) score += 15;
+    if (stableClassTokens(el).length) score += 5;
+    if (hasStableId(el)) score += 6;
+    if (looksGeneratedId(el.id)) score -= 8;
+    if (text.length >= 40) score += Math.min(18, Math.floor(text.length / 40));
+    if (text.length > 900) score -= 8;
+    return score;
+  }
+
+  function chooseRuleTarget(el) {
+    if (!(el instanceof Element)) return el;
+    let best = el;
+    let bestScore = scoreRuleTarget(el);
+    let cur = el.parentElement;
+    let depth = 0;
+    while (cur && cur !== document.body && cur !== document.documentElement && depth < 6) {
+      const score = scoreRuleTarget(cur);
+      if (score > bestScore) {
+        best = cur;
+        bestScore = score;
+      }
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    return best;
+  }
+
   function buildSelector(el) {
     if (!(el instanceof Element)) return '';
-    if (el.id) return `#${cssEscape(el.id)}`;
+    if (hasStableId(el)) return `#${cssEscape(el.id)}`;
 
     const name = norm(el.getAttribute('name') || '');
     if (name) {
@@ -485,7 +531,7 @@
     let cur = el;
     while (cur && cur instanceof Element && cur !== document.body && cur !== document.documentElement && parts.length < 6) {
       let part = cur.tagName.toLowerCase();
-      if (cur.id) {
+      if (hasStableId(cur)) {
         part += `#${cssEscape(cur.id)}`;
         parts.unshift(part);
         break;
@@ -521,7 +567,21 @@
     return !!(el instanceof Element && el.closest(`[${UI_ATTR}="1"]`));
   }
 
-  function selectableAt(clientX, clientY) {
+  function selectableFromEvent(event) {
+    const path = typeof event?.composedPath === 'function' ? event.composedPath() : [];
+    for (const node of path) {
+      if (!(node instanceof Element)) continue;
+      if (isUi(node)) return null;
+      if (!visible(node)) continue;
+      if (node === document.body || node === document.documentElement) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function selectableAt(clientX, clientY, event = null) {
+    const direct = selectableFromEvent(event);
+    if (direct) return direct;
     const stack = typeof document.elementsFromPoint === 'function' ? document.elementsFromPoint(clientX, clientY) : [];
     for (const node of stack) {
       if (!(node instanceof Element)) continue;
@@ -573,7 +633,7 @@
     setStatus('Click an error element...');
     log('Selector mode started');
 
-    const onMove = (event) => updateHover(selectableAt(event.clientX, event.clientY));
+    const onMove = (event) => updateHover(selectableAt(event.clientX, event.clientY, event));
     const onClick = (event) => {
       if (!state.selectorMode) return;
       if (isUi(event.target)) {
@@ -581,7 +641,7 @@
         event.stopPropagation();
         return;
       }
-      const target = selectableAt(event.clientX, event.clientY);
+      const target = selectableAt(event.clientX, event.clientY, event);
       if (!target) return;
       event.preventDefault();
       event.stopPropagation();
@@ -616,14 +676,15 @@
 
   async function saveRuleFromElement(el) {
     stopSelectorMode('', { logIt: false });
-    const selector = buildSelector(el);
-    const fingerprint = buildFingerprint(el);
+    const target = chooseRuleTarget(el);
+    const selector = buildSelector(target);
+    const fingerprint = buildFingerprint(target);
     if (!selector) {
       log('Could not build selector for clicked element');
       return;
     }
 
-    const defaultReason = norm(el.innerText || el.textContent || '');
+    const defaultReason = norm(target.innerText || target.textContent || '');
     const reason = norm(window.prompt('What should be written in the failed note when this selector is visible?', defaultReason));
     if (!reason) {
       log('Selector save canceled: no note message');
@@ -641,7 +702,18 @@
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
-    await upsertSharedRule(rule);
+    const savedRule = await upsertSharedRule(rule);
+    suppressCurrentLexMatch(savedRule);
+  }
+
+  function suppressCurrentLexMatch(rule) {
+    if (hostKind() !== 'lex') return;
+    const ruleId = norm(rule?.ruleId || '');
+    const azId = readCurrentAzId();
+    if (!ruleId || !azId) return;
+    const sentKey = `lex|${azId}|${ruleId}`;
+    markSent(sentKey);
+    log(`Saved selector for LEX without auto-triggering current AZ | ${azId} | ${ruleId}`);
   }
 
   function getAllRoots(root = document) {
@@ -905,10 +977,15 @@
       if (kind === 'lex') {
         if (azId && publishMissingPayloadTrigger(azId, rule.savedErrorText, rule)) {
           markSent(sentKey);
+          tryCloseCurrentTab();
+          return;
         } else {
-          log(`LEX selector matched but no AZ ID was available | ${rule.ruleId}`);
+          const logKey = `lex-no-az|${rule.ruleId}`;
+          if (state.lastMatchLogKey !== logKey) {
+            state.lastMatchLogKey = logKey;
+            log(`LEX selector matched but no AZ ID was available | ${rule.ruleId}`);
+          }
         }
-        tryCloseCurrentTab();
         return;
       }
 
