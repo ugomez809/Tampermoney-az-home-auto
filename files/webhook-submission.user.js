@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.18
-// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, clears stale failure-only run-state on boot, only fast-tracks on a fresh timeout/selector send signal, auto-rearms on AZ changes, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
+// @version      1.18.19
+// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, clears stale failure-only run-state on boot, only fast-tracks on a fresh real timeout signal, auto-rearms on AZ changes, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.18';
+  const VERSION = '1.18.19';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -61,6 +61,7 @@
     quoteVisibleDelayMs: 5000,
     requestTimeoutMs: 45000,
     forceSendMaxAgeMs: 10 * 60 * 1000,
+    automaticFailureMinRunAgeMs: 2 * 60 * 1000,
     maxSendAttempts: 3,
     maxLogLines: 140,
     panelWidth: 430,
@@ -90,6 +91,7 @@
     drag: null,
     fatalOverlay: null,
     currentAzId: '',
+    currentAzStartedAt: 0,
     savedWebhookUrl: '',
     savedAgencyName: '',
     lastWaitKey: '',
@@ -714,6 +716,29 @@
     return Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events : [];
   }
 
+  function getLatestTimeoutEvent(bundle) {
+    const events = getTimeoutEvents(bundle);
+    return events.length ? events[events.length - 1] : null;
+  }
+
+  function isFailureOnlyBundle(bundle) {
+    return !!(!hasMeaningfulHome(bundle) && (hasHomeError(bundle) || hasPendingTimeout(bundle)));
+  }
+
+  function getCurrentRunAgeMs() {
+    if (!state.currentAzStartedAt) return 0;
+    return Math.max(0, Date.now() - state.currentAzStartedAt);
+  }
+
+  function getAutomaticFailureHoldMs(bundle) {
+    if (!isFailureOnlyBundle(bundle)) return 0;
+    return Math.max(0, CFG.automaticFailureMinRunAgeMs - getCurrentRunAgeMs());
+  }
+
+  function formatWholeSeconds(ms) {
+    return `${Math.max(1, Math.ceil(ms / 1000))}s`;
+  }
+
   function extractBundleIdentity(bundle) {
     const timeoutEvents = getTimeoutEvents(bundle);
     const latestTimeoutEvent = timeoutEvents.length
@@ -1244,6 +1269,13 @@
     try { localStorage.removeItem(GLOBAL_PAUSE_KEY); } catch {}
   }
 
+  function clearFailureOnlyPayloadState() {
+    try { localStorage.removeItem(BUNDLE_KEY); } catch {}
+    try { localStorage.removeItem(MISSING_PAYLOAD_TRIGGER_KEY); } catch {}
+    try { GM_setValue(MISSING_PAYLOAD_TRIGGER_KEY, null); } catch {}
+    clearForceSendRequest();
+  }
+
   function clearStaleSharedPause() {
     if (hasForceSendRequest()) return;
     try {
@@ -1261,10 +1293,8 @@
 
     if (!failureOnlyBundle) return;
 
-    try { localStorage.removeItem(BUNDLE_KEY); } catch {}
+    clearFailureOnlyPayloadState();
     try { localStorage.removeItem(HOME_KEY); } catch {}
-    try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
-    try { localStorage.removeItem(GLOBAL_PAUSE_KEY); } catch {}
     try { localStorage.removeItem(CFG.sentMetaKey); } catch {}
     try { localStorage.removeItem(WEBHOOK_FATAL_HOLD_KEY); } catch {}
     log('Cleared stale failure-only webhook state on page load');
@@ -1276,6 +1306,7 @@
 
     const prevAzId = state.currentAzId;
     state.currentAzId = nextAzId;
+    state.currentAzStartedAt = Date.now();
 
     clearWaitLog();
     state.quoteSeenAt = 0;
@@ -1488,9 +1519,16 @@
     sessionStorage.setItem(CFG.stoppedKey, '1');
     clearForceSendRequest();
     renderButtons();
-    log('Stored payloads retained after send');
-    writeActivityState('done', 'Sent | Payload retained | Stopped');
-    setStatus('Sent | Payload retained | Stopped');
+    if (isFailureOnlyBundle(bundle)) {
+      clearFailureOnlyPayloadState();
+      log('Failure-only payload cleared after send');
+      writeActivityState('done', 'Sent | Failure cleared | Stopped');
+      setStatus('Sent | Failure cleared | Stopped');
+    } else {
+      log('Stored payloads retained after send');
+      writeActivityState('done', 'Sent | Payload retained | Stopped');
+      setStatus('Sent | Payload retained | Stopped');
+    }
   }
 
   async function sendTestWebhook() {
@@ -1587,13 +1625,62 @@
     }) || null;
   }
 
-  function isForceSendBundleReady(request, bundle, directFailureTrigger = false) {
-    if (directFailureTrigger) return true;
-    if (!request) return false;
-    if (isManualForceSendRequest(request)) {
-      return !!(hasMeaningfulHome(bundle) || hasPendingTimeout(bundle));
+  function getFailureSignalReadiness(bundle, request, matchedEvent) {
+    const triggerType = normalizeText(request?.triggerType || matchedEvent?.triggerType || getLatestTimeoutEvent(bundle)?.triggerType || '').toLowerCase();
+    if (triggerType === 'selector') {
+      return {
+        ok: false,
+        status: 'Selector signal ignored',
+        waitKey: 'wait-force-selector-ignored',
+        message: 'Selector failure signal ignored by sender; waiting for Home completion or real timeout'
+      };
     }
-    return !!findMatchingForceSendEvent(bundle, request);
+
+    const holdMs = getAutomaticFailureHoldMs(bundle);
+    if (holdMs > 0) {
+      return {
+        ok: false,
+        status: 'Waiting for real timeout window',
+        waitKey: 'wait-force-age',
+        message: `Failure signal held for ${formatWholeSeconds(holdMs)}; waiting for Home completion or real timeout`
+      };
+    }
+
+    return { ok: true };
+  }
+
+  function getForceSendReadiness(request, bundle, directFailureTrigger = false) {
+    if (isManualForceSendRequest(request)) {
+      return (hasMeaningfulHome(bundle) || hasPendingTimeout(bundle))
+        ? { ok: true }
+        : {
+            ok: false,
+            status: 'Force send waiting for gathered data',
+            waitKey: 'wait-force-manual',
+            message: 'Force send waiting for gathered data'
+          };
+    }
+    if (directFailureTrigger) return getFailureSignalReadiness(bundle, request, null);
+    if (!request) {
+      return {
+        ok: false,
+        status: 'Waiting for timeout signal',
+        waitKey: 'wait-force-request',
+        message: 'Waiting for fresh timeout signal or final Home handoff'
+      };
+    }
+
+    const matchedEvent = findMatchingForceSendEvent(bundle, request);
+    if (!matchedEvent) {
+      return {
+        ok: false,
+        status: 'Waiting for matching timeout signal',
+        waitKey: 'wait-force-timeout',
+        message: 'Waiting for matching real timeout signal'
+      };
+    }
+
+    return getFailureSignalReadiness(bundle, request, matchedEvent);
   }
 
   async function sendBundle(force = false) {
@@ -1643,9 +1730,11 @@
     clearWaitLog();
 
     const signature = buildSignatureJobBundle(job, bundle);
-    if (!force && isSameBundleAlreadySent(job, bundle)) {
+    const activeForceRequest = force ? getActiveForceSendRequest(job['AZ ID'] || '') : null;
+    if (isSameBundleAlreadySent(job, bundle) && !(force && isManualForceSendRequest(activeForceRequest))) {
       setStatus('Already sent');
       log('Same bundle already sent');
+      if (force) clearForceSendRequest();
       return;
     }
 
@@ -1786,15 +1875,11 @@
     }
 
     if (forceSend) {
-      if (!isForceSendBundleReady(forceSendRequest, bundle, directFailureTrigger)) {
+      const forceReady = getForceSendReadiness(forceSendRequest, bundle, directFailureTrigger);
+      if (!forceReady.ok) {
         state.quoteSeenAt = 0;
-        if (isManualForceSendRequest(forceSendRequest)) {
-          setStatus('Force send waiting for gathered data');
-          logWait('wait-force-manual', 'Force send waiting for gathered data');
-        } else {
-          setStatus('Waiting for matching timeout signal');
-          logWait('wait-force-timeout', 'Waiting for matching timeout / selector failure signal');
-        }
+        setStatus(forceReady.status || 'Waiting for timeout signal');
+        logWait(forceReady.waitKey || 'wait-force-timeout', forceReady.message || 'Waiting for fresh timeout signal or final Home handoff');
         return;
       }
       setStatus('Force send ready');
@@ -1803,6 +1888,13 @@
     }
 
     if (directFailureTrigger) {
+      const directReady = getForceSendReadiness(null, bundle, true);
+      if (!directReady.ok) {
+        state.quoteSeenAt = 0;
+        setStatus(directReady.status || 'Waiting for timeout signal');
+        logWait(directReady.waitKey || 'wait-direct-failure', directReady.message || 'Waiting for fresh timeout signal or final Home handoff');
+        return;
+      }
       setStatus('Direct failure ready');
       sendBundle(false);
       return;
