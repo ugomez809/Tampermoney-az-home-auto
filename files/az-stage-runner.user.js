@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.38
+// @version      2.5.39
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.38';
+  const VERSION = '2.5.39';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -484,18 +484,23 @@
     return signalMs >= (pauseMs - 1000);
   }
 
+  function getActiveMissingPayloadTriggerForTicket(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    const trigger = readSharedJson(KEYS.MISSING_PAYLOAD_TRIGGER, null);
+    if (!trigger || trigger.ready !== true) return null;
+    const triggerId = norm(trigger.ticketId || trigger.azId || '');
+    if (!triggerId) return null;
+    if (wantedId && triggerId !== wantedId) return null;
+
+    const requestedAtMs = Date.parse(norm(trigger.requestedAt || ''));
+    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) return null;
+    return trigger;
+  }
+
   function hasActiveMissingPayloadTriggerForPause(pause) {
     const ticketId = norm(pause?.ticketId || '');
     if (!ticketId) return false;
-
-    const trigger = readSharedJson(KEYS.MISSING_PAYLOAD_TRIGGER, null);
-    if (!trigger || trigger.ready !== true) return false;
-    const triggerId = norm(trigger.ticketId || trigger.azId || '');
-    if (triggerId !== ticketId) return false;
-
-    const requestedAtMs = Date.parse(norm(trigger.requestedAt || ''));
-    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) return false;
-    return true;
+    return !!getActiveMissingPayloadTriggerForTicket(ticketId);
   }
 
   function hasCompletedMissingPayloadHandoff(pause) {
@@ -2021,6 +2026,7 @@
     let drawerHiddenLogged = false;
     let finalPayloadReadyLogged = false;
     let mismatchFallbackSent = false;
+    let directFailureHandoffStarted = false;
     let waitStartedAt = Date.now();
     const maxWaitMs = Math.max(0, Number(options.maxWaitMs || 0));
     const timeoutLabel = norm(options.timeoutLabel || 'finisher');
@@ -2048,6 +2054,30 @@
       if (consumeFinisherWakeTrigger(ticketId)) {
         return true;
       }
+
+      const directMissingPayloadTrigger = getActiveMissingPayloadTriggerForTicket(ticketId);
+      if (directMissingPayloadTrigger) {
+        const reason = norm(directMissingPayloadTrigger.reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED';
+        if (!directFailureHandoffStarted) {
+          directFailureHandoffStarted = true;
+          log(`Direct missing payload trigger received while waiting for finisher | ${ticketId} | ${reason}`, 'warn');
+        }
+
+        if (options.card instanceof Element && (!isTicketDrawerOpen() || String(getOpenTicketInfo().ticketId || '') !== String(ticketId))) {
+          const reopened = await openCard(options.card, ticketId);
+          log(reopened ? `Reopened ticket for direct failed path | ${ticketId}` : `Could not reopen ticket for direct failed path | ${ticketId}`, reopened ? 'ok' : 'error');
+        }
+
+        clearFinisherCloseSignal();
+        const handoffPause = setMissingPayloadHandoffPause(ticketId, reason);
+        setStatus('DIRECT FAIL HANDOFF ACTIVE');
+        clearDockHighlight();
+        log(`Launcher handed direct failed path to finisher | ${ticketId}`, 'warn');
+        startMissingPayloadHandoffMonitor(handoffPause);
+        stopRun('Missing payload handed to finisher', { manual: true });
+        return false;
+      }
+
       if (!finalPayloadReadyLogged && consumeFinalPayloadReady(ticketId, waitStartedAt)) {
         finalPayloadReadyLogged = true;
         log(`Final Home payload ready for AZ ${ticketId}; waiting for finisher to fill fields/tag/close`, 'ok');
