@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         97 AUTO Cross-Origin AZ + APEX Single Click Helper
 // @namespace    autoflow.az-apex-single-click-helper
-// @version      1.0.0.2
-// @description  Clicks the first visible AgencyZoom login control or APEX I AGREE button once per page load, and only advances to a second control after the first one disappears.
+// @version      1.0.0.3
+// @description  Clicks the first visible AgencyZoom login control or APEX I AGREE button once per page load, using a robust click sequence for the AZ modal trigger and only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = '97 AUTO Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.0.2';
+  const VERSION = '1.0.0.3';
 
   const CFG = {
     scanMs: 400,
@@ -31,6 +31,12 @@
     APEX_AGREE: 'apex-agree',
     AZ_LOGIN_LINK: 'az-login-link',
     AZ_LOGIN_BUTTON: 'az-login-button'
+  };
+
+  const TIE_BREAK_RANK = {
+    [KIND.AZ_LOGIN_BUTTON]: 0,
+    [KIND.AZ_LOGIN_LINK]: 1,
+    [KIND.APEX_AGREE]: 2
   };
 
   const state = {
@@ -147,10 +153,32 @@
   }
 
   function findAgencyZoomLoginButton() {
-    const buttons = Array.from(document.querySelectorAll('button.action-login.btn.btn-primary[type="submit"]'));
+    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
     return buttons.find((el) => {
       if (!isVisible(el) || !isEnabled(el)) return false;
-      return lower(el.textContent) === 'login' && normalizeText(el.getAttribute('data-target')) === '#confirmEmail';
+
+      const label = lower([
+        el.textContent,
+        el.value,
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('name')
+      ].filter(Boolean).join(' '));
+      const className = lower(el.className);
+      const dataTarget = lower(el.getAttribute('data-target'));
+      const dataToggle = lower(el.getAttribute('data-toggle'));
+      const type = lower(el.getAttribute('type') || el.type || '');
+
+      const exactAgencyZoomModalButton = dataTarget === '#confirmemail' && label === 'login';
+      const likelyAgencyZoomLoginButton =
+        /\blogin\b/.test(label) &&
+        (
+          className.includes('action-login') ||
+          dataTarget === '#confirmemail' ||
+          (type === 'submit' && dataToggle === 'modal')
+        );
+
+      return exactAgencyZoomModalButton || likelyAgencyZoomLoginButton;
     }) || null;
   }
 
@@ -189,8 +217,10 @@
     if (!el || !isVisible(el) || !isEnabled(el)) return false;
 
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus({ preventScroll: true }); } catch {}
 
     try {
+      dispatchPressSequence(el);
       el.click();
       log(`Clicked ${label}`);
       return true;
@@ -204,6 +234,28 @@
     state.clickedKinds.add(kind);
     state.lastClickedKind = kind;
     state.lastClickAt = now();
+  }
+
+  function dispatchPressSequence(el) {
+    const mouseInit = {
+      view: window,
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    };
+
+    try {
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...mouseInit, pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 1 }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', { ...mouseInit, button: 0, buttons: 1 })); } catch {}
+    try {
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerup', { ...mouseInit, pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 0 }));
+      }
+    } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { ...mouseInit, button: 0, buttons: 0 })); } catch {}
   }
 
   function getSteps() {
@@ -226,7 +278,8 @@
       return steps.sort((a, b) => {
         const aSeenAt = a.el ? (state.firstSeenAt[a.kind] || 0) : Number.POSITIVE_INFINITY;
         const bSeenAt = b.el ? (state.firstSeenAt[b.kind] || 0) : Number.POSITIVE_INFINITY;
-        return aSeenAt - bSeenAt;
+        if (aSeenAt !== bSeenAt) return aSeenAt - bSeenAt;
+        return (TIE_BREAK_RANK[a.kind] || 0) - (TIE_BREAK_RANK[b.kind] || 0);
       });
     }
 
