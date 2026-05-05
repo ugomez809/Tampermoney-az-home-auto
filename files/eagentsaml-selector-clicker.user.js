@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.1
+// @version      1.0.2
 // @description  Lets you pick one selector on the eAgent SAML login page and clicks it once every 10 seconds whenever it is visible.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
@@ -51,7 +51,9 @@
     logs: [],
     lastClickAt: 0,
     lastSelectorMissLogKey: '',
-    lastClickedSelectorKey: ''
+    lastClickedSelectorKey: '',
+    armedVisibleKey: '',
+    lastArmLogKey: ''
   };
 
   boot();
@@ -78,6 +80,8 @@
 
   function saveEnabled(on) {
     state.running = !!on;
+    state.armedVisibleKey = '';
+    state.lastArmLogKey = '';
     renderAll();
   }
 
@@ -91,6 +95,8 @@
 
   function saveSelector(selector) {
     state.selector = norm(selector || '');
+    state.armedVisibleKey = '';
+    state.lastArmLogKey = '';
     try {
       if (state.selector) localStorage.setItem(LS_KEYS.selector, state.selector);
       else localStorage.removeItem(LS_KEYS.selector);
@@ -205,6 +211,8 @@
       saveSelector('');
       state.lastClickedSelectorKey = '';
       state.lastSelectorMissLogKey = '';
+      state.armedVisibleKey = '';
+      state.lastArmLogKey = '';
       log('Saved selector cleared');
     });
 
@@ -466,6 +474,8 @@
     saveSelector(selector);
     state.lastClickedSelectorKey = '';
     state.lastSelectorMissLogKey = '';
+    state.armedVisibleKey = '';
+    state.lastArmLogKey = '';
     log(`Saved selector: ${selector}`);
   }
 
@@ -528,6 +538,8 @@
     const target = findTarget(selector);
     if (!target) {
       const missKey = `miss|${selector}|${location.pathname}`;
+      state.armedVisibleKey = '';
+      state.lastArmLogKey = '';
       if (state.lastSelectorMissLogKey !== missKey) {
         state.lastSelectorMissLogKey = missKey;
         setStatus('Saved selector not visible right now');
@@ -537,6 +549,17 @@
     }
 
     state.lastSelectorMissLogKey = '';
+    const visibleKey = `${selector}|${location.pathname}|${location.search}`;
+    if (state.armedVisibleKey !== visibleKey) {
+      state.armedVisibleKey = visibleKey;
+      if (state.lastArmLogKey !== visibleKey) {
+        state.lastArmLogKey = visibleKey;
+        setStatus('Selector armed; waiting next 10s pass before click');
+        log(`Selector armed: ${selector}`);
+      }
+      return;
+    }
+
     if (!clickTarget(target)) {
       setStatus('Selector found but click failed');
       log(`Click failed: ${selector}`);
