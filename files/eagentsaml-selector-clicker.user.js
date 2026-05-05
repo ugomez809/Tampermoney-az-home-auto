@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.2
+// @version      1.0.3
 // @description  Lets you pick one selector on the eAgent SAML login page and clicks it once every 10 seconds whenever it is visible.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
@@ -28,6 +28,7 @@
 
   const CFG = {
     tickMs: 10000,
+    loginFieldSettleMs: 20000,
     panelWidth: 360,
     zIndex: 2147483647,
     selectorOutlineColor: '#22c55e',
@@ -53,7 +54,10 @@
     lastSelectorMissLogKey: '',
     lastClickedSelectorKey: '',
     armedVisibleKey: '',
-    lastArmLogKey: ''
+    lastArmLogKey: '',
+    credentialReadyKey: '',
+    credentialReadySince: 0,
+    lastCredentialWaitLogKey: ''
   };
 
   boot();
@@ -82,6 +86,7 @@
     state.running = !!on;
     state.armedVisibleKey = '';
     state.lastArmLogKey = '';
+    resetCredentialWait();
     renderAll();
   }
 
@@ -97,6 +102,7 @@
     state.selector = norm(selector || '');
     state.armedVisibleKey = '';
     state.lastArmLogKey = '';
+    resetCredentialWait();
     try {
       if (state.selector) localStorage.setItem(LS_KEYS.selector, state.selector);
       else localStorage.removeItem(LS_KEYS.selector);
@@ -110,6 +116,10 @@
 
   function lower(value) {
     return norm(value).toLowerCase();
+  }
+
+  function now() {
+    return Date.now();
   }
 
   function visible(el) {
@@ -213,6 +223,7 @@
       state.lastSelectorMissLogKey = '';
       state.armedVisibleKey = '';
       state.lastArmLogKey = '';
+      resetCredentialWait();
       log('Saved selector cleared');
     });
 
@@ -476,7 +487,198 @@
     state.lastSelectorMissLogKey = '';
     state.armedVisibleKey = '';
     state.lastArmLogKey = '';
+    resetCredentialWait();
     log(`Saved selector: ${selector}`);
+  }
+
+  function getInputType(el) {
+    return lower(el?.getAttribute?.('type') || el?.type || '');
+  }
+
+  function isLikelyCredentialUserInput(el) {
+    if (!el || !visible(el) || !enabled(el)) return false;
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+    const type = getInputType(el);
+    return !type || type === 'text' || type === 'email' || type === 'search' || type === 'tel';
+  }
+
+  function getCredentialUserScore(el) {
+    if (!el) return Number.NEGATIVE_INFINITY;
+    const meta = lower([
+      el.getAttribute?.('autocomplete'),
+      el.getAttribute?.('name'),
+      el.getAttribute?.('id'),
+      el.getAttribute?.('placeholder'),
+      el.getAttribute?.('aria-label'),
+      el.labels?.[0]?.textContent,
+      el.closest?.('label')?.textContent
+    ].filter(Boolean).join(' '));
+    let score = 0;
+    if (/\busername\b/.test(meta)) score += 30;
+    if (/\bemail\b/.test(meta)) score += 20;
+    if (/\buser\b/.test(meta)) score += 10;
+    if (/\blogin\b/.test(meta)) score += 8;
+    if (lower(el.getAttribute?.('autocomplete') || '') === 'username') score += 25;
+    if (getInputType(el) === 'email') score += 5;
+    return score;
+  }
+
+  function getVisibleCredentialUserInputs(root) {
+    return Array.from((root || document).querySelectorAll('input, textarea'))
+      .filter((el) => isLikelyCredentialUserInput(el))
+      .sort((a, b) => getCredentialUserScore(b) - getCredentialUserScore(a));
+  }
+
+  function getVisibleLoginFormContext(root = document) {
+    const passwordInput = Array.from((root || document).querySelectorAll('input[type="password"]'))
+      .find((el) => visible(el) && enabled(el));
+    if (!passwordInput) return null;
+
+    const form = passwordInput.closest('form') || root || document;
+    const userInput = getVisibleCredentialUserInputs(form).find((el) => el !== passwordInput) || null;
+    return {
+      form,
+      userInput,
+      passwordInput
+    };
+  }
+
+  function setNativeInputValue(el, value) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    const setter = desc && typeof desc.set === 'function' ? desc.set : null;
+    if (!setter) return false;
+    try {
+      setter.call(el, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function syncFrameworkValueTracker(el, previousValue) {
+    const tracker = el?._valueTracker;
+    if (!tracker || typeof tracker.setValue !== 'function') return false;
+    try {
+      tracker.setValue(String(previousValue ?? ''));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function dispatchAuthFieldLifecycle(el) {
+    if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    const value = String(el.value || '');
+    if (!value) return false;
+    const chars = Array.from(value);
+
+    try { el.focus({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
+    try {
+      setNativeInputValue(el, '');
+      syncFrameworkValueTracker(el, value);
+    } catch {}
+    try { el.setAttribute('value', ''); } catch {}
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: null, inputType: 'deleteContentBackward' }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      }
+    } catch {}
+
+    let current = '';
+    for (const ch of chars) {
+      const nextValue = current + ch;
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      syncFrameworkValueTracker(el, current);
+      setNativeInputValue(el, nextValue);
+      try { el.setAttribute('value', nextValue); } catch {}
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        } else {
+          el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      current = nextValue;
+    }
+    try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
+    try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
+    try { el.blur(); } catch {}
+    return true;
+  }
+
+  function prepareLoginForm(triggerEl) {
+    const context = getVisibleLoginFormContext(triggerEl?.closest?.('form') || document);
+    if (!context) return false;
+    let prepared = false;
+    for (const input of [context.userInput, context.passwordInput].filter(Boolean)) {
+      if (!norm(input.value).length) continue;
+      prepared = dispatchAuthFieldLifecycle(input) || prepared;
+    }
+    return prepared;
+  }
+
+  function resetCredentialWait() {
+    state.credentialReadyKey = '';
+    state.credentialReadySince = 0;
+    state.lastCredentialWaitLogKey = '';
+  }
+
+  function getCredentialWaitState(target) {
+    const context = getVisibleLoginFormContext(target?.closest?.('form') || document);
+    if (!context?.userInput || !context?.passwordInput) return null;
+
+    const userValue = norm(context.userInput.value || '');
+    const passValue = String(context.passwordInput.value || '');
+    if (!userValue || !passValue) {
+      resetCredentialWait();
+      return {
+        waiting: true,
+        reason: 'credentials-empty'
+      };
+    }
+
+    const fingerprint = [
+      norm(state.selector || ''),
+      location.pathname,
+      location.search,
+      norm(context.userInput.getAttribute('id') || context.userInput.getAttribute('name') || 'user'),
+      norm(context.passwordInput.getAttribute('id') || context.passwordInput.getAttribute('name') || 'password'),
+      String(userValue.length),
+      String(passValue.length)
+    ].join('|');
+
+    if (state.credentialReadyKey !== fingerprint) {
+      state.credentialReadyKey = fingerprint;
+      state.credentialReadySince = now();
+      state.lastCredentialWaitLogKey = '';
+    }
+
+    const readyForMs = now() - state.credentialReadySince;
+    if (readyForMs < CFG.loginFieldSettleMs) {
+      return {
+        waiting: true,
+        reason: 'credentials-settling',
+        remainingMs: CFG.loginFieldSettleMs - readyForMs,
+        logKey: fingerprint
+      };
+    }
+
+    return {
+      waiting: false
+    };
   }
 
   function dispatchPressSequence(el) {
@@ -504,6 +706,7 @@
     if (!el || !visible(el) || !enabled(el)) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {}
+    prepareLoginForm(el);
     let clicked = false;
     try {
       dispatchPressSequence(el);
@@ -540,6 +743,7 @@
       const missKey = `miss|${selector}|${location.pathname}`;
       state.armedVisibleKey = '';
       state.lastArmLogKey = '';
+      resetCredentialWait();
       if (state.lastSelectorMissLogKey !== missKey) {
         state.lastSelectorMissLogKey = missKey;
         setStatus('Saved selector not visible right now');
@@ -549,6 +753,26 @@
     }
 
     state.lastSelectorMissLogKey = '';
+    const credentialWait = getCredentialWaitState(target);
+    if (credentialWait?.waiting) {
+      if (credentialWait.reason === 'credentials-empty') {
+        setStatus('Waiting for autofilled credentials');
+        if (state.lastCredentialWaitLogKey !== 'credentials-empty') {
+          state.lastCredentialWaitLogKey = 'credentials-empty';
+          log('Waiting for autofilled credentials');
+        }
+        return;
+      }
+
+      const waitKey = credentialWait.logKey || 'credentials-settling';
+      if (state.lastCredentialWaitLogKey !== waitKey) {
+        state.lastCredentialWaitLogKey = waitKey;
+        log(`Credentials detected; waiting ${Math.ceil((credentialWait.remainingMs || 0) / 1000)}s before click`);
+      }
+      setStatus(`Credentials settling; wait ${Math.ceil((credentialWait.remainingMs || 0) / 1000)}s`);
+      return;
+    }
+
     const visibleKey = `${selector}|${location.pathname}|${location.search}`;
     if (state.armedVisibleKey !== visibleKey) {
       state.armedVisibleKey = visibleKey;
@@ -568,6 +792,7 @@
 
     state.lastClickAt = Date.now();
     state.lastClickedSelectorKey = selector;
+    state.lastCredentialWaitLogKey = '';
     setStatus('Clicked saved selector');
     log(`Clicked selector: ${selector}`);
   }
