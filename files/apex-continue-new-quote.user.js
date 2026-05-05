@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.0
+// @version      1.8.13
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -15,11 +15,9 @@
   'use strict';
 
   if (window.top !== window.self) return;
-  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.0';
-  const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
+  const VERSION = '1.8.13';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -52,7 +50,7 @@
     afterContinueBeforeCloseMs: 5000,
     continueReadyTimeoutMs: 20000,
     continueReadyStableMs: 3000,
-    continueHandoffTimeoutMs: 60000,
+    continueHandoffTimeoutMs: 20000,
     continueRetryDelayMs: 1200,
     continueClickAttempts: 3,
 
@@ -86,22 +84,9 @@
     closeSkippedAfterContinue: false,
     windowOpenMonitorInstalled: false,
     windowOpenCalls: [],
-    requesterTabId: `apex_continue_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     logs: [],
     logsIntervalTimer: null
   };
-
-  function isAnchorTab() {
-    try {
-      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
-    } catch {}
-
-    try {
-      return new URL(location.href).searchParams.get('hb_anchor') === '1';
-    } catch {
-      return false;
-    }
-  }
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -136,64 +121,6 @@
     return /policycenter(?:-\d+)?\.farmersinsurance\.com/i.test(value) ||
       /\/pc\/PolicyCenter\.do/i.test(value) ||
       /\bPolicyCenter\b/i.test(value);
-  }
-
-  function readSharedOpenRequest() {
-    return readLocalJson(SHARED_TAB_OPEN_REQUEST_KEY, null);
-  }
-
-  function writeSharedOpenRequest(value) {
-    try {
-      if (!value) {
-        localStorage.removeItem(SHARED_TAB_OPEN_REQUEST_KEY);
-        return null;
-      }
-      localStorage.setItem(SHARED_TAB_OPEN_REQUEST_KEY, JSON.stringify(value));
-      return value;
-    } catch {
-      return null;
-    }
-  }
-
-  function buildSharedOpenRequestId() {
-    return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  }
-
-  function requestSupervisorGwpcOpen(blockedGwpc) {
-    const request = {
-      requestId: buildSharedOpenRequestId(),
-      requesterTabId: state.requesterTabId,
-      target: 'gwpc',
-      url: resolveOpenUrl(blockedGwpc?.url || ''),
-      reason: 'blocked-popup',
-      status: 'requested',
-      requestedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 30000).toISOString()
-    };
-    writeSharedOpenRequest(request);
-    return request;
-  }
-
-  async function waitForSharedOpenRequestResult(requestId, timeoutMs) {
-    const startedAt = now();
-    const safeTimeoutMs = Math.max(CFG.waitIntervalMs, Number(timeoutMs || 0));
-
-    while ((now() - startedAt) < safeTimeoutMs) {
-      const request = readSharedOpenRequest();
-      if (request?.requestId === requestId) {
-        const status = String(request.status || '');
-        if (status === 'opened' || status === 'failed' || status === 'expired') {
-          return request;
-        }
-      }
-      await sleep(CFG.waitIntervalMs);
-    }
-
-    return readSharedOpenRequest();
-  }
-
-  function shouldKeepApexTabOpen() {
-    return true;
   }
 
   function installWindowOpenMonitor() {
@@ -259,7 +186,6 @@
   }
 
   function tryCloseCurrentTab(options = {}) {
-    if (shouldKeepApexTabOpen()) return;
     const allowBlankFallback = options.allowBlankFallback === true;
     const wasClosed = !!window.closed;
     try { window.close(); } catch {}
@@ -288,11 +214,6 @@
   }
 
   function triggerForceClose(reason = '', options = {}) {
-    if (shouldKeepApexTabOpen()) {
-      if (reason) log(`${reason} Keeping APEX tab open for session supervision.`);
-      return;
-    }
-
     if (options.requireHidden === true && isFrontVisibleTab()) {
       if (!state.closeSkippedAfterContinue) {
         state.closeSkippedAfterContinue = true;
@@ -326,11 +247,6 @@
   }
 
   function armForceCloseFailsafe() {
-    if (shouldKeepApexTabOpen()) {
-      log('APEX auto-close failsafe disabled; tab will stay open for session recovery.');
-      return;
-    }
-
     if (state.forceCloseDeadlineAt) return;
     state.forceCloseDeadlineAt = now() + CFG.forceCloseAfterMs;
     state.forceCloseTriggered = false;
@@ -1115,20 +1031,12 @@
       const blockedGwpc = getRecentBlockedGwpcOpen(clickStartedAt || startedAt);
       if (blockedGwpc && !blockedPopupHandled) {
         blockedPopupHandled = true;
-        const request = requestSupervisorGwpcOpen(blockedGwpc);
-        log(`GWPC popup was blocked on this PC; requested supervisor open instead: ${blockedGwpc.url}`);
-
-        const result = await waitForSharedOpenRequestResult(
-          request.requestId,
-          Math.max(CFG.waitIntervalMs, CFG.continueHandoffTimeoutMs - (now() - startedAt))
-        );
-
-        if (result?.requestId === request.requestId && result.status === 'opened') {
-          return 'blocked GWPC popup reopened by session supervisor';
-        }
-
-        if (result?.requestId === request.requestId && (result.status === 'failed' || result.status === 'expired')) {
-          log(`Supervisor GWPC open ${result.status}: ${result.error || blockedGwpc.url}`);
+        log(`GWPC popup was blocked on this PC; navigating current APEX tab instead: ${blockedGwpc.url}`);
+        try {
+          location.assign(blockedGwpc.url);
+          return 'blocked GWPC popup fallback';
+        } catch (err) {
+          log(`Blocked popup fallback navigation failed: ${err?.message || err}`);
         }
       }
 
@@ -1557,7 +1465,13 @@
       markDoneThisLoad();
       setStatus('Done this load');
       try { clearInterval(state.tickTimer); } catch {}
-      log('Continue New Quote clicked. Leaving APEX tab open for session recovery.');
+      log(`Waiting ${Math.ceil(CFG.afterContinueBeforeCloseMs / 1000)} seconds before safe APEX close check...`);
+      await sleep(CFG.afterContinueBeforeCloseMs);
+      triggerForceClose('Continue New Quote clicked. Closing APEX tab.', {
+        requireHidden: CFG.closeAfterContinueOnlyWhenHidden,
+        allowBlankFallback: CFG.allowBlankCloseFallback,
+        skipReason: 'Close skipped: APEX is still the front tab after Continue New Quote, so leaving it open instead of closing/blanking the active page.'
+      });
     } catch (err) {
       log(`Error: ${err?.message || err}`);
       setStatus('Error');

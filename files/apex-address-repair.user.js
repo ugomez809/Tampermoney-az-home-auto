@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Address Repair
 // @namespace    homebot.apex-address-repair
-// @version      1.0.2
+// @version      1.0.1
 // @description  Captures the latest AgencyZoom address for APEX, fills the default DOB when APEX says Date of Birth is missing, and repairs wrong-state Home quote addresses by selecting the California risk address match.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -18,10 +18,9 @@
   'use strict';
 
   if (window.top !== window.self) return;
-  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Address Repair';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.1';
   const LOG_PERSIST_KEY = 'tm_apex_address_repair_logs_v1';
   const LOG_CLEAR_SIGNAL_KEY = 'hb_logs_clear_request_v1';
   const LOG_PERSIST_THROTTLE_MS = 1500;
@@ -82,29 +81,29 @@
     MONTANA: 'MT',
     NEBRASKA: 'NE',
     NEVADA: 'NV',
-    'NEW HAMPSHIRE': 'NH',
-    'NEW JERSEY': 'NJ',
-    'NEW MEXICO': 'NM',
-    'NEW YORK': 'NY',
-    'NORTH CAROLINA': 'NC',
-    'NORTH DAKOTA': 'ND',
+    NEW HAMPSHIRE: 'NH',
+    NEW JERSEY: 'NJ',
+    NEW MEXICO: 'NM',
+    NEW YORK: 'NY',
+    NORTH CAROLINA: 'NC',
+    NORTH DAKOTA: 'ND',
     OHIO: 'OH',
     OKLAHOMA: 'OK',
     OREGON: 'OR',
     PENNSYLVANIA: 'PA',
-    'RHODE ISLAND': 'RI',
-    'SOUTH CAROLINA': 'SC',
-    'SOUTH DAKOTA': 'SD',
+    RHODE ISLAND: 'RI',
+    SOUTH CAROLINA: 'SC',
+    SOUTH DAKOTA: 'SD',
     TENNESSEE: 'TN',
     TEXAS: 'TX',
     UTAH: 'UT',
     VERMONT: 'VT',
     VIRGINIA: 'VA',
     WASHINGTON: 'WA',
-    'WEST VIRGINIA': 'WV',
+    WEST VIRGINIA: 'WV',
     WISCONSIN: 'WI',
     WYOMING: 'WY',
-    'DISTRICT OF COLUMBIA': 'DC'
+    DISTRICT OF COLUMBIA: 'DC'
   };
 
   const state = {
@@ -126,18 +125,6 @@
   let lastLogClearHandledAt = '';
 
   boot();
-
-  function isAnchorTab() {
-    try {
-      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
-    } catch {}
-
-    try {
-      return new URL(location.href).searchParams.get('hb_anchor') === '1';
-    } catch {
-      return false;
-    }
-  }
 
   function boot() {
     if (isApexOrigin()) {

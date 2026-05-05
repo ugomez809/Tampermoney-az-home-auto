@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.56
+// @version      1.0.53
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.56';
+  const VERSION = '1.0.53';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -166,7 +166,6 @@
     rejectedFinalPayloadTriggeredKey: '',
     lastFinalPayloadRejectLogKey: '',
     lastMissingPayloadTriggerLogKey: '',
-    lastOpenTicketFallbackKey: '',
     openTicketId: '',
     openTicketOpenedAt: 0,
     lastMainClickedTicketId: '',
@@ -939,7 +938,7 @@
   function extractTicketIdFromText(text) {
     const clean = norm(text || '');
     if (!clean) return '';
-    const match = clean.match(/\bID[\s:#-]*?(\d{5,})\b/i) || clean.match(/\b(\d{5,})\b/);
+    const match = clean.match(/\bID:\s*(\d{5,})\b/i) || clean.match(/\b(\d{5,})\b/);
     return match ? match[1] : '';
   }
 
@@ -981,20 +980,9 @@
     return bestScore >= 0 ? best : null;
   }
 
-  function applyOpenTicketFallback(info, fallbackTicketId = '') {
-    const fallbackId = norm(fallbackTicketId || '');
-    if (!isPlainObject(info) || info.ticketId || !info.root || !fallbackId) return info;
-    return {
-      ...info,
-      ticketId: fallbackId,
-      inferredTicketId: true
-    };
-  }
-
-  function getOpenTicketInfo(options = {}) {
-    const fallbackTicketId = norm(options?.fallbackTicketId || '');
+  function getOpenTicketInfo() {
     const root = getOpenDockRoot();
-    if (!root) return { ticketId: '', name: '', tags: [], root: null, inferredTicketId: false };
+    if (!root) return { ticketId: '', name: '', tags: [] };
 
     const top = document.querySelector(SEL.dockTop) || root;
     const h3 = top.querySelector(SEL.topName) || root.querySelector(SEL.topName);
@@ -1019,13 +1007,7 @@
       .map((el) => norm(el.textContent))
       .filter(Boolean);
 
-    return applyOpenTicketFallback({
-      ticketId,
-      name,
-      tags,
-      root,
-      inferredTicketId: false
-    }, fallbackTicketId);
+    return { ticketId, name, tags };
   }
 
   function readTargets(key) {
@@ -2744,8 +2726,10 @@
 
   function getDockRootTicketId(root) {
     if (!(root instanceof Element)) return '';
-    const syncNode = root.querySelector(SEL.vendorSync);
-    return extractTicketIdFromText(syncNode?.textContent || '') || extractTicketIdFromText(root.textContent || '');
+    const syncNode = root.querySelector('.origin-vendor-sync');
+    const syncText = norm(syncNode?.textContent || '');
+    const match = syncText.match(/\bID:\s*(\d+)\b/i);
+    return match ? match[1] : '';
   }
 
   function getTicketDockRoots() {
@@ -2774,7 +2758,7 @@
     const root = getTicketDockRoot(wantedId);
     if (!root || !visible(root)) return true;
 
-    const info = getOpenTicketInfo({ fallbackTicketId: wantedId });
+    const info = getOpenTicketInfo();
     const openId = norm(info.ticketId || '');
     if (!openId) return true;
     if (wantedId && openId !== wantedId) return true;
@@ -2873,7 +2857,7 @@
 
   function evaluateFinishCloseGate({ data, finalPayload, missingPayloadTriggerKey, forceRun }) {
     const cleanAzId = norm(data?.azId || '');
-    const openTicket = getOpenTicketInfo({ fallbackTicketId: data?.missingPayloadFallback ? cleanAzId : '' });
+    const openTicket = getOpenTicketInfo();
     const openId = norm(openTicket.ticketId || '');
     const now = Date.now();
 
@@ -3048,7 +3032,7 @@
       return;
     }
 
-    const openTicket = getOpenTicketInfo({ fallbackTicketId: data.missingPayloadFallback ? data.azId : '' });
+    const openTicket = getOpenTicketInfo();
     if (!openTicket.ticketId) {
       setStatus('Waiting for open ticket');
       return;
@@ -3241,33 +3225,15 @@
       return;
     }
 
-    const wakeMissingPayloadTrigger = !state.running ? getActiveMissingPayloadTrigger() : null;
     if (!state.running) {
-      if (wakeMissingPayloadTrigger) {
-        state.running = true;
-        saveRunning(true);
-        setStatus('Resuming for direct failed path');
-        log(`Direct missing payload trigger auto-resumed finisher | AZ ${wakeMissingPayloadTrigger.ticketId}`);
-      } else {
-        setStatus('Stopped');
-        renderAll();
-        return;
-      }
+      setStatus('Stopped');
+      renderAll();
+      return;
     }
 
-    const detectedOpenTicket = getOpenTicketInfo();
-    const missingPayloadTrigger = getActiveMissingPayloadTrigger(detectedOpenTicket.ticketId);
-    const openTicket = applyOpenTicketFallback(detectedOpenTicket, missingPayloadTrigger?.ticketId || '');
-    if (openTicket.inferredTicketId && openTicket.root) {
-      const fallbackKey = `trigger|${openTicket.ticketId}`;
-      if (state.lastOpenTicketFallbackKey !== fallbackKey) {
-        state.lastOpenTicketFallbackKey = fallbackKey;
-        log(`Open ticket ID not readable from dock; using direct failed-path AZ ${openTicket.ticketId} for the current open ticket`);
-      }
-    } else {
-      state.lastOpenTicketFallbackKey = '';
-    }
+    const openTicket = getOpenTicketInfo();
     updateOpenTicketTracking(openTicket);
+    const missingPayloadTrigger = getActiveMissingPayloadTrigger(openTicket.ticketId);
     const finalPayload = missingPayloadTrigger ? null : getFinalPayload();
     const mismatchWait = missingPayloadTrigger
       ? { active: false, ready: false }

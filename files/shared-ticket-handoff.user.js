@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.9
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC clears stale run-state before applying a fresh job, seeds HOME-only current job/payload state, enriches identity from GWPC, and advances final Home readiness directly to sender.
+// @version      1.9.7
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,10 +20,9 @@
   'use strict';
 
   if (window.top !== window.self) return;
-  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.9';
+  const VERSION = '1.9.7';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -75,18 +74,6 @@
     panelRight: 12,
     panelBottom: 12
   };
-
-  function isAnchorTab() {
-    try {
-      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
-    } catch {}
-
-    try {
-      return new URL(location.href).searchParams.get('hb_anchor') === '1';
-    } catch {
-      return false;
-    }
-  }
 
   const state = {
     running: true,
@@ -364,8 +351,6 @@
       'State': clean(currentJob['State'] || handoff.state || ''),
       'Zip': clean(currentJob['Zip'] || handoff.zip || '')
     };
-
-    clearGwpcRunStateForApply(clean(handoff.ticketId));
 
     const storedJob = writeCurrentJob(nextJob);
     localStorage.setItem(LS_KEYS.LAST_APPLIED, applySig);
@@ -724,7 +709,6 @@
       GWPC_KEYS.homeTrigger,
       GWPC_KEYS.webhookSentMeta,
       GWPC_KEYS.forceSend,
-      GLOBAL_PAUSE_KEY,
       FLOW_STAGE_KEY,
       LS_KEYS.LAST_APPLIED
     ];
@@ -733,25 +717,6 @@
       try { localStorage.removeItem(key); } catch {}
     }
     try { GM_setValue(GWPC_KEYS.currentJob, null); } catch {}
-  }
-
-  function clearGwpcRunStateForApply(azId = '') {
-    const keysToRemove = [
-      GWPC_KEYS.homePayload,
-      GWPC_KEYS.autoPayload,
-      GWPC_KEYS.bundle,
-      GWPC_KEYS.homeTrigger,
-      GWPC_KEYS.webhookSentMeta,
-      GWPC_KEYS.forceSend,
-      GLOBAL_PAUSE_KEY,
-      FLOW_STAGE_KEY
-    ];
-
-    for (const key of keysToRemove) {
-      try { localStorage.removeItem(key); } catch {}
-    }
-
-    log(`GWPC run storage cleared for AZ ${clean(azId) || '(blank)'}`);
   }
 
   function readCurrentJob() {
