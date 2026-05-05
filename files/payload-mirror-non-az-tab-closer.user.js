@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.8
+// @version      1.1.9
 // @description  Mirrors HOME payloads, supervises dedicated APEX/GWPC anchor tabs, detects auth/login states, and best-effort closes transient non-AZ tabs after successful handoff.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -29,7 +29,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.8';
+  const VERSION = '1.1.9';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
   const APEX_WAKE_QUERY_KEY = 'tm_apex_wake';
   const APEX_WAKE_ID_QUERY_KEY = 'tm_apex_wake_id';
@@ -1376,7 +1376,7 @@
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const value = String(el.value || '');
     if (!value) return false;
-    const lastChar = value.slice(-1) || ' ';
+    const chars = Array.from(value);
 
     try { el.focus({ preventScroll: true }); } catch {}
     try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
@@ -1389,24 +1389,29 @@
         el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       }
     } catch {}
-    setNativeInputValue(el, value);
-    syncFrameworkValueTracker(el, '');
-    try { el.setAttribute('value', value); } catch {}
-    try {
-      if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
-      }
-    } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
-    try {
-      if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
-      } else {
-        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-      }
-    } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
+    let current = '';
+    for (const ch of chars) {
+      const nextValue = current + ch;
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      syncFrameworkValueTracker(el, current);
+      setNativeInputValue(el, nextValue);
+      try { el.setAttribute('value', nextValue); } catch {}
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        } else {
+          el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      current = nextValue;
+    }
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}

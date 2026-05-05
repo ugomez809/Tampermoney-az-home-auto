@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.9
+// @version      1.0.10
 // @description  Clicks the first visible AgencyZoom login control, APEX autofilled credential submit, or APEX I AGREE button once per route, only advancing after the prior control disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
@@ -21,7 +21,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.9';
+  const VERSION = '1.0.10';
 
   const CFG = {
     scanMs: 400,
@@ -226,7 +226,7 @@
     if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
     const value = String(el.value || '');
     if (!value) return false;
-    const lastChar = value.slice(-1) || ' ';
+    const chars = Array.from(value);
 
     try { el.focus({ preventScroll: true }); } catch {}
     try { el.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false })); } catch {}
@@ -239,24 +239,29 @@
         el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       }
     } catch {}
-    setNativeInputValue(el, value);
-    syncFrameworkValueTracker(el, '');
-    try { el.setAttribute('value', value); } catch {}
-    try {
-      if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
-      }
-    } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'End' })); } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
-    try {
-      if (typeof InputEvent === 'function') {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: lastChar, inputType: 'insertText' }));
-      } else {
-        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-      }
-    } catch {}
-    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: lastChar })); } catch {}
+    let current = '';
+    for (const ch of chars) {
+      const nextValue = current + ch;
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      syncFrameworkValueTracker(el, current);
+      setNativeInputValue(el, nextValue);
+      try { el.setAttribute('value', nextValue); } catch {}
+      try {
+        if (typeof InputEvent === 'function') {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: ch, inputType: 'insertText' }));
+        } else {
+          el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        }
+      } catch {}
+      try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: ch })); } catch {}
+      current = nextValue;
+    }
     try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch {}
     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false })); } catch {}
     try { el.blur(); } catch {}
