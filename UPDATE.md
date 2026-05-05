@@ -51,6 +51,12 @@ For one-by-one installs instead of the bundle:
 | APEX Home Quote Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js) |
 | APEX Multi-Agency Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-multi-agency-continue.user.js) |
 
+### eAgent SAML
+
+| Script | Install |
+| --- | --- |
+| Eagent SAML Selector Clicker | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/eagentsaml-selector-clicker.user.js) |
+
 ### Guidewire PolicyCenter
 
 | Script | Install |
