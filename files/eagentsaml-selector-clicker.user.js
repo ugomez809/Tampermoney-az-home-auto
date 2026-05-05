@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.6
+// @version      1.0.7
 // @description  Clicks #okta-signin-submit on the eAgent SAML login page every 10 seconds while running.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const TARGET_SELECTOR = '#okta-signin-submit';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
@@ -241,6 +241,44 @@
       setStatus('Button not found');
       log(`Button not found: ${TARGET_SELECTOR}`);
       return false;
+    }
+
+    if (source === 'auto') {
+      const form = btn.closest('form');
+      const passwordInput = form?.querySelector?.('input[type="password"]') || null;
+      const userInput = form
+        ? Array.from(form.querySelectorAll('input, textarea')).find((el) => el !== passwordInput && !el.disabled)
+        : null;
+
+      const userValue = String(userInput?.value || '').trim();
+      const passValue = String(passwordInput?.value || '');
+      if (!userValue || !passValue) {
+        setStatus('Waiting for filled login fields');
+        log('Skipping auto submit: login fields still empty');
+        return false;
+      }
+
+      if (form && typeof form.requestSubmit === 'function') {
+        try {
+          form.requestSubmit(btn instanceof HTMLElement ? btn : undefined);
+          setStatus('Auto submit sent');
+          log('Submitted login form with requestSubmit');
+          return true;
+        } catch (error) {
+          log(`requestSubmit failed: ${error?.message || error}`);
+        }
+      }
+
+      if (form) {
+        try {
+          HTMLFormElement.prototype.submit.call(form);
+          setStatus('Auto submit sent');
+          log('Submitted login form with native submit');
+          return true;
+        } catch (error) {
+          log(`native submit failed: ${error?.message || error}`);
+        }
+      }
     }
 
     try {
