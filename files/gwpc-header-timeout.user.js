@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.19
+// @version      2.3.20
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.19';
+  const VERSION = '2.3.20';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -134,6 +134,7 @@
     sharedRulesSyncing: false,
     sharedRulesSyncQueued: false,
     lastSharedRulesSyncError: '',
+    bootSharedRulesPending: false,
     savedWatchAlertWebhookUrl: '',
     savedTimeoutTextWebhookUrl: '',
     lastScanAt: 0,
@@ -213,6 +214,7 @@
     if (state.watchModeEnabled) {
       log('Watch mode restored: ON');
     }
+    state.bootSharedRulesPending = sharedRulesSyncEnabled();
 
     scheduleObserve();
     scheduleScan('start');
@@ -2939,7 +2941,8 @@
     });
   }
 
-  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones) {
+  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones, options = {}) {
+    const preferRemoteDisabled = options.preferRemoteDisabled === true;
     const localMap = new Map((Array.isArray(localRules) ? localRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const remoteMap = new Map((Array.isArray(remoteRules) ? remoteRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const tombstoneMap = new Map(Object.entries(isPlainObject(tombstones) ? tombstones : {}).map(([id, value]) => [normalizeText(id), value]).filter(([id]) => id));
@@ -2966,6 +2969,15 @@
       const remoteEnabled = remoteRule ? remoteRule.enabled !== false : false;
 
       if (remoteRule && remoteEnabled === false) {
+        if (preferRemoteDisabled) {
+          nextTombstones[ruleId] = {
+            ruleId,
+            disabledAt: normalizeText(remoteRule.updatedAt || tombstone?.disabledAt || nowIso()),
+            updatedBy: normalizeText(remoteRule.updatedBy || tombstone?.updatedBy || ''),
+            clientId: normalizeText(remoteRule.clientId || tombstone?.clientId || '')
+          };
+          continue;
+        }
         if (localRule && localMs > Math.max(remoteMs, tombstoneMs)) {
           nextRules.push(localRule);
           upserts.push(localRule);
@@ -3019,6 +3031,7 @@
   async function syncSharedRules(options = {}) {
     if (!sharedRulesSyncEnabled()) return false;
     const force = options.force === true;
+    const isBootSync = normalizeText(options.reason || '') === 'boot';
     if (!force && state.lastSharedRulesSyncAt && (Date.now() - state.lastSharedRulesSyncAt) < CFG.sharedRulesRefreshMs) {
       return false;
     }
@@ -3030,7 +3043,9 @@
       const localRules = getSelectorRules();
       const tombstones = readSelectorRuleTombstones();
       const remoteRules = await fetchSharedSelectorRules();
-      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones);
+      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones, {
+        preferRemoteDisabled: isBootSync
+      });
 
       const localSignature = buildRulesSignature(localRules);
       const nextSignature = buildRulesSignature(reconciled.rules);
@@ -3069,8 +3084,17 @@
       }
       return false;
     } finally {
+      const releaseBootGate = isBootSync && state.bootSharedRulesPending;
+      if (releaseBootGate) {
+        state.bootSharedRulesPending = false;
+      }
       state.sharedRulesSyncing = false;
       renderButtons();
+      if (releaseBootGate && !state.destroyed) {
+        setTimeout(() => {
+          scheduleScan('boot-shared-rules-ready');
+        }, 0);
+      }
       if (state.sharedRulesSyncQueued) {
         state.sharedRulesSyncQueued = false;
         setTimeout(() => {
@@ -4032,6 +4056,7 @@
 
   function processSelectorMatches() {
     if (!savedSelectorRulesEnabled()) return;
+    if (state.bootSharedRulesPending) return;
     const context = buildEventContext();
     if (!context.ok) return;
     if (!context.product || !context.productLabel) return;
