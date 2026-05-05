@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin AZ + APEX Single Click Helper
 // @namespace    homebot.az-apex-single-click-helper
-// @version      1.0.0
-// @description  Clicks the visible AgencyZoom login control or APEX I AGREE button once per page load, and only advances to a second control after the first one disappears.
+// @version      1.0.1
+// @description  Clicks the first visible AgencyZoom login control or APEX I AGREE button once per page load, and only advances to a second control after the first one disappears.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.my.salesforce.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'Cross-Origin AZ + APEX Single Click Helper';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
 
   const CFG = {
     scanMs: 400,
@@ -39,6 +39,7 @@
     routeTimer: 0,
     lastUrl: location.href,
     clickedKinds: new Set(),
+    firstSeenAt: Object.create(null),
     lastClickedKind: '',
     lastClickAt: 0
   };
@@ -67,6 +68,7 @@
 
     state.lastUrl = location.href;
     state.clickedKinds.clear();
+    state.firstSeenAt = Object.create(null);
     state.lastClickedKind = '';
     state.lastClickAt = 0;
     log(`Route changed -> ${location.href}`);
@@ -165,6 +167,12 @@
     return null;
   }
 
+  function noteFirstSeen(kind, el) {
+    if (!kind || !el) return;
+    if (state.firstSeenAt[kind]) return;
+    state.firstSeenAt[kind] = now();
+  }
+
   function canClickKind(kind) {
     if (state.clickedKinds.has(kind)) return false;
     if ((now() - state.lastClickAt) < CFG.clickCooldownMs) return false;
@@ -206,10 +214,20 @@
     }
 
     if (isAgencyZoomHost()) {
-      return [
-        { kind: KIND.AZ_LOGIN_LINK, label: 'AgencyZoom Click here' },
-        { kind: KIND.AZ_LOGIN_BUTTON, label: 'AgencyZoom Login' }
+      const steps = [
+        { kind: KIND.AZ_LOGIN_LINK, label: 'AgencyZoom Click here', el: findAgencyZoomLoginLink() },
+        { kind: KIND.AZ_LOGIN_BUTTON, label: 'AgencyZoom Login', el: findAgencyZoomLoginButton() }
       ];
+
+      for (const step of steps) {
+        if (step.el) noteFirstSeen(step.kind, step.el);
+      }
+
+      return steps.sort((a, b) => {
+        const aSeenAt = a.el ? (state.firstSeenAt[a.kind] || 0) : Number.POSITIVE_INFINITY;
+        const bSeenAt = b.el ? (state.firstSeenAt[b.kind] || 0) : Number.POSITIVE_INFINITY;
+        return aSeenAt - bSeenAt;
+      });
     }
 
     return [];
@@ -221,7 +239,7 @@
     for (const step of getSteps()) {
       if (!canClickKind(step.kind)) continue;
 
-      const el = findTarget(step.kind);
+      const el = step.el || findTarget(step.kind);
       if (!el) continue;
       if (!clickElement(el, step.label)) continue;
 
