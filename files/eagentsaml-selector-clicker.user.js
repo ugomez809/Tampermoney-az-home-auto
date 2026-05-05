@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eagent SAML Selector Clicker
 // @namespace    homebot.eagentsaml-selector-clicker
-// @version      1.0.4
+// @version      1.0.5
 // @description  Lets you pick one selector on the eAgent SAML login page and clicks it once every 10 seconds whenever it is visible.
 // @match        https://eagentsaml.farmersinsurance.com/*
 // @run-at       document-idle
@@ -18,7 +18,7 @@
   try { window.__TM_EAGENTSAML_SELECTOR_CLICKER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Eagent SAML Selector Clicker';
-  const VERSION = '1.0.4';
+  const VERSION = '1.0.5';
   const UI_ATTR = 'data-tm-eagentsaml-selector-clicker-ui';
 
   const LS_KEYS = {
@@ -704,8 +704,6 @@
 
   function clickTarget(el) {
     if (!el || !visible(el) || !enabled(el)) return false;
-    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-    try { el.focus({ preventScroll: true }); } catch {}
     try {
       if (typeof el.click === 'function') {
         el.click();
