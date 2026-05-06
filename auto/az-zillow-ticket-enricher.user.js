@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.7
+// @version      1.2.8
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,13 +24,15 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.7';
+  const VERSION = '1.2.8';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
-    tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1'
+    tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1',
+    customFields: 'tm_az_zillow_ticket_enricher_custom_fields_v1',
+    providerPicker: 'tm_az_zillow_ticket_enricher_provider_picker_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
@@ -139,6 +141,7 @@
     pickerKeydown: null,
     hoverBox: null,
     hoveredEl: null,
+    providerBanner: null,
     tickTimer: null,
     activeTicketId: '',
     currentAddress: '',
@@ -195,6 +198,7 @@
     try { clearInterval(state.tickTimer); } catch {}
     stopPicker('', false);
     try { state.hoverBox?.remove(); } catch {}
+    try { state.providerBanner?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
     try { delete window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__; } catch {}
   }
@@ -268,8 +272,30 @@
     return readTargets(GM_KEYS.fieldTargets);
   }
 
+  function getCustomFields() {
+    return readTargets(GM_KEYS.customFields);
+  }
+
+  function saveCustomFields(value) {
+    saveTargets(GM_KEYS.customFields, value);
+  }
+
   function getTagTargets() {
     return readTargets(GM_KEYS.tagTargets);
+  }
+
+  function getProviderPickerRequest() {
+    const value = readGM(GM_KEYS.providerPicker, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function saveProviderPickerRequest(value) {
+    if (!isPlainObject(value)) return;
+    writeGM(GM_KEYS.providerPicker, deepClone(value));
+  }
+
+  function clearProviderPickerRequest() {
+    deleteGM(GM_KEYS.providerPicker);
   }
 
   function getJob() {
@@ -343,6 +369,83 @@
       if (text) return text;
     }
     return '';
+  }
+
+  function isBaseFieldLabel(label) {
+    return FIELD_ORDER.some((item) => lower(item) === lower(label));
+  }
+
+  function canonicalFieldLabel(label) {
+    const clean = norm(label);
+    if (!clean) return '';
+    const builtIn = FIELD_ORDER.find((item) => lower(item) === lower(clean));
+    return builtIn || clean;
+  }
+
+  function getCustomFieldEntries() {
+    return Object.entries(getCustomFields())
+      .map(([key, value]) => {
+        const label = canonicalFieldLabel(value?.label || key);
+        return [label, isPlainObject(value) ? { ...value, label } : null];
+      })
+      .filter(([, value]) => isPlainObject(value) && norm(value.label));
+  }
+
+  function getSortedCustomFieldDefs() {
+    return getCustomFieldEntries()
+      .map(([, value]) => value)
+      .sort((a, b) => {
+        const aAt = Date.parse(norm(a.createdAt || a.updatedAt || '')) || 0;
+        const bAt = Date.parse(norm(b.createdAt || b.updatedAt || '')) || 0;
+        if (aAt !== bAt) return aAt - bAt;
+        return lower(a.label).localeCompare(lower(b.label));
+      });
+  }
+
+  function getCustomFieldDef(label) {
+    const wanted = canonicalFieldLabel(label);
+    if (!wanted || isBaseFieldLabel(wanted)) return null;
+    return getSortedCustomFieldDefs().find((item) => lower(item.label) === lower(wanted)) || null;
+  }
+
+  function saveCustomFieldDef(label, updates = {}) {
+    const fieldLabel = canonicalFieldLabel(label);
+    if (!fieldLabel || isBaseFieldLabel(fieldLabel)) return null;
+
+    const defs = getCustomFields();
+    const existing = isPlainObject(defs[fieldLabel]) ? defs[fieldLabel] : {};
+    defs[fieldLabel] = {
+      ...existing,
+      ...deepClone(updates),
+      label: fieldLabel,
+      normalizer: norm(updates.normalizer || existing.normalizer || inferFieldNormalizer(fieldLabel)),
+      createdAt: norm(existing.createdAt || updates.createdAt || nowIso()),
+      updatedAt: nowIso()
+    };
+    saveCustomFields(defs);
+    return defs[fieldLabel];
+  }
+
+  function getAllFieldLabels() {
+    const labels = [...FIELD_ORDER];
+    for (const item of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(item.label);
+      if (!label || labels.some((current) => lower(current) === lower(label))) continue;
+      labels.push(label);
+    }
+    return labels;
+  }
+
+  function inferFieldNormalizer(label) {
+    const text = lower(label);
+    if (!text) return 'text';
+    if (text.includes('url')) return 'url';
+    if (text.includes('sqft') || text.includes('square ft') || text.includes('square feet') || text.includes('square foot')) return 'integer';
+    if (text.includes('bath')) return 'decimal';
+    if (text.includes('bed')) return 'room';
+    if (text.includes('story') || text.includes('stories') || text.includes('year')) return 'integer';
+    if (text.includes('type')) return 'text';
+    return 'text';
   }
 
   function sleep(ms) {
@@ -427,6 +530,9 @@
       name: norm(el.getAttribute('name') || ''),
       role: norm(el.getAttribute('role') || ''),
       ariaLabel: norm(el.getAttribute('aria-label') || ''),
+      dataTestId: norm(el.getAttribute('data-testid') || ''),
+      dataTest: norm(el.getAttribute('data-test') || ''),
+      itemProp: norm(el.getAttribute('itemprop') || ''),
       classTokens: getStableClassTokens(el),
       textFingerprint: norm((el.innerText || el.textContent || '').slice(0, 160))
     };
@@ -456,6 +562,24 @@
     }
 
     if (el.id) return `#${cssEscape(el.id)}`;
+
+    const dataTestId = norm(el.getAttribute('data-testid') || '');
+    if (dataTestId) {
+      const selector = `${el.tagName.toLowerCase()}[data-testid="${cssEscape(dataTestId)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
+
+    const dataTest = norm(el.getAttribute('data-test') || '');
+    if (dataTest) {
+      const selector = `${el.tagName.toLowerCase()}[data-test="${cssEscape(dataTest)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
+
+    const itemProp = norm(el.getAttribute('itemprop') || '');
+    if (itemProp) {
+      const selector = `${el.tagName.toLowerCase()}[itemprop="${cssEscape(itemProp)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
 
     const name = norm(el.getAttribute('name') || '');
     if (name) {
@@ -511,6 +635,9 @@
     if (saved.name) { required += 1; if (saved.name === current.name) score += 1; }
     if (saved.role) { required += 1; if (saved.role === current.role) score += 1; }
     if (saved.ariaLabel) { required += 1; if (saved.ariaLabel === current.ariaLabel) score += 1; }
+    if (saved.dataTestId) { required += 1; if (saved.dataTestId === current.dataTestId) score += 1; }
+    if (saved.dataTest) { required += 1; if (saved.dataTest === current.dataTest) score += 1; }
+    if (saved.itemProp) { required += 1; if (saved.itemProp === current.itemProp) score += 1; }
     if (Array.isArray(saved.classTokens) && saved.classTokens.length) {
       required += 1;
       const currentSet = new Set(current.classTokens || []);
@@ -637,6 +764,50 @@
     return norm(target.textContent || '') === want;
   }
 
+  function readCurrentFieldValue(target) {
+    if (!(target instanceof Element)) return '';
+    if (target instanceof HTMLSelectElement) {
+      return norm(target.selectedOptions?.[0]?.textContent || target.value || '');
+    }
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      return norm(target.value || target.getAttribute('value') || '');
+    }
+    if (target.getAttribute('contenteditable') === 'true' || target.getAttribute('role') === 'textbox') {
+      return norm(target.innerText || target.textContent || '');
+    }
+    return norm(target.textContent || '');
+  }
+
+  function hasMeaningfulExistingFieldValue(value) {
+    const text = norm(value);
+    if (!text) return false;
+
+    const lowered = lower(text)
+      .replace(/[.:]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!lowered) return false;
+
+    if (
+      lowered === '-' ||
+      lowered === '--' ||
+      lowered === '---' ||
+      lowered === 'none' ||
+      lowered === 'n/a' ||
+      lowered === 'na' ||
+      lowered === 'null' ||
+      lowered === 'select' ||
+      lowered === 'select one' ||
+      lowered === 'select option' ||
+      lowered === 'choose' ||
+      lowered === 'choose one' ||
+      lowered === 'choose option'
+    ) return false;
+
+    if (/^(select|choose)\b/.test(lowered)) return false;
+    return true;
+  }
+
   async function waitForEditableTarget(base) {
     const started = Date.now();
     let chosen = null;
@@ -675,6 +846,11 @@
       if (!editableTarget) {
         await sleep(220);
         continue;
+      }
+
+      const currentValue = readCurrentFieldValue(target);
+      if (hasMeaningfulExistingFieldValue(currentValue)) {
+        return { ok: true, skipped: 'existing-value', currentValue };
       }
 
       if (target instanceof HTMLSelectElement) {
@@ -1323,8 +1499,18 @@
 
   function getFieldTargetStatusText() {
     const targets = getFieldTargets();
-    const count = FIELD_ORDER.filter((label) => isPlainObject(targets[label]) && norm(targets[label].selector)).length;
-    return `${count}/${FIELD_ORDER.length} saved`;
+    const baseSaved = FIELD_ORDER.filter((label) => isPlainObject(targets[label]) && norm(targets[label].selector)).length;
+    const customDefs = getSortedCustomFieldDefs();
+    if (!customDefs.length) return `${baseSaved}/${FIELD_ORDER.length} saved`;
+
+    const customSaved = customDefs.filter((item) => {
+      const azTarget = targets[item.label];
+      return isPlainObject(azTarget)
+        && norm(azTarget.selector)
+        && isPlainObject(item.providerTarget)
+        && norm(item.providerTarget.selector);
+    }).length;
+    return `${baseSaved}/${FIELD_ORDER.length} base + ${customSaved}/${customDefs.length} custom`;
   }
 
   function getTagTargetStatusText() {
@@ -1343,6 +1529,85 @@
 
   function normalizeHomeType(value) {
     return norm(value);
+  }
+
+  function normalizeCustomFieldValue(label, value, normalizer = '') {
+    const mode = lower(normalizer || inferFieldNormalizer(label));
+    const text = norm(value);
+    if (!text) return '';
+
+    if (mode === 'url') {
+      const urlMatch = text.match(/https?:\/\/\S+/i);
+      return norm(urlMatch ? urlMatch[0] : text);
+    }
+
+    if (mode === 'integer') {
+      const numberMatch = text.match(/[\d,]+/);
+      return numberMatch ? numberMatch[0].replace(/,/g, '') : '';
+    }
+
+    if (mode === 'decimal') {
+      const numberMatch = text.match(/\d+(?:\.\d+)?/);
+      return numberMatch ? numberMatch[0] : '';
+    }
+
+    if (mode === 'room') {
+      return normalizeRoomValue(text);
+    }
+
+    return text;
+  }
+
+  function getFallbackCustomFieldValue(label, value, job) {
+    const _job = job;
+    void _job;
+    return normalizeCustomFieldValue(label, value, inferFieldNormalizer(label));
+  }
+
+  function readElementDisplayValue(target) {
+    if (!(target instanceof Element)) return '';
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      return norm(target.value || target.getAttribute('value') || '');
+    }
+    if (target instanceof HTMLSelectElement) {
+      return norm(target.selectedOptions?.[0]?.textContent || target.value || '');
+    }
+    if (target instanceof HTMLAnchorElement && norm(target.href)) {
+      return norm(target.innerText || target.textContent || '') || norm(target.href);
+    }
+    return norm(target.innerText || target.textContent || target.getAttribute('aria-label') || '');
+  }
+
+  function extractCustomFieldValueFromProvider(fieldDef) {
+    if (!isPlainObject(fieldDef) || !isPlainObject(fieldDef.providerTarget)) return '';
+    const target = findSavedElement(fieldDef.providerTarget);
+    if (!(target instanceof Element)) return '';
+    return normalizeCustomFieldValue(fieldDef.label, readElementDisplayValue(target), fieldDef.normalizer);
+  }
+
+  function getCustomFieldValueMap(resultLike = {}) {
+    const source = isPlainObject(resultLike?.customFields) ? resultLike.customFields : {};
+    const values = {};
+    for (const fieldDef of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(fieldDef.label);
+      if (!label) continue;
+      values[label] = norm(source[label]);
+    }
+    return values;
+  }
+
+  function hasAnyCustomFieldValues(resultLike = {}) {
+    return Object.values(getCustomFieldValueMap(resultLike)).some((value) => !!norm(value));
+  }
+
+  function buildScrapedCustomFieldValues() {
+    const customFields = {};
+    for (const fieldDef of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(fieldDef.label);
+      if (!label) continue;
+      customFields[label] = extractCustomFieldValueFromProvider(fieldDef);
+    }
+    return customFields;
   }
 
   function extractBedroomTextValue(text) {
@@ -1380,7 +1645,11 @@
       norm(result.bathrooms),
       norm(result.homeType)
     ].filter(Boolean);
-    return parts.join(' | ') || norm(result.zillowUrl || '') || '-';
+    const customParts = Object.entries(getCustomFieldValueMap(result))
+      .filter(([, value]) => !!norm(value))
+      .slice(0, 3)
+      .map(([label, value]) => `${label}: ${value}`);
+    return [...parts, ...customParts].join(' | ') || norm(result.zillowUrl || '') || '-';
   }
 
   function buildZillowSearchUrl(address) {
@@ -1449,11 +1718,22 @@
   function buildFallbackResult(job, overrides = null) {
     const source = isPlainObject(job?.result) ? job.result : {};
     const extra = isPlainObject(overrides) ? overrides : {};
+    const sourceCustom = getCustomFieldValueMap(source);
+    const extraCustom = getCustomFieldValueMap(extra);
+    const customFields = {};
+    for (const label of getAllFieldLabels().filter((item) => !isBaseFieldLabel(item))) {
+      customFields[label] = getFallbackCustomFieldValue(
+        label,
+        firstNonEmpty(extraCustom[label], sourceCustom[label]),
+        job
+      );
+    }
     return {
       zillowUrl: firstNonEmpty(extra.zillowUrl, source.zillowUrl, job?.searchUrl),
       bedrooms: getFallbackRoomValue(firstNonEmpty(extra.bedrooms, source.bedrooms)),
       bathrooms: getFallbackRoomValue(firstNonEmpty(extra.bathrooms, source.bathrooms)),
-      homeType: getFallbackHomeType(firstNonEmpty(extra.homeType, source.homeType))
+      homeType: getFallbackHomeType(firstNonEmpty(extra.homeType, source.homeType)),
+      customFields
     };
   }
 
@@ -1824,7 +2104,8 @@
       zillowUrl: anchor.href,
       bedrooms,
       bathrooms,
-      homeType
+      homeType,
+      customFields: {}
     };
   }
 
@@ -1908,17 +2189,21 @@
       extractHomeTypeFromBody(),
       hints.homeType
     ));
+    const customFields = buildScrapedCustomFieldValues();
 
     return {
       zillowUrl: location.href,
       bedrooms,
       bathrooms,
-      homeType
+      homeType,
+      customFields
     };
   }
 
   async function zillowTick() {
     if (state.destroyed || !isZillowOrigin()) return;
+
+    if (await maybeHandleProviderPickerOnZillow()) return;
 
     const job = getJob();
     if (!isPlainObject(job)) return;
@@ -1945,7 +2230,11 @@
 
     if (!isZillowListingPage()) {
       const cardResult = scrapeZillowSearchResultCard(job);
-      const cardHasRoomFacts = resultHasRoomFacts(cardResult);
+      const cardHasAnyFacts = !!cardResult && (
+        resultHasRoomFacts(cardResult)
+        || !!norm(cardResult?.homeType)
+        || hasAnyCustomFieldValues(cardResult)
+      );
       if (!norm(job.listingNavigatedAt || '')) {
         const listing = findLikelyZillowListingLink(job);
         if (listing?.href) {
@@ -1957,7 +2246,7 @@
         }
       }
 
-      if (cardResult && cardHasRoomFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
+      if (cardResult && cardHasAnyFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
         job.status = 'result-ready';
         job.updatedAt = nowIso();
         job.resultReadyAt = nowIso();
@@ -1989,11 +2278,12 @@
     const hasBedrooms = !!norm(scraped.bedrooms);
     const hasBathrooms = !!norm(scraped.bathrooms);
     const hasHomeType = !!norm(scraped.homeType);
+    const hasCustomFieldData = hasAnyCustomFieldValues(scraped);
     const hasRoomFacts = hasBedrooms || hasBathrooms;
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
 
-    if (!hasRoomFacts && !hasHomeType) {
+    if (!hasRoomFacts && !hasHomeType && !hasCustomFieldData) {
       if (listingAgeMs >= CFG.zillowFactSettleMs) {
         const reason = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
         promoteJobToFallback(job, reason, {
@@ -2482,37 +2772,64 @@
 
   async function applyZillowResultToTicket(job) {
     const targets = getFieldTargets();
-    const fields = {
+    const baseFields = {
       'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
       'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
       'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
       'Home Type': getFallbackHomeType(job?.result?.homeType)
     };
+    const customFields = getCustomFieldValueMap(job?.result);
+    const labels = [
+      ...FIELD_ORDER,
+      ...getSortedCustomFieldDefs()
+        .map((item) => canonicalFieldLabel(item.label))
+        .filter((label) => !!label && !isBaseFieldLabel(label))
+    ];
 
     let changed = false;
-    for (const label of FIELD_ORDER) {
-      const value = norm(fields[label]);
+    let appliedCount = 0;
+    let skippedExistingCount = 0;
+
+    for (const label of labels) {
+      const value = norm(isBaseFieldLabel(label) ? baseFields[label] : customFields[label]);
       if (!value) {
         log(`Skipped blank Zillow field: ${label}`);
         continue;
       }
-      const result = await setFieldValue(targets[label], value);
+
+      const targetRecord = targets[label];
+      if (!isPlainObject(targetRecord) || !norm(targetRecord.selector)) {
+        log(`Skipped unsaved field target: ${label}`);
+        continue;
+      }
+
+      const result = await setFieldValue(targetRecord, value);
       if (result.ok) {
-        changed = true;
-        log(`Filled field: ${label} = ${value}`);
+        if (result.skipped === 'existing-value') {
+          skippedExistingCount += 1;
+          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}`);
+        } else {
+          changed = true;
+          appliedCount += 1;
+          log(`Filled field: ${label} = ${value}`);
+        }
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
       }
       await sleep(250);
     }
 
-    if (!changed) {
-      setStatus('No Zillow fields were applied');
-      log('No Zillow field values were applied');
-      return false;
+    if (changed) {
+      const updated = await clickUpdateButton();
+      if (!updated) {
+        setStatus('Ticket update failed');
+        return false;
+      }
+    } else if (skippedExistingCount) {
+      log(`No ticket field updates needed; ${skippedExistingCount} field(s) were already filled`);
+    } else {
+      log('No Zillow field values needed to be applied');
     }
-
-    await clickUpdateButton();
 
     const tagsOk = await applyLegacyTagReplacement();
     if (!tagsOk) {
@@ -2521,6 +2838,9 @@
     }
 
     state.zillowSummary = summarizeResult(job?.result);
+    if (changed) setStatus(`Applied ${appliedCount} Zillow field(s)`);
+    else if (skippedExistingCount) setStatus('Ticket fields already filled');
+    else setStatus('No Zillow field changes needed');
     return true;
   }
 
@@ -2731,7 +3051,7 @@
   }
 
   function ensureHoverBox() {
-    if (state.hoverBox || !isAzOrigin()) return;
+    if (state.hoverBox) return;
     const box = document.createElement('div');
     box.setAttribute(UI_ATTR, '1');
     Object.assign(box.style, {
@@ -2745,6 +3065,42 @@
     });
     document.documentElement.appendChild(box);
     state.hoverBox = box;
+  }
+
+  function ensureProviderBanner() {
+    if (state.providerBanner || !isZillowOrigin()) return;
+    const banner = document.createElement('div');
+    banner.setAttribute(UI_ATTR, '1');
+    Object.assign(banner.style, {
+      position: 'fixed',
+      left: '12px',
+      right: '12px',
+      bottom: '12px',
+      zIndex: String(CFG.zIndex),
+      padding: '12px 14px',
+      borderRadius: '14px',
+      background: 'rgba(15, 23, 42, 0.96)',
+      color: '#e5e7eb',
+      border: '1px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 16px 38px rgba(0,0,0,0.35)',
+      font: '13px/1.45 Segoe UI, Tahoma, Arial, sans-serif'
+    });
+    banner.innerHTML = `<div ${UI_ATTR}="1" style="font-weight:800;margin-bottom:4px;">${SCRIPT_NAME}</div><div ${UI_ATTR}="1" id="tm-az-zillow-provider-banner-text">Preparing Zillow field capture...</div>`;
+    document.documentElement.appendChild(banner);
+    state.providerBanner = banner;
+  }
+
+  function setProviderBannerMessage(message) {
+    if (!isZillowOrigin()) return;
+    ensureProviderBanner();
+    const node = state.providerBanner?.querySelector?.('#tm-az-zillow-provider-banner-text');
+    if (node) node.textContent = norm(message || '') || 'Preparing Zillow field capture...';
+  }
+
+  function clearProviderBanner() {
+    if (!state.providerBanner) return;
+    try { state.providerBanner.remove(); } catch {}
+    state.providerBanner = null;
   }
 
   function isUiElement(el) {
@@ -2775,16 +3131,204 @@
     state.hoverBox.style.height = `${rect.height}px`;
   }
 
-  function startPicker(type) {
+  function buildFieldPickerItems(labels) {
+    return (Array.isArray(labels) ? labels : [])
+      .map((label) => canonicalFieldLabel(label))
+      .filter(Boolean)
+      .map((label) => ({ key: label, label }));
+  }
+
+  function openProviderCaptureTab(request) {
+    if (!isPlainObject(request) || !norm(request.searchUrl || '')) return false;
+    try {
+      if (typeof GM_openInTab === 'function') {
+        GM_openInTab(request.searchUrl, { active: true, insert: true, setParent: true });
+        return true;
+      }
+    } catch {}
+
+    try {
+      const opened = window.open(request.searchUrl, '_blank');
+      if (opened) {
+        try { opened.focus(); } catch {}
+      }
+      return !!opened;
+    } catch {
+      return false;
+    }
+  }
+
+  function requestCustomFieldProviderCapture(fieldConfig) {
+    if (!isPlainObject(fieldConfig)) return false;
+
+    const label = canonicalFieldLabel(fieldConfig.label);
+    if (!label || isBaseFieldLabel(label)) return false;
+
+    const addressInfo = isPlainObject(fieldConfig.addressInfo) ? fieldConfig.addressInfo : {};
+    const request = {
+      label,
+      normalizer: norm(fieldConfig.normalizer || inferFieldNormalizer(label)),
+      ticketId: norm(fieldConfig.ticketId || addressInfo.ticketId || ''),
+      address: norm(addressInfo.address || fieldConfig.address || ''),
+      street: norm(addressInfo.street || fieldConfig.street || ''),
+      city: norm(addressInfo.city || fieldConfig.city || ''),
+      state: norm(addressInfo.state || fieldConfig.state || ''),
+      postal: norm(addressInfo.postal || fieldConfig.postal || ''),
+      searchUrl: firstNonEmpty(fieldConfig.searchUrl, buildZillowSearchUrl(addressInfo.address || fieldConfig.address || '')),
+      requestedAt: nowIso()
+    };
+
+    saveCustomFieldDef(label, { normalizer: request.normalizer });
+    saveProviderPickerRequest(request);
+
+    const opened = openProviderCaptureTab(request);
+    if (opened) {
+      log(`Opened Zillow field capture for ${label}: ${request.searchUrl}`);
+    } else {
+      log(`Could not auto-open Zillow for ${label}; open this URL manually: ${request.searchUrl}`);
+    }
+    return opened;
+  }
+
+  async function startSingleFieldTargetFlow() {
     if (!isAzOrigin() || state.busy || state.picker) return;
+
+    const raw = window.prompt('Field name to add or update', 'Home Sqft');
+    const fieldLabel = canonicalFieldLabel(raw);
+    if (!fieldLabel) {
+      log('Add field target canceled');
+      return;
+    }
+
+    const builtIn = isBaseFieldLabel(fieldLabel);
+    let customField = null;
+
+    if (!builtIn) {
+      const openTicket = getOpenTicketInfo();
+      const ticketId = norm(openTicket.ticketId || '');
+      if (!ticketId) {
+        setStatus('Open a ticket on Main first');
+        log(`Open the AgencyZoom ticket before adding ${fieldLabel}`);
+        return;
+      }
+
+      const mainReady = await ensureMainTab();
+      if (!mainReady) {
+        setStatus('Main tab not ready');
+        return;
+      }
+
+      const addressInfo = readAzAddressInfo(ticketId);
+      if (!norm(addressInfo.address)) {
+        setStatus('Address read failed');
+        log(`Could not read address for ${fieldLabel} provider capture`);
+        return;
+      }
+
+      customField = {
+        label: fieldLabel,
+        normalizer: inferFieldNormalizer(fieldLabel),
+        ticketId,
+        addressInfo,
+        searchUrl: buildZillowSearchUrl(addressInfo.address)
+      };
+      saveCustomFieldDef(fieldLabel, { normalizer: customField.normalizer });
+    }
+
+    startPicker('field-single', {
+      items: buildFieldPickerItems([fieldLabel]),
+      customField,
+      doneMessage: builtIn
+        ? `${fieldLabel} target saved`
+        : `${fieldLabel} AZ target saved; select the Zillow source in the opened tab`
+    });
+  }
+
+  function startMissingFieldPicker() {
+    if (!isAzOrigin() || state.busy || state.picker) return;
+    const targets = getFieldTargets();
+    const missing = FIELD_ORDER.filter((label) => !(isPlainObject(targets[label]) && norm(targets[label].selector)));
+    if (!missing.length) {
+      setStatus('No missing base field targets');
+      log('No missing base field targets');
+      return;
+    }
+
+    startPicker('fields', {
+      items: buildFieldPickerItems(missing),
+      doneMessage: 'Missing field targets saved'
+    });
+  }
+
+  async function maybeHandleProviderPickerOnZillow() {
+    const request = getProviderPickerRequest();
+    if (!isPlainObject(request)) {
+      if (state.picker?.type === 'provider') stopPicker('', false);
+      clearProviderBanner();
+      return false;
+    }
+
+    const label = canonicalFieldLabel(request.label);
+    if (!label) {
+      clearProviderPickerRequest();
+      clearProviderBanner();
+      return false;
+    }
+
+    const activeProviderLabel = state.picker?.type === 'provider'
+      ? canonicalFieldLabel(state.picker.items?.[state.picker.index]?.label || '')
+      : '';
+    if (state.picker?.type === 'provider' && activeProviderLabel && activeProviderLabel !== label) {
+      stopPicker('', false);
+    }
+
+    if (!isZillowListingPage()) {
+      const listing = findLikelyZillowListingLink(request);
+      if (listing?.href && norm(listing.href) !== norm(location.href)) {
+        setProviderBannerMessage(`Opening the Zillow listing for ${label}...`);
+        try { location.assign(listing.href); } catch {}
+        return true;
+      }
+
+      setProviderBannerMessage(`Field capture for ${label}: open the Zillow listing for ${request.address || 'this address'}, then click the source element.`);
+      return true;
+    }
+
+    if (state.picker?.type !== 'provider') {
+      startPicker('provider', {
+        items: buildFieldPickerItems([label]),
+        providerRequest: request,
+        doneMessage: `Zillow source saved for ${label}`
+      });
+    } else {
+      setProviderBannerMessage(`Field capture for ${label}: click the Zillow source element. Press Esc to cancel.`);
+    }
+
+    return true;
+  }
+
+  function startPicker(type, options = {}) {
+    const allowOnZillow = type === 'provider';
+    if ((!allowOnZillow && !isAzOrigin()) || (allowOnZillow && !isZillowOrigin()) || state.busy || state.picker) return;
+
+    const items = Array.isArray(options.items) && options.items.length
+      ? options.items.map((item) => deepClone(item))
+      : (type === 'fields'
+        ? buildFieldPickerItems(FIELD_ORDER)
+        : TAG_ORDER.map((item) => deepClone(item)));
+    if (!items.length) {
+      log(`No picker items found for ${type}`);
+      return;
+    }
 
     state.picker = {
       type,
-      items: type === 'fields'
-        ? FIELD_ORDER.map((label) => ({ key: label, label }))
-        : TAG_ORDER.map((item) => deepClone(item)),
+      items,
       index: 0,
-      primerPending: type === 'tags'
+      primerPending: type === 'tags',
+      customField: isPlainObject(options.customField) ? deepClone(options.customField) : null,
+      providerRequest: isPlainObject(options.providerRequest) ? deepClone(options.providerRequest) : null,
+      doneMessage: norm(options.doneMessage || '')
     };
 
     ensureHoverBox();
@@ -2814,7 +3358,13 @@
     };
 
     state.pickerKeydown = (event) => {
-      if (event.key === 'Escape') stopPicker('Picker canceled');
+      if (event.key !== 'Escape') return;
+      if (state.picker?.type === 'provider') {
+        clearProviderPickerRequest();
+        stopPicker('Provider picker canceled');
+        return;
+      }
+      stopPicker('Picker canceled');
     };
 
     document.addEventListener('mousemove', state.pickerMove, true);
@@ -2825,6 +3375,9 @@
     if (type === 'tags') {
       setStatus(`Picker: click ${current.label}`);
       log(`Tag picker started: first click ignored. Use it to open tags, then click ${current.label}`);
+    } else if (type === 'provider') {
+      setProviderBannerMessage(`Field capture for ${current.label}: click the Zillow source element. Press Esc to cancel.`);
+      log(`Zillow provider picker started: click the source for ${current.label}`);
     } else {
       setStatus(`Picker: click ${current.label}`);
       log(`Field picker started: click ${current.label}`);
@@ -2834,6 +3387,7 @@
 
   function stopPicker(message, logIt = true) {
     if (!state.picker) return;
+    const pickerType = state.picker.type;
 
     document.removeEventListener('mousemove', state.pickerMove, true);
     document.removeEventListener('click', state.pickerClick, true);
@@ -2844,9 +3398,10 @@
     state.picker = null;
     state.hoveredEl = null;
     updateHoverBox(null);
+    if (pickerType === 'provider') clearProviderBanner();
 
     if (logIt && message) log(message);
-    setStatus(state.running ? 'Ready' : 'Stopped');
+    if (isAzOrigin()) setStatus(state.running ? 'Ready' : 'Stopped');
     renderAll();
   }
 
@@ -2854,7 +3409,7 @@
     if (!state.picker) return;
     const item = state.picker.items[state.picker.index];
 
-    if (state.picker.type === 'fields') {
+    if (state.picker.type === 'fields' || state.picker.type === 'field-single') {
       const selector = buildStableSelector(target);
       if (!selector) {
         log('Picker failed: could not build stable selector');
@@ -2871,6 +3426,35 @@
       const targets = getFieldTargets();
       targets[item.key] = record;
       saveTargets(GM_KEYS.fieldTargets, targets);
+      if (state.picker.type === 'field-single' && isPlainObject(state.picker.customField)) {
+        requestCustomFieldProviderCapture(state.picker.customField);
+      }
+    } else if (state.picker.type === 'provider') {
+      const selector = buildStableSelector(target);
+      if (!selector) {
+        log('Provider picker failed: could not build stable selector');
+        return;
+      }
+
+      const request = state.picker.providerRequest || getProviderPickerRequest() || {};
+      const label = canonicalFieldLabel(item.label || request.label || '');
+      if (!label) {
+        log('Provider picker failed: field label missing');
+        return;
+      }
+
+      saveCustomFieldDef(label, {
+        normalizer: norm(request.normalizer || inferFieldNormalizer(label)),
+        providerTarget: {
+          selector,
+          fingerprint: buildFingerprint(target),
+          label: readElementDisplayValue(target) || label,
+          href: target instanceof HTMLAnchorElement ? norm(target.href || '') : '',
+          sourceUrl: location.href,
+          savedAt: nowIso()
+        }
+      });
+      clearProviderPickerRequest();
     } else {
       const record = buildTagTargetRecord(target);
       if (!record) {
@@ -2889,7 +3473,13 @@
 
     state.picker.index += 1;
     if (state.picker.index >= state.picker.items.length) {
-      stopPicker(state.picker.type === 'fields' ? 'Field targets saved' : 'Tag targets saved');
+      const doneMessage = state.picker.doneMessage
+        || (state.picker.type === 'tags'
+          ? 'Tag targets saved'
+          : state.picker.type === 'provider'
+            ? 'Zillow provider target saved'
+            : 'Field targets saved');
+      stopPicker(doneMessage);
       return;
     }
 
@@ -2900,6 +3490,8 @@
 
   function resetFieldTargets() {
     saveTargets(GM_KEYS.fieldTargets, {});
+    saveCustomFields({});
+    clearProviderPickerRequest();
     log('Field targets reset');
     renderAll();
   }
@@ -2951,6 +3543,8 @@
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-clear-job" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">CLEAR JOB</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SET FIELD TARGETS</button>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-missing-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SET MISSING FIELDS</button>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-add-field-target" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">ADD FIELD TARGET</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-reset-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#f59e0b;color:#111827;font-weight:800;cursor:pointer;">SET TAG TARGETS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-reset-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET TAGS</button>
@@ -2973,6 +3567,8 @@
     state.ui.toggle = panel.querySelector('#tm-az-zillow-ticket-enricher-toggle');
     state.ui.clearJob = panel.querySelector('#tm-az-zillow-ticket-enricher-clear-job');
     state.ui.setFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-fields');
+    state.ui.setMissingFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-missing-fields');
+    state.ui.addFieldTarget = panel.querySelector('#tm-az-zillow-ticket-enricher-add-field-target');
     state.ui.resetFields = panel.querySelector('#tm-az-zillow-ticket-enricher-reset-fields');
     state.ui.setTags = panel.querySelector('#tm-az-zillow-ticket-enricher-set-tags');
     state.ui.resetTags = panel.querySelector('#tm-az-zillow-ticket-enricher-reset-tags');
@@ -3017,6 +3613,8 @@
     });
 
     state.ui.setFields?.addEventListener('click', () => startPicker('fields'));
+    state.ui.setMissingFields?.addEventListener('click', startMissingFieldPicker);
+    state.ui.addFieldTarget?.addEventListener('click', startSingleFieldTargetFlow);
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
     state.ui.setTags?.addEventListener('click', () => startPicker('tags'));
     state.ui.resetTags?.addEventListener('click', resetTagTargets);
@@ -3042,9 +3640,19 @@
       state.ui.toggle.style.background = state.running ? '#b91c1c' : '#15803d';
     }
 
-    if (state.ui.clearJob) {
-      state.ui.clearJob.disabled = state.busy;
-      state.ui.clearJob.style.opacity = state.busy ? '0.65' : '1';
+    const controlsLocked = state.busy || !!state.picker;
+    for (const button of [
+      state.ui.clearJob,
+      state.ui.setFields,
+      state.ui.setMissingFields,
+      state.ui.addFieldTarget,
+      state.ui.resetFields,
+      state.ui.setTags,
+      state.ui.resetTags
+    ]) {
+      if (!button) continue;
+      button.disabled = controlsLocked;
+      button.style.opacity = controlsLocked ? '0.65' : '1';
     }
 
     renderLogs();
