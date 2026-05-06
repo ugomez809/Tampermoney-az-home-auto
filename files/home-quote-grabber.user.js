@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.18
+// @version      4.1.21
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -20,9 +20,10 @@
 
   if (window.top !== window.self) return;
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.18';
+  const VERSION = '4.1.21';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -104,6 +105,7 @@
     coveragesScreen: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen',
     mainArea: 'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-SideBySideScreen-SideBySideNewTableLayoutPanelSet-SideBySideNewTableLayoutDV',
     quoteButtonHost: 'SubmissionWizard-Quote',
+    extendedReplacementReturnToCoverages: 'DNQFile_ExtPopup-__crumb__',
 
     name: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-Name_Input',
     mailingAddress: 'SubmissionWizard-LOBWizardStepGroup-SubmissionWizard_PolicyInfoScreen-SubmissionWizard_PolicyInfoDV-AccountInfoInputSet-PolicyAddressDisplayInputSet-PolicyAddress_Ext_Input',
@@ -134,6 +136,11 @@
   const COVERAGES_WARNING_FRAGMENTS = [
     'deductible has been increased.',
     'minimum $5,000 split water deductible.'
+  ];
+
+  const EXTENDED_REPLACEMENT_INELIGIBLE_FRAGMENTS = [
+    'extended replacement coverage is not eligible',
+    'public protection class is a 10'
   ];
 
   const state = {
@@ -171,6 +178,18 @@
     customFieldPickerClick: null,
     customFieldPickerKeydown: null
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   const SNAPSHOT_EVERY_TICKS = 10;
   const OPTIONAL_FINAL_HOME_ROW_KEYS = new Set([
@@ -790,6 +809,7 @@
       };
 
     localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
+    renderProgressPanel();
 
     const bundleSave = saveBundleSection('home', next, next.currentJob, {
       submissionNumber: next.row['Submission Number'] || next.currentJob['SubmissionNumber'] || '',
@@ -1470,6 +1490,24 @@
     return '';
   }
 
+  function getExtendedReplacementIneligibleWarningText() {
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      try {
+        const messages = Array.from(doc.querySelectorAll('.gw-value-readonly-wrapper')).filter(isVisibleEl);
+        for (const message of messages) {
+          const text = normalizeText(message.textContent || '');
+          if (!text) continue;
+          const lowerText = text.toLowerCase();
+          if (EXTENDED_REPLACEMENT_INELIGIBLE_FRAGMENTS.every((fragment) => lowerText.includes(fragment))) {
+            return text;
+          }
+        }
+      } catch {}
+    }
+    return '';
+  }
+
   function normalizeCoveragesWarningSignature(text) {
     return normalizeText(text || '')
       .toLowerCase()
@@ -1602,7 +1640,8 @@
       });
   }
 
-  async function clickQuoteUntilTransition() {
+  async function clickQuoteUntilTransition(options = {}) {
+    const allowExtendedReplacementRecovery = options.allowExtendedReplacementRecovery !== false;
     for (let attempt = 1; attempt <= CFG.maxQuoteAttempts; attempt++) {
       setStatus(`Clicking Quote (${attempt}/${CFG.maxQuoteAttempts})`);
       const baselineWarningText = getCoveragesRetryWarningText();
@@ -1620,6 +1659,7 @@
       const transitionOrWarning = await waitFor(
         () => {
           const afterSnapshot = readNavigationSnapshot();
+          if (getExtendedReplacementIneligibleWarningText()) return true;
           if (!headerStillCoverages()) return true;
           if (advancedToSubmissionState(beforeSnapshot, afterSnapshot, 'quoted')) return true;
           const currentWarningText = getCoveragesRetryWarningText();
@@ -1630,24 +1670,35 @@
         `Quote transition (attempt ${attempt})`
       );
       const afterSnapshot = readNavigationSnapshot();
+      const extendedReplacementWarningText = getExtendedReplacementIneligibleWarningText();
       const warningText = getCoveragesRetryWarningText();
       const warningSig = normalizeCoveragesWarningSignature(warningText);
       const warningChanged = !!warningSig && warningSig !== baselineWarningSig;
       const movedOff = transitionOrWarning && (
-        !headerStillCoverages() ||
+        isQuoteScreenReady() ||
         advancedToSubmissionState(beforeSnapshot, afterSnapshot, 'quoted') ||
         isSubmissionQuoted()
       );
+      if (extendedReplacementWarningText) {
+        log(`Detected Extended Replacement eligibility warning after Quote attempt ${attempt}: ${extendedReplacementWarningText}`);
+        if (allowExtendedReplacementRecovery) {
+          return recoverExtendedReplacementIneligibleWarning(extendedReplacementWarningText);
+        }
+        return { ok: false, needsCoverageReapply: false, warningText: extendedReplacementWarningText, extendedReplacementIneligible: true };
+      }
       if (movedOff) {
         log(`Quote succeeded (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
-        return { ok: true, needsCoverageReapply: false, warningText: '' };
+        return { ok: true, needsCoverageReapply: false, warningText: '', extendedReplacementIneligible: false };
       }
       if (warningChanged) {
         log(`Detected Coverages warning after Quote attempt ${attempt}: ${warningText}`);
-        return { ok: false, needsCoverageReapply: true, warningText };
+        return { ok: false, needsCoverageReapply: true, warningText, extendedReplacementIneligible: false };
       }
       if (warningText) {
         log(`Coverages warning still visible after Quote attempt ${attempt}: ${warningText}`);
+      }
+      if (transitionOrWarning && !headerStillCoverages()) {
+        log(`Quote navigation left Coverages but Quote is not ready yet (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
       }
       log(`Still on Coverages after Quote attempt ${attempt} (${describeNavigationSnapshot(beforeSnapshot)} -> ${describeNavigationSnapshot(afterSnapshot)})`);
       if (attempt < CFG.maxQuoteAttempts) {
@@ -1658,9 +1709,14 @@
     const finalWarningText = getCoveragesRetryWarningText();
     if (finalWarningText) {
       log(`Coverages warning remained visible after Quote retries: ${finalWarningText}`);
-      return { ok: false, needsCoverageReapply: true, warningText: finalWarningText };
+      return { ok: false, needsCoverageReapply: true, warningText: finalWarningText, extendedReplacementIneligible: false };
     }
-    return { ok: false, needsCoverageReapply: false, warningText: '' };
+    const finalExtendedReplacementWarningText = getExtendedReplacementIneligibleWarningText();
+    if (finalExtendedReplacementWarningText) {
+      log(`Extended Replacement eligibility warning remained visible after Quote retries: ${finalExtendedReplacementWarningText}`);
+      return { ok: false, needsCoverageReapply: false, warningText: finalExtendedReplacementWarningText, extendedReplacementIneligible: true };
+    }
+    return { ok: false, needsCoverageReapply: false, warningText: '', extendedReplacementIneligible: false };
   }
 
   async function ensureEditMode() {
@@ -1749,6 +1805,62 @@
     log(`${label}: checked`);
   }
 
+  async function clearCheckboxVerified(selector, expectedLabels, label) {
+    const el = await waitForField(selector, expectedLabels, label);
+    if (!el.checked) {
+      log(`${label}: already unchecked`);
+      return;
+    }
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    strongClick(el);
+    await sleep(CFG.afterFieldMs);
+    if (el.checked) {
+      try { el.checked = false; } catch {}
+      dispatchValueEvents(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    if (el.checked) {
+      strongClick(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    if (el.checked) throw new Error(`${label}: failed to stay unchecked`);
+    log(`${label}: unchecked`);
+  }
+
+  async function recoverExtendedReplacementIneligibleWarning(warningText = '') {
+    const message = normalizeText(warningText || getExtendedReplacementIneligibleWarningText());
+    log(`Extended Replacement eligibility warning detected: ${message || 'Public Protection Class 10'}`);
+    setStatus('Removing ineligible Extended Replacement');
+
+    const returnToCoverages = findByIdInDocs(IDS.extendedReplacementReturnToCoverages);
+    if (!returnToCoverages || !isVisibleEl(returnToCoverages)) {
+      throw new Error('Extended Replacement warning showed, but Return to Coverages was not found');
+    }
+
+    strongClick(returnToCoverages);
+    await sleep(CFG.afterClickMs);
+
+    const returnedToCoverages = await waitFor(
+      () => isOnCoverageEditPage() || !!findEditAllTarget() || !!queryFirstVisible(SEL.enhExtendedReplacementCheckbox),
+      CFG.waitTimeoutMs,
+      'Return to Coverages'
+    );
+    if (!returnedToCoverages) {
+      throw new Error('Return to Coverages did not bring the Home Coverages screen back');
+    }
+
+    await ensureEditMode();
+    await clearCheckboxVerified(
+      SEL.enhExtendedReplacementCheckbox,
+      ['Extended Replacement Cost'],
+      'Enhanced / Extended Replacement Cost checkbox'
+    );
+
+    setStatus('Retrying Quote without Extended Replacement');
+    await sleep(Math.max(CFG.afterFieldMs, 1600));
+    return clickQuoteUntilTransition({ allowExtendedReplacementRecovery: false });
+  }
+
   async function applyCoverageSelections() {
     await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
     await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
@@ -1780,6 +1892,10 @@
 
       if (quoteResult.needsCoverageReapply) {
         throw new Error(`Deductible warning persisted after coverages retry: ${quoteResult.warningText || 'Split Water deductible warning'}`);
+      }
+
+      if (quoteResult.extendedReplacementIneligible) {
+        throw new Error(`Extended Replacement warning persisted after removing the coverage: ${quoteResult.warningText || 'Public Protection Class 10'}`);
       }
 
       throw new Error('Initial Quote click did not move off Coverages');
@@ -3509,6 +3625,7 @@
           <button id="hb-home-quote-grabber-clearcustom" style="border:0;border-radius:8px;padding:7px 8px;font-weight:700;cursor:pointer;background:#4b5563;color:#fff;">CLEAR EXTRA</button>
         </div>
         <div id="hb-home-quote-grabber-status" style="margin-bottom:8px;padding:6px 8px;border-radius:8px;background:#1f2937;">Waiting...</div>
+        <div id="hb-home-quote-grabber-progress" style="margin-bottom:8px;padding:8px;border-radius:8px;background:#0f172a;border:1px solid #243041;"></div>
         <div id="hb-home-quote-grabber-logs" style="max-height:220px;overflow:auto;background:#0b1220;border:1px solid #243041;border-radius:8px;padding:6px;"></div>
       </div>
     `;
@@ -3584,15 +3701,85 @@
       addCustomBtn,
       clearCustomBtn,
       status: panel.querySelector('#hb-home-quote-grabber-status'),
+      progress: panel.querySelector('#hb-home-quote-grabber-progress'),
       logs: panel.querySelector('#hb-home-quote-grabber-logs')
     };
     updateCustomFieldButtons();
+    renderProgressPanel();
   }
 
   function setStatus(text) {
     state.lastStatus = text;
     if (state.ui?.status) state.ui.status.textContent = text;
+    renderProgressPanel();
     writeActivityState(state.activityState, text);
+  }
+
+  function escapeProgressValue(value) {
+    return escapeHtml(normalizeText(value || '') || '(blank)');
+  }
+
+  function getProgressPanelSnapshot() {
+    const payload = readHomePayloadRaw();
+    const row = isPlainObject(payload?.row) ? payload.row : {};
+    const progress = {
+      ...emptyHomeProgress(),
+      ...(isPlainObject(payload?.meta?.progress) ? payload.meta.progress : {})
+    };
+    const currentJob = readCurrentJob();
+    const azId = normalizeText(currentJob['AZ ID'] || payload?.['AZ ID'] || payload?.currentJob?.['AZ ID'] || state.currentAzId || '');
+    const phase = normalizeText(payload?.meta?.phase || '') || 'idle';
+    const ready = payload?.ready === true;
+    const pass1Ready = progress.pass1PricingCaptured === true
+      || (!!normalizeText(row['Standard Pricing No Auto Discount']) && !!normalizeText(row['Enhance Pricing No Auto Discount']));
+    const pass2Ready = progress.pass2PricingCaptured === true
+      || (!!normalizeText(row['Standard Pricing Auto Discount']) && !!normalizeText(row['Enhance Pricing Auto Discount']));
+    const finalRefreshReady = progress.finalRefreshComplete === true;
+    return {
+      azId,
+      phase,
+      ready,
+      progress,
+      pass1Ready,
+      pass2Ready,
+      finalRefreshReady,
+      submissionNumber: normalizeText(row['Submission Number'] || payload?.currentJob?.SubmissionNumber || ''),
+      accountNumber: normalizeText(row['Account Number'] || payload?.currentJob?.['Account Number'] || ''),
+      doneValue: normalizeText(row['Done?'] || ''),
+      resultValue: normalizeText(row.Result || ''),
+      updatedAt: normalizeText(payload?.meta?.updatedAt || payload?.savedAt || '')
+    };
+  }
+
+  function renderProgressFlag(label, ready, accent = '#22c55e') {
+    const bg = ready ? accent : '#374151';
+    const color = ready ? '#052e16' : '#e5e7eb';
+    return `<span style="display:inline-block;padding:2px 6px;border-radius:999px;background:${bg};color:${color};font-weight:700;">${escapeHtml(label)}: ${ready ? 'YES' : 'NO'}</span>`;
+  }
+
+  function renderProgressPanel() {
+    if (!state.ui?.progress) return;
+    const snap = getProgressPanelSnapshot();
+    const rawFlags = [
+      renderProgressFlag('Policy', snap.progress.earlyPolicyInfoCaptured === true, '#86efac'),
+      renderProgressFlag('Dwelling', snap.progress.earlyDwellingCaptured === true, '#93c5fd'),
+      renderProgressFlag('Pass 1', snap.pass1Ready, '#fde68a'),
+      renderProgressFlag('Pass 2', snap.pass2Ready, '#f9a8d4'),
+      renderProgressFlag('Final', snap.finalRefreshReady, '#c4b5fd'),
+      renderProgressFlag('Ready', snap.ready, '#22c55e')
+    ].join(' ');
+
+    state.ui.progress.innerHTML = [
+      '<div style="font-weight:800;color:#93c5fd;margin-bottom:6px;">Raw Data Progress</div>',
+      `<div style="margin-bottom:4px;"><strong>AZ ID:</strong> ${escapeProgressValue(snap.azId)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Phase:</strong> ${escapeProgressValue(snap.phase)}</div>`,
+      `<div style="margin-bottom:6px;"><strong>Updated:</strong> ${escapeProgressValue(snap.updatedAt)}</div>`,
+      `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">${rawFlags}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Submission:</strong> ${escapeProgressValue(snap.submissionNumber)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Account:</strong> ${escapeProgressValue(snap.accountNumber)}</div>`,
+      `<div style="margin-bottom:4px;"><strong>Done?:</strong> ${escapeProgressValue(snap.doneValue)}</div>`,
+      `<div><strong>Result:</strong> ${escapeProgressValue(snap.resultValue)}</div>`
+    ].join('');
   }
 
   function readScriptActivityMap() {
@@ -3639,6 +3826,7 @@
         .map((x) => `<div style="margin-bottom:4px;">${escapeHtml(x)}</div>`)
         .join('');
     }
+    renderProgressPanel();
     persistLogsThrottled();
   }
 
