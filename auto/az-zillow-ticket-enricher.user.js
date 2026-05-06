@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.6
+// @version      1.2.7
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.6';
+  const VERSION = '1.2.7';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -1045,12 +1045,22 @@
 
   function getTicketOpenTargets(card) {
     const link = card?.querySelector(SEL.customerLink) || null;
-    return [card, link].filter((target, index, list) => target && list.indexOf(target) === index);
+    return [link, card].filter((target, index, list) => target && list.indexOf(target) === index);
   }
 
-  async function waitForOpenTicket(ticketId, timeoutMs = CFG.openTryMs) {
+  function describeTicketOpenTarget(target, card) {
+    if (!(target instanceof Element)) return 'unknown target';
+    if (target === card) return 'ticket card';
+
+    const tag = String(target.tagName || '').toLowerCase();
+    const classes = Array.from(target.classList || []).slice(0, 3).join('.');
+    return classes ? `${tag}.${classes}` : tag;
+  }
+
+  async function waitForOpenTicket(ticketId, timeoutMs = CFG.openTryMs, options = {}) {
     const started = Date.now();
-    let drawerSeenAt = 0;
+    let lastDrawerKey = '';
+    const targetLabel = norm(options?.targetLabel || 'ticket target');
 
     while ((Date.now() - started) < timeoutMs) {
       if (!state.running || state.destroyed) return false;
@@ -1058,13 +1068,16 @@
       if (String(info.ticketId || '') === String(ticketId || '')) return true;
 
       if (isTicketDrawerOpen()) {
-        if (!drawerSeenAt) drawerSeenAt = Date.now();
-        if ((Date.now() - drawerSeenAt) >= CFG.openCheckAfterClickMs) {
-          log(`Drawer detected open from side-actions after 2s | ${ticketId || '(unknown)'}`);
-          return true;
+        const openId = norm(info.ticketId || '');
+        const drawerKey = openId || '__blank__';
+        if (lastDrawerKey !== drawerKey) {
+          lastDrawerKey = drawerKey;
+          if (openId && openId !== norm(ticketId || '')) {
+            log(`Drawer opened for ${openId} after clicking ${targetLabel}; wanted ${ticketId || '(unknown)'}`);
+          } else if (!openId) {
+            log(`Drawer opened after clicking ${targetLabel}, but the ticket ID was not readable yet | wanted ${ticketId || '(unknown)'}`);
+          }
         }
-      } else {
-        drawerSeenAt = 0;
       }
 
       await sleep(120);
@@ -1080,7 +1093,12 @@
       await foregroundSleep(CFG.gapMs);
     }
     if (currentOpen && currentOpen === ticketId && isTicketDrawerOpen()) return true;
-    if (isTicketDrawerOpen()) return true;
+    if (isTicketDrawerOpen()) {
+      log(`Closing stray open drawer before opening ${ticketId} | ${currentOpen || 'unknown ticket'}`);
+      const closed = await closeTicketDrawer();
+      if (!closed) return false;
+      await foregroundSleep(CFG.gapMs);
+    }
 
     const targets = getTicketOpenTargets(card);
     const overallStart = Date.now();
@@ -1091,10 +1109,24 @@
 
       for (const target of targets) {
         if (!target) continue;
+        const targetLabel = describeTicketOpenTarget(target, card);
         strongClick(target);
-        log(`Clicked ticket target, waiting 2s for drawer...`);
-        const ok = await waitForOpenTicket(ticketId, CFG.openTryMs);
+        log(`Clicked ${targetLabel}, waiting for ticket ${ticketId}...`);
+        const ok = await waitForOpenTicket(ticketId, CFG.openTryMs, { targetLabel });
         if (ok) return true;
+
+        if (isTicketDrawerOpen()) {
+          const strayInfo = getOpenTicketInfo();
+          const strayId = norm(strayInfo.ticketId || '');
+          if (strayId && strayId !== norm(ticketId || '')) {
+            log(`Wrong drawer opened for ${strayId} while waiting for ${ticketId}; closing and retrying`);
+          } else {
+            log(`Drawer opened without a matching ticket ID after clicking ${targetLabel}; closing and retrying ${ticketId}`);
+          }
+          const closed = await closeTicketDrawer();
+          if (!closed) return false;
+          await foregroundSleep(CFG.gapMs);
+        }
       }
 
       const okGap = await foregroundSleep(CFG.gapMs);
@@ -1302,7 +1334,11 @@
   }
 
   function normalizeRoomValue(value) {
-    return norm(value);
+    const text = norm(value);
+    if (!text) return '';
+    if (/^studio$/i.test(text)) return 'Studio';
+    const numberMatch = text.match(/\d+(?:\.\d+)?/);
+    return numberMatch ? numberMatch[0] : text;
   }
 
   function normalizeHomeType(value) {
@@ -1313,9 +1349,9 @@
     const source = norm(text);
     if (!source) return '';
     const labeledMatch = source.match(/\b(?:Bedrooms?|Beds?)\s*:\s*([^|,;\n]+)/i);
-    if (labeledMatch) return norm(labeledMatch[0]);
+    if (labeledMatch) return norm(labeledMatch[1]);
     if (/\bstudio\b/i.test(source)) return 'Studio';
-    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:bd|bds|bed|beds|bedroom|bedrooms))\b/i);
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?)\s*(?:bd|bds|bed|beds|bedroom|bedrooms)\b/i);
     return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
@@ -1323,8 +1359,8 @@
     const source = norm(text);
     if (!source) return '';
     const labeledMatch = source.match(/\b(?:Bathrooms?|Baths?)\s*:\s*([^|,;\n]+)/i);
-    if (labeledMatch) return norm(labeledMatch[0]);
-    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:ba|bas|bath|baths|bathroom|bathrooms))\b/i);
+    if (labeledMatch) return norm(labeledMatch[1]);
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bas|bath|baths|bathroom|bathrooms)\b/i);
     return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
@@ -1855,13 +1891,16 @@
   }
 
   function scrapeZillowResult() {
+    const bodyText = document.body?.innerText || '';
     const hints = readZillowScriptHints();
     const bedrooms = normalizeRoomValue(firstNonEmpty(
       extractFirstLabeledValue(['Bedrooms', 'Bedroom', 'Beds', 'Bed']),
+      extractBedroomTextValue(bodyText),
       hints.bedrooms
     ));
     const bathrooms = normalizeRoomValue(firstNonEmpty(
       extractFirstLabeledValue(['Bathrooms', 'Bathroom', 'Baths', 'Bath']),
+      extractBathroomTextValue(bodyText),
       hints.bathrooms
     ));
     const homeType = normalizeHomeType(firstNonEmpty(
