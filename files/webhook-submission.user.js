@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.12
-// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
+// @version      1.18.20
+// @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, validates force-send signals, clears failure-only bundles after send, and blocks resend loops.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.12';
+  const VERSION = '1.18.20';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -58,6 +58,7 @@
     tickMs: 900,
     quoteVisibleDelayMs: 5000,
     requestTimeoutMs: 45000,
+    forceSendMaxAgeMs: 10 * 60 * 1000,
     maxSendAttempts: 3,
     maxLogLines: 140,
     panelWidth: 430,
@@ -98,6 +99,7 @@
 
   function init() {
     clearStoppedForPageLoad();
+    clearStaleFailureStateOnBoot();
     clearStaleSharedPause();
     hydrateWebhookStorage();
     hydrateAgencyNameStorage();
@@ -638,6 +640,15 @@
     return Array.isArray(bundle?.timeout?.events) ? bundle.timeout.events : [];
   }
 
+  function getLatestTimeoutEvent(bundle) {
+    const events = getTimeoutEvents(bundle);
+    return events.length ? events[events.length - 1] : null;
+  }
+
+  function isFailureOnlyBundle(bundle) {
+    return !!(!hasMeaningfulHome(bundle) && (hasHomeError(bundle) || hasPendingTimeout(bundle)));
+  }
+
   function hasSectionErrors(section) {
     if (!isPlainObject(section?.data)) return false;
     if (Array.isArray(section.data.errors) && section.data.errors.length) return true;
@@ -947,9 +958,54 @@
     return safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
   }
 
+  function normalizeForceSendRequest(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    return {
+      requestedAt: normalizeText(raw.requestedAt || ''),
+      reason: normalizeText(raw.reason || ''),
+      source: normalizeText(raw.source || ''),
+      version: normalizeText(raw.version || ''),
+      azId: normalizeText(raw.azId || ''),
+      product: normalizeText(raw.product || ''),
+      eventId: normalizeText(raw.eventId || ''),
+      triggerType: normalizeText(raw.triggerType || '')
+    };
+  }
+
+  function getForceSendRequestAgeMs(request) {
+    const requestedMs = Date.parse(normalizeText(request?.requestedAt || ''));
+    if (!Number.isFinite(requestedMs)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, Date.now() - requestedMs);
+  }
+
+  function isManualForceSendRequest(request) {
+    const reason = normalizeText(request?.reason || '').toLowerCase();
+    const source = normalizeText(request?.source || '');
+    return reason === 'manual-send' && source === SCRIPT_NAME;
+  }
+
+  function getActiveForceSendRequest(expectedAzId = '') {
+    const request = normalizeForceSendRequest(readForceSendRequest());
+    if (!request?.requestedAt) return null;
+
+    if (getForceSendRequestAgeMs(request) > CFG.forceSendMaxAgeMs) {
+      clearForceSendRequest();
+      log('Cleared stale force-send request');
+      return null;
+    }
+
+    const wantedAzId = normalizeText(expectedAzId || '');
+    if (wantedAzId && request.azId && request.azId !== wantedAzId) {
+      clearForceSendRequest();
+      log(`Cleared force-send request for other AZ ${request.azId}`);
+      return null;
+    }
+
+    return request;
+  }
+
   function hasForceSendRequest() {
-    const request = readForceSendRequest();
-    return !!(request && typeof request === 'object' && request.requestedAt);
+    return !!getActiveForceSendRequest();
   }
 
   function requestForceSend(reason = 'manual-send') {
@@ -969,6 +1025,19 @@
   function clearForceSendRequest() {
     try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
     try { localStorage.removeItem(GLOBAL_PAUSE_KEY); } catch {}
+  }
+
+  function clearFailureOnlyPayloadState() {
+    try { localStorage.removeItem(BUNDLE_KEY); } catch {}
+    clearForceSendRequest();
+  }
+
+  function clearStaleFailureStateOnBoot() {
+    const bundle = readBundleRaw();
+    if (!isPlainObject(bundle) || !isFailureOnlyBundle(bundle)) return;
+    clearFailureOnlyPayloadState();
+    try { localStorage.removeItem(WEBHOOK_FATAL_HOLD_KEY); } catch {}
+    log('Cleared stale failure-only webhook state on page load');
   }
 
   function clearStaleSharedPause() {
@@ -1172,6 +1241,14 @@
     sessionStorage.setItem(CFG.stoppedKey, '1');
     clearForceSendRequest();
     renderButtons();
+    if (isFailureOnlyBundle(bundle)) {
+      clearFailureOnlyPayloadState();
+      log('Failure-only payload cleared after send');
+      writeActivityState('done', 'Sent | Failure cleared | Stopped');
+      setStatus('Sent | Failure cleared | Stopped');
+      return;
+    }
+
     log('Stored payloads retained after send');
     writeActivityState('done', 'Sent | Payload retained | Stopped');
     setStatus('Sent | Payload retained | Stopped');
@@ -1246,6 +1323,61 @@
     return true;
   }
 
+  function findMatchingForceSendEvent(bundle, request) {
+    if (!isPlainObject(bundle) || !request) return null;
+    const requestEventId = normalizeText(request.eventId || '');
+    const requestTriggerType = normalizeText(request.triggerType || '').toLowerCase();
+    if (!requestEventId || !requestTriggerType) return null;
+
+    return getTimeoutEvents(bundle).find((event) => {
+      if (!isPlainObject(event)) return false;
+      const eventId = normalizeText(event.eventId || event.id || '');
+      const eventTriggerType = normalizeText(event.triggerType || '').toLowerCase();
+      return eventId === requestEventId && eventTriggerType === requestTriggerType;
+    }) || null;
+  }
+
+  function isTrustedForceSendEvent(event, request) {
+    if (!event || !request) return false;
+    const triggerType = normalizeText(request.triggerType || event.triggerType || '').toLowerCase();
+    const requestSource = normalizeText(request.source || '');
+    const eventSource = normalizeText(event.source || '');
+    if (triggerType === 'timeout') return requestSource === 'GWPC Header Timeout Monitor' && eventSource === 'GWPC Header Timeout Monitor';
+    if (triggerType === 'selector') return requestSource === 'GWPC Header Timeout Monitor' && eventSource === 'GWPC Header Timeout Monitor';
+    return false;
+  }
+
+  function getForceSendReadiness(request, bundle) {
+    if (isManualForceSendRequest(request)) {
+      return (hasMeaningfulHome(bundle) || hasPendingTimeout(bundle))
+        ? { ok: true }
+        : { ok: false, status: 'Force send waiting for payload / bundle', waitKey: 'force-wait-payload', message: 'Waiting for tm_pc_home_quote_grab_payload_v1 or tm_pc_webhook_bundle_v1' };
+    }
+
+    const matchedEvent = findMatchingForceSendEvent(bundle, request);
+    if (!matchedEvent) {
+      return {
+        ok: false,
+        clear: true,
+        status: 'Force send blocked',
+        waitKey: 'force-blocked-missing-event',
+        message: 'Blocked force-send: request did not match a bundle event'
+      };
+    }
+
+    if (!isTrustedForceSendEvent(matchedEvent, request)) {
+      return {
+        ok: false,
+        clear: true,
+        status: 'Force send blocked',
+        waitKey: 'force-blocked-untrusted',
+        message: `Blocked force-send from ${normalizeText(request.source || matchedEvent.source || 'unknown source')}`
+      };
+    }
+
+    return { ok: true, event: matchedEvent };
+  }
+
   async function sendBundle(force = false) {
     if (state.busy) {
       log('Send skipped: already busy');
@@ -1272,12 +1404,23 @@
     const bundle = resolved.bundle;
     const source = resolved.source || 'none';
     const shouldClearForceSendAfterFailure = force || hasForceSendRequest();
+    const activeForceRequest = force ? getActiveForceSendRequest(job['AZ ID'] || '') : null;
 
     const valid = validateCurrentJobAndBundle(job, bundle);
     if (!valid.ok) {
       setStatus(valid.reason);
       if (force) log(`Send blocked: ${valid.reason}`);
       return;
+    }
+
+    if (force) {
+      const forceReady = getForceSendReadiness(activeForceRequest, bundle);
+      if (!forceReady.ok) {
+        if (forceReady.clear) clearForceSendRequest();
+        setStatus(forceReady.status || 'Force send blocked');
+        log(forceReady.message || 'Blocked unsafe force-send request');
+        return;
+      }
     }
 
     const submissionGuard = getSubmissionGuard(job, bundle);
@@ -1292,9 +1435,10 @@
     clearWaitLog();
 
     const signature = buildSignatureJobBundle(job, bundle);
-    if (!force && isSameBundleAlreadySent(job, bundle)) {
+    if (isSameBundleAlreadySent(job, bundle) && !(force && isManualForceSendRequest(activeForceRequest))) {
       setStatus('Already sent');
       log('Same bundle already sent');
+      if (force) clearForceSendRequest();
       return;
     }
 
@@ -1365,7 +1509,8 @@
       writeActivityState('working', state.lastStatus || 'Sending webhook');
       return;
     }
-    const forceSend = hasForceSendRequest();
+    let forceSendRequest = getActiveForceSendRequest();
+    let forceSend = !!forceSendRequest;
     if (isGloballyPaused() && !forceSend) {
       writeActivityState('paused', 'Paused by shared selector');
       setStatus('Paused by shared selector');
@@ -1382,6 +1527,8 @@
     const job = readCurrentJob();
     const resolved = getEffectiveBundle(job);
     const bundle = resolved.bundle;
+    forceSendRequest = getActiveForceSendRequest(job['AZ ID'] || '');
+    forceSend = !!forceSendRequest;
 
     if (!job['AZ ID']) {
       state.quoteSeenAt = 0;
@@ -1428,6 +1575,14 @@
     }
 
     if (forceSend) {
+      const forceReady = getForceSendReadiness(forceSendRequest, bundle);
+      if (!forceReady.ok) {
+        if (forceReady.clear) clearForceSendRequest();
+        state.quoteSeenAt = 0;
+        setStatus(forceReady.status || 'Force send blocked');
+        logWait(forceReady.waitKey || 'force-blocked', forceReady.message || 'Blocked unsafe force-send request');
+        return;
+      }
       setStatus('Force send ready');
       sendBundle(true);
       return;

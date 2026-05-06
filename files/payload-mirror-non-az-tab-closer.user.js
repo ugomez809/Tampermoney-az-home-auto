@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.23
-// @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
+// @version      1.1.13
+// @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage. Tab closing is disabled; close handling belongs outside the mirror.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.23';
+  const VERSION = '1.1.13';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -94,6 +94,7 @@
     ],
     ignoreCloseLeaseTtlMs: 8000,
     ignoreCloseLeaseHeartbeatMs: 1500,
+    closeTabsEnabled: false,
     maxLogLines: 70,
     zIndex: 2147483647,
     panelWidth: 330,
@@ -679,6 +680,12 @@
   }
 
   function closeLexTabAfterSnag(azId = '') {
+    if (!CFG.closeTabsEnabled) {
+      log(`LEX snag detected; close disabled${azId ? ` | AZ ${azId}` : ''}`);
+      setStatus('LEX snag -> failed path');
+      return;
+    }
+
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
     state.closeAttempts += 1;
@@ -994,6 +1001,7 @@
 
   function checkGwpcSamePageCloseWatchdog() {
     if (!isGwpcHost()) return;
+    if (!CFG.closeTabsEnabled) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
     if (getActiveIgnoreCloseLease()) return;
     if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
@@ -1518,6 +1526,12 @@
   function startCountdown(signal) {
     if (!signal || !buildSignalKey(signal)) return;
     if (state.countdownEndsAt) return;
+    if (!CFG.closeTabsEnabled) {
+      markSignalHandled(buildSignalKey(signal));
+      log(`Close countdown skipped; mirror-only mode for AZ ${signal.azId}`);
+      setStatus('Payload mirrored; close disabled');
+      return;
+    }
 
     state.countdownEndsAt = Date.now() + CFG.closeDelayMs;
     state.closeAttempted = false;
@@ -1529,6 +1543,7 @@
   }
 
   function publishCloseSignal(signal) {
+    if (!CFG.closeTabsEnabled) return;
     const signalKey = buildSignalKey(signal);
     if (!signalKey || state.closeSignalKey === signalKey) return;
     state.closeSignalKey = signalKey;
@@ -1549,6 +1564,7 @@
   }
 
   function tryCloseCurrentTab() {
+    if (!CFG.closeTabsEnabled) return;
     const wasClosed = !!window.closed;
     try { window.close(); } catch {}
     if (window.closed || wasClosed) return;
@@ -1574,6 +1590,13 @@
   }
 
   function attemptClose(signal = null) {
+    if (!CFG.closeTabsEnabled) {
+      const signalKey = buildSignalKey(signal || state.activeSignal || readCloseSignal());
+      if (signalKey) markSignalHandled(signalKey);
+      setStatus('Payload mirrored; close disabled');
+      return;
+    }
+
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
