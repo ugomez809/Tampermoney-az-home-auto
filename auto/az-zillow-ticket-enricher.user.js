@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.8
+// @version      1.2.9
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.8';
+  const VERSION = '1.2.9';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -47,8 +47,11 @@
   };
 
   const SS_KEYS = {
-    bootstrapReload: 'tm_az_zillow_ticket_enricher_bootstrap_reload_v1'
+    bootstrapReload: 'tm_az_zillow_ticket_enricher_bootstrap_reload_v1',
+    zillowTabJobId: 'tm_az_zillow_ticket_enricher_zillow_tab_job_id_v1'
   };
+
+  const ZILLOW_JOB_HASH_KEY = 'tm-az-zillow-job';
 
   const FIELD_ORDER = [
     'Zillow URL',
@@ -157,6 +160,7 @@
     const resumedAfterReload = consumeBootstrapReloadToken();
     const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
     const staleJobReset = azJobReset ? '' : resetStaleActiveJobOnBoot();
+    if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
 
     if (isAzOrigin()) {
       buildUi();
@@ -296,6 +300,51 @@
 
   function clearProviderPickerRequest() {
     deleteGM(GM_KEYS.providerPicker);
+  }
+
+  function getZillowTabJobId() {
+    if (!isZillowOrigin()) return '';
+    try {
+      return norm(sessionStorage.getItem(SS_KEYS.zillowTabJobId) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function setZillowTabJobId(jobId) {
+    if (!isZillowOrigin()) return;
+    const value = norm(jobId);
+    try {
+      if (value) sessionStorage.setItem(SS_KEYS.zillowTabJobId, value);
+      else sessionStorage.removeItem(SS_KEYS.zillowTabJobId);
+    } catch {}
+  }
+
+  function readZillowJobIdFromLocation() {
+    if (!isZillowOrigin()) return '';
+    const hash = String(location.hash || '').replace(/^#/, '');
+    if (!hash) return '';
+
+    for (const segment of hash.split('&')) {
+      const [rawKey, rawValue = ''] = segment.split('=');
+      if (norm(rawKey) !== ZILLOW_JOB_HASH_KEY) continue;
+      try {
+        return norm(decodeURIComponent(rawValue || ''));
+      } catch {
+        return norm(rawValue || '');
+      }
+    }
+
+    return '';
+  }
+
+  function syncZillowTabJobIdFromLocation() {
+    const locationJobId = readZillowJobIdFromLocation();
+    if (locationJobId) {
+      setZillowTabJobId(locationJobId);
+      return locationJobId;
+    }
+    return getZillowTabJobId();
   }
 
   function getJob() {
@@ -1656,6 +1705,27 @@
     return `https://www.zillow.com/homes/${encodeURIComponent(address)}`;
   }
 
+  function buildScopedZillowUrl(url, jobId) {
+    const baseUrl = norm(url);
+    const scopeId = norm(jobId);
+    if (!baseUrl || !scopeId) return baseUrl;
+
+    try {
+      const parsed = new URL(baseUrl);
+      parsed.hash = `${ZILLOW_JOB_HASH_KEY}=${encodeURIComponent(scopeId)}`;
+      return parsed.toString();
+    } catch {
+      const cleaned = baseUrl.replace(/#.*$/, '');
+      return `${cleaned}#${ZILLOW_JOB_HASH_KEY}=${encodeURIComponent(scopeId)}`;
+    }
+  }
+
+  function createJobId(ticketId) {
+    const ticket = norm(ticketId || 'az') || 'az';
+    const random = Math.random().toString(36).slice(2, 8);
+    return `${ticket}-${Date.now()}-${random}`;
+  }
+
   function isZillowListingPage() {
     return /\/homedetails\/|_zpid\//i.test(location.pathname + location.search);
   }
@@ -1708,31 +1778,25 @@
   }
 
   function getFallbackRoomValue(value) {
-    return firstNonEmpty(normalizeRoomValue(value), '0');
+    return normalizeRoomValue(value);
   }
 
   function getFallbackHomeType(value) {
-    return firstNonEmpty(normalizeHomeType(value), 'FAILED');
+    return normalizeHomeType(value);
   }
 
   function buildFallbackResult(job, overrides = null) {
-    const source = isPlainObject(job?.result) ? job.result : {};
     const extra = isPlainObject(overrides) ? overrides : {};
-    const sourceCustom = getCustomFieldValueMap(source);
     const extraCustom = getCustomFieldValueMap(extra);
     const customFields = {};
     for (const label of getAllFieldLabels().filter((item) => !isBaseFieldLabel(item))) {
-      customFields[label] = getFallbackCustomFieldValue(
-        label,
-        firstNonEmpty(extraCustom[label], sourceCustom[label]),
-        job
-      );
+      customFields[label] = getFallbackCustomFieldValue(label, extraCustom[label], job);
     }
     return {
-      zillowUrl: firstNonEmpty(extra.zillowUrl, source.zillowUrl, job?.searchUrl),
-      bedrooms: getFallbackRoomValue(firstNonEmpty(extra.bedrooms, source.bedrooms)),
-      bathrooms: getFallbackRoomValue(firstNonEmpty(extra.bathrooms, source.bathrooms)),
-      homeType: getFallbackHomeType(firstNonEmpty(extra.homeType, source.homeType)),
+      zillowUrl: firstNonEmpty(extra.zillowUrl, job?.searchUrl),
+      bedrooms: getFallbackRoomValue(extra.bedrooms),
+      bathrooms: getFallbackRoomValue(extra.bathrooms),
+      homeType: getFallbackHomeType(extra.homeType),
       customFields
     };
   }
@@ -1823,6 +1887,7 @@
 
   function createJob(ticketId, addressInfo) {
     const job = {
+      jobId: createJobId(ticketId || addressInfo?.ticketId || ''),
       ticketId: norm(ticketId || addressInfo?.ticketId || ''),
       address: norm(addressInfo?.address || ''),
       street: norm(addressInfo?.street || ''),
@@ -1843,6 +1908,7 @@
 
   function launchZillowSearch(job) {
     if (!isPlainObject(job) || !norm(job.searchUrl || '')) return false;
+    const launchUrl = buildScopedZillowUrl(job.searchUrl, job.jobId);
     job.status = 'searching';
     job.updatedAt = nowIso();
     job.searchOpenedAt = nowIso();
@@ -1857,13 +1923,13 @@
 
     try {
       if (typeof GM_openInTab === 'function') {
-        GM_openInTab(job.searchUrl, { active: false, insert: true, setParent: true });
+        GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
         return true;
       }
     } catch {}
 
     try {
-      const opened = window.open(job.searchUrl, '_blank');
+      const opened = window.open(launchUrl, '_blank');
       if (opened) {
         try { opened.blur(); } catch {}
         setTimeout(() => { try { window.focus(); } catch {} }, 40);
@@ -1873,6 +1939,13 @@
     } catch {
       return false;
     }
+  }
+
+  function currentZillowTabMatchesJob(job) {
+    const tabJobId = syncZillowTabJobIdFromLocation();
+    const activeJobId = norm(job?.jobId || '');
+    if (!tabJobId || !activeJobId) return true;
+    return tabJobId === activeJobId;
   }
 
   function handleExistingZillowJob(job) {
@@ -2205,9 +2278,14 @@
 
     if (await maybeHandleProviderPickerOnZillow()) return;
 
+    syncZillowTabJobIdFromLocation();
     const job = getJob();
-    if (!isPlainObject(job)) return;
+    if (!isPlainObject(job)) {
+      setZillowTabJobId('');
+      return;
+    }
     if (!['pending', 'searching', 'captcha'].includes(norm(job.status || ''))) return;
+    if (!currentZillowTabMatchesJob(job)) return;
 
     const verificationBlock = detectZillowVerificationBlock(job);
     if (verificationBlock) {
