@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.6
+// @version      1.0.7
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the shared sheet, publishes failed-path note reasons on LEX, and leaves GWPC webhook posting to Header Timeout Monitor.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -25,7 +25,7 @@
   try { window.__TM_SHARED_FAILURE_SELECTOR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -799,6 +799,73 @@
       state.lastMatchLogKey = logKey;
       log(`GWPC selector matched but webhook posting is disabled in this script | ${rule.ruleId}`);
     }
+    const job = readCurrentJob();
+    const azId = extractAzId(job);
+    if (!azId) {
+      log(`GWPC selector matched but no AZ ID was available | ${rule.ruleId}`);
+      return false;
+    }
+
+    const message = norm(rule.savedErrorText || '');
+    const eventId = `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const event = {
+      eventId,
+      id: eventId,
+      dedupeKey: ['selector', azId, 'home', rule.ruleId].join('|'),
+      actionKey: 'home_saved_selector_error',
+      triggerType: 'selector',
+      product: 'home',
+      productLabel: 'Homeowners',
+      errorType: 'SavedSelectorMatch',
+      errorName: norm(rule.label || 'Saved selector error'),
+      errorMessage: message,
+      errorText: message,
+      resultField: 'Done?',
+      resultValue: message,
+      selectorRuleId: norm(rule.ruleId || ''),
+      selector: norm(rule.selector || ''),
+      detectedAt: nowIso(),
+      source: SCRIPT_NAME,
+      sourceVersion: VERSION,
+      capturedElementHtml: truncate(matchedEl?.outerHTML || '', 4000),
+      capturedText: truncate(matchedEl?.innerText || matchedEl?.textContent || '', 600),
+      page: { url: location.href, title: document.title },
+      identity: {
+        'AZ ID': azId,
+        'Name': norm(job.Name || ''),
+        'Mailing Address': norm(job['Mailing Address'] || ''),
+        'SubmissionNumber': norm(job.SubmissionNumber || '')
+      }
+    };
+
+    const bundle = readLocalJson(BUNDLE_KEY, {}) || {};
+    const next = isPlainObject(bundle) ? bundle : {};
+    next['AZ ID'] = azId;
+    next.timeout = isPlainObject(next.timeout) ? next.timeout : {};
+    next.timeout.ready = true;
+    next.timeout.events = Array.isArray(next.timeout.events) ? next.timeout.events : [];
+    if (!next.timeout.events.some((item) => norm(item?.dedupeKey || '') === event.dedupeKey)) {
+      next.timeout.events.push(event);
+    }
+    next.timeout.lastEvent = event;
+    next.timeout.events = next.timeout.events.slice(-50);
+    next.meta = isPlainObject(next.meta) ? next.meta : {};
+    next.meta.updatedAt = nowIso();
+    next.meta.lastWriter = SCRIPT_NAME;
+    try { localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2)); } catch {}
+    const forceSendRequest = {
+      azId,
+      product: 'home',
+      eventId,
+      triggerType: 'selector',
+      reason: `selector:${eventId}`,
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(forceSendRequest, null, 2)); } catch {}
+    try { GM_setValue(FORCE_SEND_KEY, forceSendRequest); } catch {}
+    log(`Saved GWPC selector event to bundle | ${rule.ruleId} | ${message}`);
     return true;
   }
 
