@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.1
+// @version      1.3.2
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -13,6 +13,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js
 // ==/UserScript==
@@ -24,7 +26,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -44,7 +46,8 @@
   const LS_KEYS = {
     running: 'tm_az_zillow_ticket_enricher_running_v1',
     panelPos: 'tm_az_zillow_ticket_enricher_panel_pos_v1',
-    lastZillowOpenAt: 'tm_az_zillow_ticket_enricher_last_zillow_open_at_v1'
+    lastZillowOpenAt: 'tm_az_zillow_ticket_enricher_last_zillow_open_at_v1',
+    webhookUrl: 'tm_az_zillow_ticket_enricher_webhook_url_v1'
   };
 
   const SS_KEYS = {
@@ -165,6 +168,7 @@
       bindUi();
       restorePanelPos();
       ensureHoverBox();
+      syncWebhookUi();
       renderAll();
     }
 
@@ -260,6 +264,67 @@
 
   function getLastZillowOpenAgeMs() {
     return getIsoAgeMs(getLastZillowOpenAt() || nowIso());
+  }
+
+  function normalizeWebhookUrl(value) {
+    const text = norm(value);
+    if (!text) return '';
+    try {
+      const parsed = new URL(text);
+      if (!/^https?:$/i.test(parsed.protocol || '')) return '';
+      return parsed.toString();
+    } catch {
+      return '';
+    }
+  }
+
+  function readWebhookUrl() {
+    try {
+      return normalizeWebhookUrl(localStorage.getItem(LS_KEYS.webhookUrl) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function saveWebhookUrl(value) {
+    const normalized = normalizeWebhookUrl(value);
+    try {
+      if (normalized) localStorage.setItem(LS_KEYS.webhookUrl, normalized);
+      else localStorage.removeItem(LS_KEYS.webhookUrl);
+    } catch {}
+    return normalized;
+  }
+
+  function updateActiveWebhookUi(url = readWebhookUrl()) {
+    if (state.ui.activeWebhook) state.ui.activeWebhook.textContent = norm(url || '') || '(empty)';
+  }
+
+  function syncWebhookUi() {
+    const saved = readWebhookUrl();
+    if (state.ui.webhookUrl && state.ui.webhookUrl.value !== saved) state.ui.webhookUrl.value = saved;
+    updateActiveWebhookUi(saved);
+  }
+
+  function persistWebhookFromUi(withLog = false) {
+    const raw = norm(state.ui.webhookUrl?.value || '');
+    if (raw && !normalizeWebhookUrl(raw)) {
+      updateActiveWebhookUi(readWebhookUrl());
+      if (withLog) log('Webhook URL invalid; not saved');
+      return '';
+    }
+
+    const before = readWebhookUrl();
+    const saved = saveWebhookUrl(raw);
+    updateActiveWebhookUi(saved);
+    if (withLog && saved !== before) {
+      log(saved ? 'Webhook URL saved' : 'Webhook URL cleared');
+    }
+    return saved;
+  }
+
+  function getWebhookUrl() {
+    const uiValue = normalizeWebhookUrl(state.ui.webhookUrl?.value || '');
+    return uiValue || readWebhookUrl();
   }
 
   function readGM(key, fallback = null) {
@@ -1821,6 +1886,75 @@
     return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
   }
 
+  function buildWebhookPayload(job) {
+    const result = isPlainObject(job?.result) ? job.result : {};
+    return {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      sentAt: nowIso(),
+      ticketId: norm(job?.ticketId || state.activeTicketId || ''),
+      jobId: norm(job?.jobId || ''),
+      address: firstNonEmpty(norm(job?.address || ''), norm(state.currentAddress || '')),
+      zillowUrl: firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || '')),
+      bedrooms: norm(result?.bedrooms || ''),
+      bathrooms: norm(result?.bathrooms || ''),
+      homeType: norm(result?.homeType || ''),
+      customFields: getCustomFieldValueMap(result)
+    };
+  }
+
+  function gmHttpRequest(details) {
+    return new Promise((resolve, reject) => {
+      try {
+        GM_xmlhttpRequest({
+          timeout: 45000,
+          ...details,
+          onload: (response) => resolve(response),
+          onerror: (error) => reject(error || new Error('Request failed')),
+          ontimeout: () => reject(new Error('Request timed out'))
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async function sendWebhookForJob(job) {
+    if (!isPlainObject(job)) return true;
+    if (norm(job.webhookDeliveredAt || '')) return true;
+
+    const endpoint = getWebhookUrl();
+    if (!endpoint) return true;
+
+    const payload = buildWebhookPayload(job);
+    if (!payload.ticketId) {
+      log('Webhook skipped: missing ticket ID');
+      return true;
+    }
+
+    setStatus(`Sending webhook for ${payload.ticketId}`);
+    const response = await gmHttpRequest({
+      method: 'POST',
+      url: endpoint,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      data: JSON.stringify(payload)
+    });
+
+    const status = Number(response?.status || 0);
+    if (!(status >= 200 && status < 300)) {
+      throw new Error(`Webhook HTTP ${status || 'error'}`);
+    }
+
+    job.webhookDeliveredAt = nowIso();
+    job.webhookEndpoint = endpoint;
+    job.updatedAt = nowIso();
+    saveJob(job);
+    log(`Webhook sent for AZ ${payload.ticketId}`);
+    return true;
+  }
+
   function reportJobFailureOnce(job) {
     if (!isPlainObject(job)) return;
     if (norm(job.azFailureReportedAt || '')) return;
@@ -3084,6 +3218,16 @@
       const applied = await applyZillowResultToTicket(job);
       if (!applied) return;
 
+      try {
+        const webhookOk = await sendWebhookForJob(job);
+        if (!webhookOk) return;
+      } catch (error) {
+        const message = norm(error?.message || error || 'Webhook send failed') || 'Webhook send failed';
+        setStatus(message);
+        log(`Webhook failed: ${message}`);
+        return;
+      }
+
       const completedTicketId = state.activeTicketId;
       job.status = 'completed';
       job.completedAt = nowIso();
@@ -3694,6 +3838,11 @@
           <div ${UI_ATTR}="1" style="opacity:.72;">Fields</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-fields">0/4 saved</div>
           <div ${UI_ATTR}="1" style="opacity:.72;">Tags</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-tags">0/2 saved</div>
         </div>
+        <div ${UI_ATTR}="1" style="margin-bottom:10px;">
+          <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;margin-bottom:4px;">Webhook URL</div>
+          <input ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-url" type="text" placeholder="https://..." style="width:100%;border:1px solid #243041;border-radius:10px;background:#020617;color:#e5e7eb;padding:8px 10px;">
+          <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;margin-top:5px;">Active: <span ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-active">(empty)</span></div>
+        </div>
         <textarea ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-logs" readonly style="width:100%;min-height:170px;max-height:240px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
     `;
@@ -3715,6 +3864,8 @@
     state.ui.zillow = panel.querySelector('#tm-az-zillow-ticket-enricher-zillow');
     state.ui.fields = panel.querySelector('#tm-az-zillow-ticket-enricher-fields');
     state.ui.tags = panel.querySelector('#tm-az-zillow-ticket-enricher-tags');
+    state.ui.webhookUrl = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-url');
+    state.ui.activeWebhook = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-active');
     state.ui.logs = panel.querySelector('#tm-az-zillow-ticket-enricher-logs');
 
     makeDraggable(panel, state.ui.head);
@@ -3756,6 +3907,18 @@
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
     state.ui.setTags?.addEventListener('click', () => startPicker('tags'));
     state.ui.resetTags?.addEventListener('click', resetTagTargets);
+
+    state.ui.webhookUrl?.addEventListener('input', () => { persistWebhookFromUi(false); });
+    state.ui.webhookUrl?.addEventListener('change', () => { persistWebhookFromUi(true); });
+    state.ui.webhookUrl?.addEventListener('blur', () => { persistWebhookFromUi(true); });
+    state.ui.webhookUrl?.addEventListener('paste', () => {
+      setTimeout(() => persistWebhookFromUi(true), 0);
+    });
+    state.ui.webhookUrl?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      persistWebhookFromUi(true);
+      try { state.ui.webhookUrl.blur(); } catch {}
+    });
   }
 
   function renderAll() {
@@ -3772,6 +3935,7 @@
     }
     if (state.ui.fields) state.ui.fields.textContent = getFieldTargetStatusText();
     if (state.ui.tags) state.ui.tags.textContent = getTagTargetStatusText();
+    updateActiveWebhookUi(readWebhookUrl());
 
     if (state.ui.toggle) {
       state.ui.toggle.textContent = state.running ? 'STOP' : 'START';
