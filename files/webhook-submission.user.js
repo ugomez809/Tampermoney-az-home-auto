@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.19
+// @version      1.18.20
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, clears stale failure-only run-state on boot, only fast-tracks on a fresh real timeout signal, auto-rearms on AZ changes, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.19';
+  const VERSION = '1.18.20';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -1198,7 +1198,11 @@
   }
 
   function readForceSendRequest() {
-    return safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    const local = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
+    let gm = null;
+    try { gm = GM_getValue(FORCE_SEND_KEY, null); } catch { gm = null; }
+    if (typeof gm === 'string') gm = safeJsonParse(gm, null);
+    return chooseNewerSignal(local, gm);
   }
 
   function normalizeForceSendRequest(raw) {
@@ -1258,6 +1262,7 @@
     };
     try { localStorage.setItem(GLOBAL_PAUSE_KEY, '1'); } catch {}
     try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2)); } catch {}
+    try { GM_setValue(FORCE_SEND_KEY, request); } catch {}
     log(`Force send requested: ${request.reason}`);
     setStatus('Force send requested');
     state.quoteSeenAt = 0;
@@ -1266,6 +1271,7 @@
 
   function clearForceSendRequest() {
     try { localStorage.removeItem(FORCE_SEND_KEY); } catch {}
+    try { GM_setValue(FORCE_SEND_KEY, null); } catch {}
     try { localStorage.removeItem(GLOBAL_PAUSE_KEY); } catch {}
   }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.20
+// @version      2.3.21
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.20';
+  const VERSION = '2.3.21';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -69,7 +69,7 @@
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
     timeoutRetryLimit: 3,
-    timeoutRetryRequestMaxWaitMs: 60000,
+    timeoutRetryRequestMaxWaitMs: 10000,
     timeoutRetryCloseDelayMs: 800,
     timeoutRetryCloseRetryMs: 1200,
     timeoutRetryCloseAttempts: 6,
@@ -1064,7 +1064,7 @@
       version: VERSION
     };
     try {
-      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2));
+      writeSharedJsonValue(FORCE_SEND_KEY, request);
       if (event.triggerType === 'selector') {
         log(
           `Raised webhook send signal for ${String(context.product || '').toUpperCase()} selector | ` +
