@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.25
+// @version      1.0.26
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.25';
+  const VERSION = '1.0.26';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -43,6 +43,7 @@
 
   const GM_KEYS = {
     success: 'tm_pc_webhook_post_success_v1',
+    successConsumed: 'tm_pc_webhook_post_success_consumed_v1',
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
@@ -177,6 +178,7 @@
     gmRuntimeCleanupListener: null,
     activeSignal: null,
     activeSignalKey: '',
+    activeSuccessRunKey: '',
     countdownEndsAt: 0,
     mirrored: false,
     closeAttempted: false,
@@ -455,6 +457,7 @@
   function resetRuntimeCloseState() {
     state.activeSignal = null;
     state.activeSignalKey = '';
+    state.activeSuccessRunKey = '';
     state.countdownEndsAt = 0;
     state.mirrored = false;
     state.closeAttempted = false;
@@ -619,6 +622,23 @@
     return `${norm(signal?.azId || '')}|${norm(signal?.postedAt || signal?.signalPostedAt || '')}`;
   }
 
+  function buildSuccessSignalKey(signal) {
+    if (!isPlainObject(signal)) return '';
+    return [
+      norm(signal?.azId || ''),
+      norm(signal?.postedAt || ''),
+      norm(signal?.signature || '')
+    ].join('|');
+  }
+
+  function buildSuccessRunKey(signal) {
+    if (!isPlainObject(signal)) return '';
+    const azId = norm(signal?.azId || '');
+    const signature = norm(signal?.signature || '');
+    if (azId && signature) return `${azId}|${signature}`;
+    return buildSuccessSignalKey(signal);
+  }
+
   function isFreshSuccessSignal(signal) {
     if (!isPlainObject(signal) || signal.ok !== true) return false;
     const azId = norm(signal.azId || '');
@@ -629,12 +649,39 @@
     return (Date.now() - postedMs) <= CFG.maxSignalAgeMs;
   }
 
+  function readConsumedSuccessSignal() {
+    const value = readGM(GM_KEYS.successConsumed, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function isConsumedSuccessSignal(signal) {
+    const currentKey = buildSuccessSignalKey(signal);
+    if (!currentKey) return false;
+    const consumed = readConsumedSuccessSignal();
+    if (!isPlainObject(consumed)) return false;
+    return buildSuccessSignalKey(consumed) === currentKey;
+  }
+
+  function markSuccessSignalConsumed(signal) {
+    const signalKey = buildSuccessSignalKey(signal);
+    if (!signalKey) return false;
+    writeGM(GM_KEYS.successConsumed, {
+      azId: norm(signal?.azId || ''),
+      postedAt: norm(signal?.postedAt || ''),
+      signature: norm(signal?.signature || ''),
+      consumedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    });
+    return true;
+  }
+
   function readSuccessSignal() {
     const gmValue = readGM(GM_KEYS.success, null);
-    if (isFreshSuccessSignal(gmValue)) return gmValue;
+    if (isFreshSuccessSignal(gmValue) && !isConsumedSuccessSignal(gmValue)) return gmValue;
 
     const localValue = readLocalJson(GM_KEYS.success);
-    if (isFreshSuccessSignal(localValue)) return localValue;
+    if (isFreshSuccessSignal(localValue) && !isConsumedSuccessSignal(localValue)) return localValue;
 
     return null;
   }
@@ -1803,7 +1850,9 @@
     state.closeAttempted = false;
     state.closeAttempts = 0;
     state.mirrored = readyMatchesSignal(signal);
+    state.activeSuccessRunKey = buildSuccessRunKey(signal);
     markSignalHandled(buildSignalKey(signal));
+    markSuccessSignalConsumed(signal);
     log(`Close countdown started for AZ ${signal.azId}`);
     setStatus('Closing non-AZ tab soon');
   }
@@ -1910,10 +1959,21 @@
   function activateForSignal(signal, reason = '') {
     const signalKey = buildSignalKey(signal);
     if (!signalKey || shouldIgnoreSignal(signalKey)) return;
+    const successRunKey = buildSuccessRunKey(signal);
+
+    if (
+      state.countdownEndsAt
+      && successRunKey
+      && state.activeSuccessRunKey
+      && successRunKey === state.activeSuccessRunKey
+    ) {
+      return;
+    }
 
     if (state.activeSignalKey !== signalKey) {
       state.activeSignal = signal;
       state.activeSignalKey = signalKey;
+      state.activeSuccessRunKey = successRunKey;
       state.countdownEndsAt = 0;
       state.mirrored = false;
       state.closeAttempted = false;
