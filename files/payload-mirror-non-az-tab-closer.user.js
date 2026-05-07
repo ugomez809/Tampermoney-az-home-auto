@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.26
+// @version      1.0.27
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.26';
+  const VERSION = '1.0.27';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -452,6 +452,94 @@
       if (azId) return azId;
     }
     return '';
+  }
+
+  function extractSubmissionNumber(value) {
+    const data = isPlainObject(value?.data) ? value.data : value;
+    return norm(
+      value?.SubmissionNumber
+      || value?.submissionNumber
+      || value?.currentJob?.SubmissionNumber
+      || data?.SubmissionNumber
+      || data?.submissionNumber
+      || data?.currentJob?.SubmissionNumber
+      || ''
+    );
+  }
+
+  function readCurrentGwpcIdentity() {
+    const currentJob = readLocalJson(GM_KEYS.currentJob);
+    const homePayload = readLocalJson(GM_KEYS.homePayload);
+    const bundle = readLocalJson('tm_pc_webhook_bundle_v1');
+
+    const azId = norm(
+      currentJob?.['AZ ID']
+      || extractProductAzId(homePayload)
+      || bundle?.['AZ ID']
+      || ''
+    );
+
+    const submissionNumber = norm(
+      currentJob?.SubmissionNumber
+      || extractSubmissionNumber(homePayload)
+      || extractSubmissionNumber(bundle)
+      || ''
+    );
+
+    return { azId, submissionNumber };
+  }
+
+  function extractMirroredFinalPayloadSubmissionNumber(payload) {
+    return norm(
+      extractSubmissionNumber(payload)
+      || extractSubmissionNumber(payload?.currentJob)
+      || extractSubmissionNumber(payload?.bundle)
+      || extractSubmissionNumber(payload?.homePayload)
+      || ''
+    );
+  }
+
+  function clearStaleMirroredFinalHandoff(reason = '') {
+    if (!isGwpcHost()) return false;
+
+    const finalPayload = readGM(GM_KEYS.finalPayload, null);
+    const finalReady = readGM(GM_KEYS.finalReady, null);
+    const mirroredAzId = norm(finalPayload?.azId || finalReady?.azId || '');
+    if (!mirroredAzId) return false;
+
+    const current = readCurrentGwpcIdentity();
+    if (!current.azId) return false;
+
+    const mirroredSubmissionNumber = extractMirroredFinalPayloadSubmissionNumber(finalPayload);
+    let staleReason = '';
+
+    if (current.azId !== mirroredAzId) {
+      staleReason = `current AZ ${current.azId} != mirrored AZ ${mirroredAzId}`;
+    } else if (
+      current.submissionNumber
+      && mirroredSubmissionNumber
+      && current.submissionNumber !== mirroredSubmissionNumber
+    ) {
+      staleReason = `current submission ${current.submissionNumber} != mirrored submission ${mirroredSubmissionNumber}`;
+    }
+
+    if (!staleReason) return false;
+
+    for (const key of [
+      GM_KEYS.success,
+      GM_KEYS.successConsumed,
+      GM_KEYS.finalPayload,
+      GM_KEYS.finalReady,
+      GM_KEYS.closeSignal,
+      GM_KEYS.lexCloseConsumed,
+      GM_KEYS.ignoreCloseLease
+    ]) {
+      clearSharedKey(key);
+    }
+    resetRuntimeCloseState();
+    log(`Cleared stale mirrored final handoff | ${staleReason}${reason ? ` | ${reason}` : ''}`);
+    setStatus('Cleared stale mirrored handoff');
+    return true;
   }
 
   function resetRuntimeCloseState() {
@@ -2016,6 +2104,10 @@
     }
 
     if (isGwpcHost()) syncMirroredProductPayloadsFromGwpc();
+    if (clearStaleMirroredFinalHandoff(reason)) {
+      renderAll();
+      return;
+    }
 
     const signal = readSuccessSignal();
     const closeSignal = readCloseSignal();
