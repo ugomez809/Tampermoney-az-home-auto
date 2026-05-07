@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.7
+// @version      1.0.8
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -26,7 +26,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.8';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -864,6 +864,8 @@
 
     let required = 0;
     let score = 0;
+    let textRequired = false;
+    let textMatches = false;
     if (saved.tag) { required += 1; if (saved.tag === current.tag) score += 1; }
     if (saved.name) { required += 1; if (saved.name === current.name) score += 1; }
     if (saved.role) { required += 1; if (saved.role === current.role) score += 1; }
@@ -875,12 +877,18 @@
     }
     if (saved.textFingerprint) {
       required += 1;
+      textRequired = true;
       const a = lower(saved.textFingerprint);
       const b = lower(current.textFingerprint);
-      if (a && b && (a.includes(b) || b.includes(a))) score += 1;
+      if (a && b && b.includes(a)) {
+        score += 1;
+        textMatches = true;
+      }
     }
     if (required === 0) return true;
+    if (textRequired && !textMatches) return false;
     if (required === 1) return score === 1;
+    if (textRequired && required <= 3) return score === required;
     return score >= 2;
   }
 
