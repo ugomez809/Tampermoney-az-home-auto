@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.6
+// @version      1.0.7
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -26,7 +26,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.6';
+  const VERSION = '1.0.7';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -172,6 +172,96 @@
     if (kind === 'lex') return 'Watching LEX';
     if (kind === 'gwpc') return 'Watching GWPC';
     return 'Watching';
+  }
+
+  function firstVisibleTextBySelectors(selectors) {
+    for (const selector of selectors) {
+      for (const el of queryAllDeep(selector)) {
+        if (!visible(el)) continue;
+        const text = norm(el.textContent || '');
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
+  function hasExactVisibleLabel(labelText) {
+    const wanted = norm(labelText);
+    if (!wanted) return false;
+    for (const el of queryAllDeep('.gw-label, .gw-LabelWidget, .gw-vw--value, .gw-infoValue')) {
+      if (visible(el) && norm(el.textContent || '') === wanted) return true;
+    }
+    return false;
+  }
+
+  function getGwpcHeaderText() {
+    return firstVisibleTextBySelectors([
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '.gw-Wizard--Title',
+      '[role="heading"][aria-level="1"]',
+      '#iv360-valuationContainer .iv360-page-title-container .iv360-page-header',
+      '#iv360-valuationContainer .iv360-page-title-container h1',
+      '.iv360-page-title-container .iv360-page-header',
+      '.iv360-page-title-container h1'
+    ]);
+  }
+
+  function detectGwpcProduct() {
+    if (hasExactVisibleLabel('Personal Auto')) return { product: 'auto', label: 'Personal Auto' };
+    if (hasExactVisibleLabel('Homeowners')) return { product: 'home', label: 'Homeowners' };
+    return { product: '', label: '' };
+  }
+
+  function getGwpcProductLabel(product) {
+    if (product === 'auto') return 'Personal Auto';
+    if (product === 'home') return 'Homeowners';
+    return '';
+  }
+
+  function buildGwpcRuleScope() {
+    const productInfo = detectGwpcProduct();
+    return {
+      product: norm(productInfo.product || '').toLowerCase(),
+      productLabel: norm(productInfo.label || ''),
+      header: getGwpcHeaderText()
+    };
+  }
+
+  function buildRuleFingerprintWithScope(fingerprint, scope = {}) {
+    const base = isPlainObject(fingerprint) ? { ...fingerprint } : {};
+    base.scope = {
+      product: norm(scope.product || '').toLowerCase(),
+      header: norm(scope.header || '')
+    };
+    return base;
+  }
+
+  function getRuleGwpcScope(rule) {
+    const fingerprint = isPlainObject(rule?.fingerprint) ? rule.fingerprint : {};
+    const rawScope = isPlainObject(fingerprint.scope) ? fingerprint.scope : {};
+    return {
+      product: norm(rule?.scopeProduct || fingerprint.scopeProduct || rawScope.product || '').toLowerCase(),
+      header: norm(rule?.scopeHeader || fingerprint.scopeHeader || rawScope.header || '')
+    };
+  }
+
+  function getGwpcRuleScopeFailure(rule, scope = null) {
+    const currentScope = scope || buildGwpcRuleScope();
+    const ruleScope = getRuleGwpcScope(rule);
+    const textFingerprint = norm(rule?.fingerprint?.textFingerprint || '');
+
+    if (ruleScope.product && ruleScope.product !== norm(currentScope.product || '').toLowerCase()) {
+      return `rule scoped to ${ruleScope.product}`;
+    }
+    if (ruleScope.header && ruleScope.header !== norm(currentScope.header || '')) {
+      return `rule scoped to header "${ruleScope.header}"`;
+    }
+    if (!ruleScope.product && !ruleScope.header && !textFingerprint) {
+      return 'legacy rule missing scope and text fingerprint';
+    }
+    return '';
   }
 
   function visible(el) {
@@ -347,6 +437,9 @@
     const selector = norm(raw.selector || raw.cssSelector || '');
     const savedErrorText = norm(raw.savedErrorText || raw.errorText || raw.customMessage || raw.resultValue || raw.textSample || raw.errorName || '');
     const fingerprintRaw = isPlainObject(raw.fingerprint) ? raw.fingerprint : {};
+    const fingerprintScopeRaw = isPlainObject(fingerprintRaw.scope) ? fingerprintRaw.scope : {};
+    const scopeProduct = norm(raw.scopeProduct || raw.product || fingerprintRaw.scopeProduct || fingerprintScopeRaw.product || '').toLowerCase();
+    const scopeHeader = norm(raw.scopeHeader || raw.header || fingerprintRaw.scopeHeader || fingerprintScopeRaw.header || '');
     const fingerprint = {
       tag: norm(fingerprintRaw.tag || ''),
       id: norm(fingerprintRaw.id || ''),
@@ -354,7 +447,11 @@
       role: norm(fingerprintRaw.role || ''),
       ariaLabel: norm(fingerprintRaw.ariaLabel || ''),
       classTokens: Array.isArray(fingerprintRaw.classTokens) ? fingerprintRaw.classTokens.map(norm).filter(Boolean).slice(0, 4) : [],
-      textFingerprint: truncate(fingerprintRaw.textFingerprint || raw.textFingerprint || raw.textSample || '', 160)
+      textFingerprint: truncate(fingerprintRaw.textFingerprint || raw.textFingerprint || raw.textSample || '', 160),
+      scope: {
+        product: scopeProduct,
+        header: scopeHeader
+      }
     };
 
     const ruleId = norm(raw.ruleId || raw.id || buildRuleId(selector, fingerprint.textFingerprint));
@@ -367,6 +464,8 @@
       label: norm(raw.label || raw.errorName || savedErrorText || 'Saved selector error'),
       savedErrorText,
       fingerprint,
+      scopeProduct,
+      scopeHeader,
       createdAt: norm(raw.createdAt || nowIso()),
       updatedAt: norm(raw.updatedAt || raw.createdAt || nowIso()),
       sourceScript: norm(raw.sourceScript || ''),
@@ -705,7 +804,9 @@
       label,
       savedErrorText: reason,
       selector,
-      fingerprint,
+      fingerprint: hostKind() === 'gwpc'
+        ? buildRuleFingerprintWithScope(fingerprint, buildGwpcRuleScope())
+        : fingerprint,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
@@ -907,20 +1008,24 @@
     }
 
     const message = norm(rule.savedErrorText || '');
+    const currentScope = buildGwpcRuleScope();
+    const ruleScope = getRuleGwpcScope(rule);
+    const product = norm(currentScope.product || ruleScope.product || 'home').toLowerCase();
+    const productLabel = norm(currentScope.productLabel || getGwpcProductLabel(product));
     const eventId = `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const event = {
       eventId,
       id: eventId,
-      dedupeKey: ['selector', azId, 'home', rule.ruleId].join('|'),
-      actionKey: 'home_saved_selector_error',
+      dedupeKey: ['selector', azId, product || 'home', rule.ruleId].join('|'),
+      actionKey: `${product || 'home'}_saved_selector_error`,
       triggerType: 'selector',
-      product: 'home',
-      productLabel: 'Homeowners',
+      product: product || 'home',
+      productLabel,
       errorType: 'SavedSelectorMatch',
       errorName: norm(rule.label || 'Saved selector error'),
       errorMessage: message,
       errorText: message,
-      resultField: 'Done?',
+      resultField: product === 'home' ? 'Done?' : 'Auto',
       resultValue: message,
       selectorRuleId: norm(rule.ruleId || ''),
       selector: norm(rule.selector || ''),
@@ -975,9 +1080,11 @@
 
     const kind = hostKind();
     if (kind !== 'lex' && kind !== 'gwpc') return;
+    const gwpcScope = kind === 'gwpc' ? buildGwpcRuleScope() : null;
 
     for (const rule of state.rules) {
       if (!rule || rule.enabled === false) continue;
+      if (kind === 'gwpc' && getGwpcRuleScopeFailure(rule, gwpcScope)) continue;
       const matched = findRuleMatch(rule);
       if (!matched) continue;
 

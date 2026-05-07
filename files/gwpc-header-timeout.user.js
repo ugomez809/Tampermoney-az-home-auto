@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.21
+// @version      2.3.22
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.21';
+  const VERSION = '2.3.22';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -3206,6 +3206,22 @@
     if (!isPlainObject(raw)) return null;
     const enabled = raw.enabled === false ? false : toBoolean(raw.enabled, true);
     const selector = normalizeText(raw.selector || raw.cssSelector || '');
+    const fingerprintRaw = isPlainObject(raw.fingerprint) ? raw.fingerprint : {};
+    const fingerprintScopeRaw = isPlainObject(fingerprintRaw.scope) ? fingerprintRaw.scope : {};
+    const scopeProduct = normalizeText(
+      raw.scopeProduct ||
+      raw.product ||
+      fingerprintRaw.scopeProduct ||
+      fingerprintScopeRaw.product ||
+      ''
+    ).toLowerCase();
+    const scopeHeader = normalizeText(
+      raw.scopeHeader ||
+      raw.header ||
+      fingerprintRaw.scopeHeader ||
+      fingerprintScopeRaw.header ||
+      ''
+    );
     const savedErrorText = normalizeText(
       raw.savedErrorText ||
       raw.errorText ||
@@ -3226,15 +3242,19 @@
 
     const fingerprint = isPlainObject(raw.fingerprint)
       ? {
-          tag: normalizeText(raw.fingerprint.tag || ''),
-          id: normalizeText(raw.fingerprint.id || ''),
-          name: normalizeText(raw.fingerprint.name || ''),
-          role: normalizeText(raw.fingerprint.role || ''),
-          ariaLabel: normalizeText(raw.fingerprint.ariaLabel || ''),
-          classTokens: Array.isArray(raw.fingerprint.classTokens)
-            ? raw.fingerprint.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
+          tag: normalizeText(fingerprintRaw.tag || ''),
+          id: normalizeText(fingerprintRaw.id || ''),
+          name: normalizeText(fingerprintRaw.name || ''),
+          role: normalizeText(fingerprintRaw.role || ''),
+          ariaLabel: normalizeText(fingerprintRaw.ariaLabel || ''),
+          classTokens: Array.isArray(fingerprintRaw.classTokens)
+            ? fingerprintRaw.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
             : [],
-          textFingerprint
+          textFingerprint,
+          scope: {
+            product: scopeProduct,
+            header: scopeHeader
+          }
         }
       : {
           tag: '',
@@ -3243,7 +3263,11 @@
           role: '',
           ariaLabel: '',
           classTokens: [],
-          textFingerprint
+          textFingerprint,
+          scope: {
+            product: scopeProduct,
+            header: scopeHeader
+          }
         };
 
     const ruleId = normalizeText(raw.ruleId || raw.id || buildRuleId(selector, textFingerprint));
@@ -3258,6 +3282,8 @@
       label: normalizeText(raw.label || raw.errorName || 'Saved selector error'),
       savedErrorText,
       fingerprint,
+      scopeProduct,
+      scopeHeader,
       createdAt: normalizeText(raw.createdAt || nowIso()),
       updatedAt: normalizeText(raw.updatedAt || raw.createdAt || nowIso()),
       sourceScript: normalizeText(raw.sourceScript || ''),
@@ -3273,6 +3299,34 @@
     const list = Array.isArray(parsed) ? parsed : [];
     const normalized = list.map(normalizeRule).filter((rule) => !!rule && rule.enabled !== false);
     return normalized;
+  }
+
+  function buildRuleFingerprintWithScope(fingerprint, context = {}) {
+    const base = isPlainObject(fingerprint) ? { ...fingerprint } : {};
+    base.scope = {
+      product: normalizeText(context?.product || '').toLowerCase(),
+      header: normalizeText(context?.header || '')
+    };
+    return base;
+  }
+
+  function getSelectorRuleScopeFailure(rule, context) {
+    const scopeProduct = normalizeText(rule?.scopeProduct || '').toLowerCase();
+    const scopeHeader = normalizeText(rule?.scopeHeader || '');
+    const textFingerprint = normalizeText(rule?.fingerprint?.textFingerprint || '');
+    const currentProduct = normalizeText(context?.product || '').toLowerCase();
+    const currentHeader = normalizeText(context?.header || '');
+
+    if (scopeProduct && scopeProduct !== currentProduct) {
+      return `rule scoped to ${scopeProduct}`;
+    }
+    if (scopeHeader && scopeHeader !== currentHeader) {
+      return `rule scoped to header "${scopeHeader}"`;
+    }
+    if (!scopeProduct && !scopeHeader && !textFingerprint) {
+      return 'legacy rule missing scope and text fingerprint';
+    }
+    return '';
   }
 
   function saveSelectorRules(rules, options = {}) {
@@ -3567,7 +3621,10 @@
         selector: draft.selector,
         label: savedErrorText,
         savedErrorText,
-        fingerprint: draft.fingerprint,
+        fingerprint: buildRuleFingerprintWithScope(draft.fingerprint, {
+          product: state.current.product,
+          header: state.current.header
+        }),
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
@@ -4062,6 +4119,11 @@
     if (!context.product || !context.productLabel) return;
 
     for (const rule of getSelectorRules()) {
+      const scopeFailure = getSelectorRuleScopeFailure(rule, context);
+      if (scopeFailure) {
+        logSelectorRuleSkipped(context, rule, { reason: scopeFailure });
+        continue;
+      }
       const dedupeKey = ['selector', context.job['AZ ID'], context.product, normalizeText(rule.ruleId || '')].join('|');
       if (hasSentOrPendingDedupe(dedupeKey)) continue;
       const match = findRuleMatch(rule);
