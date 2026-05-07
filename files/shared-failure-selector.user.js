@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.0
+// @version      1.0.7
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -23,9 +23,10 @@
 
   if (window.top !== window.self) return;
   try { window.__TM_SHARED_FAILURE_SELECTOR_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.7';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -71,8 +72,21 @@
     lastLogClearAt: '',
     lastSyncAt: 0,
     syncBusy: false,
+    bootSyncPending: false,
     lastMatchLogKey: ''
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   boot();
 
@@ -80,7 +94,8 @@
     buildPanel();
     readLocalRules();
     log(`Loaded v${VERSION}`);
-    setStatus(hostLabel());
+    state.bootSyncPending = true;
+    setStatus('Waiting for shared rules sync...');
     syncSharedRules('boot').catch((err) => log(`Shared sync failed: ${err?.message || err}`));
 
     state.scanTimer = setInterval(scanRules, CFG.scanMs);
@@ -157,6 +172,96 @@
     if (kind === 'lex') return 'Watching LEX';
     if (kind === 'gwpc') return 'Watching GWPC';
     return 'Watching';
+  }
+
+  function firstVisibleTextBySelectors(selectors) {
+    for (const selector of selectors) {
+      for (const el of queryAllDeep(selector)) {
+        if (!visible(el)) continue;
+        const text = norm(el.textContent || '');
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
+  function hasExactVisibleLabel(labelText) {
+    const wanted = norm(labelText);
+    if (!wanted) return false;
+    for (const el of queryAllDeep('.gw-label, .gw-LabelWidget, .gw-vw--value, .gw-infoValue')) {
+      if (visible(el) && norm(el.textContent || '') === wanted) return true;
+    }
+    return false;
+  }
+
+  function getGwpcHeaderText() {
+    return firstVisibleTextBySelectors([
+      '.gw-TitleBar--title[role="heading"]',
+      '.gw-TitleBar--title',
+      '.gw-WizardScreen-title',
+      '.gw-Wizard--Title',
+      '[role="heading"][aria-level="1"]',
+      '#iv360-valuationContainer .iv360-page-title-container .iv360-page-header',
+      '#iv360-valuationContainer .iv360-page-title-container h1',
+      '.iv360-page-title-container .iv360-page-header',
+      '.iv360-page-title-container h1'
+    ]);
+  }
+
+  function detectGwpcProduct() {
+    if (hasExactVisibleLabel('Personal Auto')) return { product: 'auto', label: 'Personal Auto' };
+    if (hasExactVisibleLabel('Homeowners')) return { product: 'home', label: 'Homeowners' };
+    return { product: '', label: '' };
+  }
+
+  function getGwpcProductLabel(product) {
+    if (product === 'auto') return 'Personal Auto';
+    if (product === 'home') return 'Homeowners';
+    return '';
+  }
+
+  function buildGwpcRuleScope() {
+    const productInfo = detectGwpcProduct();
+    return {
+      product: norm(productInfo.product || '').toLowerCase(),
+      productLabel: norm(productInfo.label || ''),
+      header: getGwpcHeaderText()
+    };
+  }
+
+  function buildRuleFingerprintWithScope(fingerprint, scope = {}) {
+    const base = isPlainObject(fingerprint) ? { ...fingerprint } : {};
+    base.scope = {
+      product: norm(scope.product || '').toLowerCase(),
+      header: norm(scope.header || '')
+    };
+    return base;
+  }
+
+  function getRuleGwpcScope(rule) {
+    const fingerprint = isPlainObject(rule?.fingerprint) ? rule.fingerprint : {};
+    const rawScope = isPlainObject(fingerprint.scope) ? fingerprint.scope : {};
+    return {
+      product: norm(rule?.scopeProduct || fingerprint.scopeProduct || rawScope.product || '').toLowerCase(),
+      header: norm(rule?.scopeHeader || fingerprint.scopeHeader || rawScope.header || '')
+    };
+  }
+
+  function getGwpcRuleScopeFailure(rule, scope = null) {
+    const currentScope = scope || buildGwpcRuleScope();
+    const ruleScope = getRuleGwpcScope(rule);
+    const textFingerprint = norm(rule?.fingerprint?.textFingerprint || '');
+
+    if (ruleScope.product && ruleScope.product !== norm(currentScope.product || '').toLowerCase()) {
+      return `rule scoped to ${ruleScope.product}`;
+    }
+    if (ruleScope.header && ruleScope.header !== norm(currentScope.header || '')) {
+      return `rule scoped to header "${ruleScope.header}"`;
+    }
+    if (!ruleScope.product && !ruleScope.header && !textFingerprint) {
+      return 'legacy rule missing scope and text fingerprint';
+    }
+    return '';
   }
 
   function visible(el) {
@@ -332,6 +437,9 @@
     const selector = norm(raw.selector || raw.cssSelector || '');
     const savedErrorText = norm(raw.savedErrorText || raw.errorText || raw.customMessage || raw.resultValue || raw.textSample || raw.errorName || '');
     const fingerprintRaw = isPlainObject(raw.fingerprint) ? raw.fingerprint : {};
+    const fingerprintScopeRaw = isPlainObject(fingerprintRaw.scope) ? fingerprintRaw.scope : {};
+    const scopeProduct = norm(raw.scopeProduct || raw.product || fingerprintRaw.scopeProduct || fingerprintScopeRaw.product || '').toLowerCase();
+    const scopeHeader = norm(raw.scopeHeader || raw.header || fingerprintRaw.scopeHeader || fingerprintScopeRaw.header || '');
     const fingerprint = {
       tag: norm(fingerprintRaw.tag || ''),
       id: norm(fingerprintRaw.id || ''),
@@ -339,7 +447,11 @@
       role: norm(fingerprintRaw.role || ''),
       ariaLabel: norm(fingerprintRaw.ariaLabel || ''),
       classTokens: Array.isArray(fingerprintRaw.classTokens) ? fingerprintRaw.classTokens.map(norm).filter(Boolean).slice(0, 4) : [],
-      textFingerprint: truncate(fingerprintRaw.textFingerprint || raw.textFingerprint || raw.textSample || '', 160)
+      textFingerprint: truncate(fingerprintRaw.textFingerprint || raw.textFingerprint || raw.textSample || '', 160),
+      scope: {
+        product: scopeProduct,
+        header: scopeHeader
+      }
     };
 
     const ruleId = norm(raw.ruleId || raw.id || buildRuleId(selector, fingerprint.textFingerprint));
@@ -352,6 +464,8 @@
       label: norm(raw.label || raw.errorName || savedErrorText || 'Saved selector error'),
       savedErrorText,
       fingerprint,
+      scopeProduct,
+      scopeHeader,
       createdAt: norm(raw.createdAt || nowIso()),
       updatedAt: norm(raw.updatedAt || raw.createdAt || nowIso()),
       sourceScript: norm(raw.sourceScript || ''),
@@ -396,10 +510,15 @@
       const rules = Array.isArray(response.rules) ? response.rules.map(normalizeRule).filter(Boolean) : [];
       writeLocalRules(rules.filter((rule) => rule.enabled !== false));
       state.lastSyncAt = Date.now();
+      const releaseBootGate = state.bootSyncPending;
+      state.bootSyncPending = false;
       log(`Shared rules sync complete | ${state.rules.length} rule(s)${reason ? ` | ${reason}` : ''}`);
+      if (releaseBootGate && !state.destroyed) {
+        setTimeout(() => scanRules(), 0);
+      }
     } finally {
       state.syncBusy = false;
-      setStatus(`${hostLabel()} | ${state.rules.length} rule(s)`);
+      setStatus(state.bootSyncPending ? 'Waiting for shared rules sync...' : `${hostLabel()} | ${state.rules.length} rule(s)`);
     }
   }
 
@@ -437,11 +556,25 @@
     next.push(normalized);
     writeLocalRules(next);
     log(`Saved shared selector rule | ${normalized.ruleId} | ${normalized.savedErrorText}`);
+    return normalized;
   }
 
   function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
     return String(value).replace(/([ #;?%&,.+*~':"!^$[\]()=>|\/@])/g, '\\$1');
+  }
+
+  function looksGeneratedId(value) {
+    const id = norm(value || '');
+    if (!id) return false;
+    if (/^dialog-(?:body|title)-id-\d+(?:-\d+)+$/i.test(id)) return true;
+    if (/^[a-z][a-z0-9]*(?:-[a-z0-9]+)+-\d+(?:-\d+)+$/i.test(id)) return true;
+    return false;
+  }
+
+  function hasStableId(el) {
+    const id = norm(el?.id || '');
+    return !!id && !looksGeneratedId(id);
   }
 
   function stableClassTokens(el) {
@@ -451,9 +584,41 @@
       .slice(0, 4);
   }
 
+  function scoreRuleTarget(el) {
+    if (!(el instanceof Element) || !visible(el) || isUi(el)) return Number.NEGATIVE_INFINITY;
+    const text = norm(el.innerText || el.textContent || '');
+    let score = 0;
+    if (/insert failed|cannot_execute_flow_trigger|too many soql queries|error id:|exception/i.test(text)) score += 40;
+    if (el.matches('li, [role="alert"], .slds-popover__body, .slds-notify, .slds-form-element__help')) score += 15;
+    if (stableClassTokens(el).length) score += 5;
+    if (hasStableId(el)) score += 6;
+    if (looksGeneratedId(el.id)) score -= 8;
+    if (text.length >= 40) score += Math.min(18, Math.floor(text.length / 40));
+    if (text.length > 900) score -= 8;
+    return score;
+  }
+
+  function chooseRuleTarget(el) {
+    if (!(el instanceof Element)) return el;
+    let best = el;
+    let bestScore = scoreRuleTarget(el);
+    let cur = el.parentElement;
+    let depth = 0;
+    while (cur && cur !== document.body && cur !== document.documentElement && depth < 6) {
+      const score = scoreRuleTarget(cur);
+      if (score > bestScore) {
+        best = cur;
+        bestScore = score;
+      }
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    return best;
+  }
+
   function buildSelector(el) {
     if (!(el instanceof Element)) return '';
-    if (el.id) return `#${cssEscape(el.id)}`;
+    if (hasStableId(el)) return `#${cssEscape(el.id)}`;
 
     const name = norm(el.getAttribute('name') || '');
     if (name) {
@@ -472,7 +637,7 @@
     let cur = el;
     while (cur && cur instanceof Element && cur !== document.body && cur !== document.documentElement && parts.length < 6) {
       let part = cur.tagName.toLowerCase();
-      if (cur.id) {
+      if (hasStableId(cur)) {
         part += `#${cssEscape(cur.id)}`;
         parts.unshift(part);
         break;
@@ -508,7 +673,21 @@
     return !!(el instanceof Element && el.closest(`[${UI_ATTR}="1"]`));
   }
 
-  function selectableAt(clientX, clientY) {
+  function selectableFromEvent(event) {
+    const path = typeof event?.composedPath === 'function' ? event.composedPath() : [];
+    for (const node of path) {
+      if (!(node instanceof Element)) continue;
+      if (isUi(node)) return null;
+      if (!visible(node)) continue;
+      if (node === document.body || node === document.documentElement) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function selectableAt(clientX, clientY, event = null) {
+    const direct = selectableFromEvent(event);
+    if (direct) return direct;
     const stack = typeof document.elementsFromPoint === 'function' ? document.elementsFromPoint(clientX, clientY) : [];
     for (const node of stack) {
       if (!(node instanceof Element)) continue;
@@ -560,7 +739,7 @@
     setStatus('Click an error element...');
     log('Selector mode started');
 
-    const onMove = (event) => updateHover(selectableAt(event.clientX, event.clientY));
+    const onMove = (event) => updateHover(selectableAt(event.clientX, event.clientY, event));
     const onClick = (event) => {
       if (!state.selectorMode) return;
       if (isUi(event.target)) {
@@ -568,7 +747,7 @@
         event.stopPropagation();
         return;
       }
-      const target = selectableAt(event.clientX, event.clientY);
+      const target = selectableAt(event.clientX, event.clientY, event);
       if (!target) return;
       event.preventDefault();
       event.stopPropagation();
@@ -603,14 +782,15 @@
 
   async function saveRuleFromElement(el) {
     stopSelectorMode('', { logIt: false });
-    const selector = buildSelector(el);
-    const fingerprint = buildFingerprint(el);
+    const target = chooseRuleTarget(el);
+    const selector = buildSelector(target);
+    const fingerprint = buildFingerprint(target);
     if (!selector) {
       log('Could not build selector for clicked element');
       return;
     }
 
-    const defaultReason = norm(el.innerText || el.textContent || '');
+    const defaultReason = norm(target.innerText || target.textContent || '');
     const reason = norm(window.prompt('What should be written in the failed note when this selector is visible?', defaultReason));
     if (!reason) {
       log('Selector save canceled: no note message');
@@ -624,11 +804,24 @@
       label,
       savedErrorText: reason,
       selector,
-      fingerprint,
+      fingerprint: hostKind() === 'gwpc'
+        ? buildRuleFingerprintWithScope(fingerprint, buildGwpcRuleScope())
+        : fingerprint,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
-    await upsertSharedRule(rule);
+    const savedRule = await upsertSharedRule(rule);
+    suppressCurrentLexMatch(savedRule);
+  }
+
+  function suppressCurrentLexMatch(rule) {
+    if (hostKind() !== 'lex') return;
+    const ruleId = norm(rule?.ruleId || '');
+    const azId = readCurrentAzId();
+    if (!ruleId || !azId) return;
+    const sentKey = `lex|${azId}|${ruleId}`;
+    markSent(sentKey);
+    log(`Saved selector for LEX without auto-triggering current AZ | ${azId} | ${ruleId}`);
   }
 
   function getAllRoots(root = document) {
@@ -760,7 +953,11 @@
       ticketId: cleanAzId,
       azId: cleanAzId,
       reason: message,
+      triggerType: 'selector',
+      label: norm(rule?.label || ''),
       selectorRuleId: norm(rule?.ruleId || ''),
+      pageUrl: location.href,
+      pageTitle: norm(document.title || ''),
       requestedAt: nowIso(),
       source: SCRIPT_NAME,
       version: VERSION
@@ -811,20 +1008,24 @@
     }
 
     const message = norm(rule.savedErrorText || '');
+    const currentScope = buildGwpcRuleScope();
+    const ruleScope = getRuleGwpcScope(rule);
+    const product = norm(currentScope.product || ruleScope.product || 'home').toLowerCase();
+    const productLabel = norm(currentScope.productLabel || getGwpcProductLabel(product));
     const eventId = `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const event = {
       eventId,
       id: eventId,
-      dedupeKey: ['selector', azId, 'home', rule.ruleId].join('|'),
-      actionKey: 'home_saved_selector_error',
+      dedupeKey: ['selector', azId, product || 'home', rule.ruleId].join('|'),
+      actionKey: `${product || 'home'}_saved_selector_error`,
       triggerType: 'selector',
-      product: 'home',
-      productLabel: 'Homeowners',
+      product: product || 'home',
+      productLabel,
       errorType: 'SavedSelectorMatch',
       errorName: norm(rule.label || 'Saved selector error'),
       errorMessage: message,
       errorText: message,
-      resultField: 'Done?',
+      resultField: product === 'home' ? 'Done?' : 'Auto',
       resultValue: message,
       selectorRuleId: norm(rule.ruleId || ''),
       selector: norm(rule.selector || ''),
@@ -857,31 +1058,33 @@
     next.meta.updatedAt = nowIso();
     next.meta.lastWriter = SCRIPT_NAME;
     try { localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2)); } catch {}
-    try {
-      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify({
-        azId,
-        product: 'home',
-        eventId,
-        triggerType: 'selector',
-        reason: `selector:${eventId}`,
-        requestedAt: nowIso(),
-        source: SCRIPT_NAME,
-        version: VERSION
-      }, null, 2));
-    } catch {}
+    const forceSendRequest = {
+      azId,
+      product: 'home',
+      eventId,
+      triggerType: 'selector',
+      reason: `selector:${eventId}`,
+      requestedAt: nowIso(),
+      source: SCRIPT_NAME,
+      version: VERSION
+    };
+    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(forceSendRequest, null, 2)); } catch {}
+    try { GM_setValue(FORCE_SEND_KEY, forceSendRequest); } catch {}
     log(`Saved GWPC selector event to bundle | ${rule.ruleId} | ${message}`);
     return true;
   }
 
   function scanRules() {
-    if (state.destroyed || state.selectorMode || state.syncBusy) return;
+    if (state.destroyed || state.selectorMode || state.syncBusy || state.bootSyncPending) return;
     if (!state.rules.length) return;
 
     const kind = hostKind();
     if (kind !== 'lex' && kind !== 'gwpc') return;
+    const gwpcScope = kind === 'gwpc' ? buildGwpcRuleScope() : null;
 
     for (const rule of state.rules) {
       if (!rule || rule.enabled === false) continue;
+      if (kind === 'gwpc' && getGwpcRuleScopeFailure(rule, gwpcScope)) continue;
       const matched = findRuleMatch(rule);
       if (!matched) continue;
 
@@ -892,10 +1095,15 @@
       if (kind === 'lex') {
         if (azId && publishMissingPayloadTrigger(azId, rule.savedErrorText, rule)) {
           markSent(sentKey);
+          tryCloseCurrentTab();
+          return;
         } else {
-          log(`LEX selector matched but no AZ ID was available | ${rule.ruleId}`);
+          const logKey = `lex-no-az|${rule.ruleId}`;
+          if (state.lastMatchLogKey !== logKey) {
+            state.lastMatchLogKey = logKey;
+            log(`LEX selector matched but no AZ ID was available | ${rule.ruleId}`);
+          }
         }
-        tryCloseCurrentTab();
         return;
       }
 

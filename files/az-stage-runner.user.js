@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.36
+// @version      2.5.41
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.36';
+  const VERSION = '2.5.41';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -85,7 +85,9 @@
     TIMEOUT_RETRY_REQUEST: 'tm_pc_header_timeout_retry_request_v1',
     MAIN_PAYLOAD_FAILURES: 'tm_az_stage_runner_main_payload_failures_v1',
     FINAL_PAYLOAD: 'tm_az_gwpc_final_payload_v1',
-    FINAL_READY: 'tm_az_gwpc_final_payload_ready_v1'
+    FINAL_READY: 'tm_az_gwpc_final_payload_ready_v1',
+    AUTH_HOLD: 'tm_shared_auth_hold_v1',
+    ANCHOR_STATE: 'tm_shared_anchor_state_v1'
   };
 
   const SS_KEYS = {
@@ -232,6 +234,7 @@
     pendingReloadTimer: 0,
     logsIntervalTimer: null,
     lastStatus: '',
+    authGateLogKey: '',
     activityState: 'idle',
     activityMessage: 'Idle'
   };
@@ -283,6 +286,8 @@
         event.key !== KEYS.FINISHER_CLOSE_SIGNAL
         && event.key !== KEYS.WORKFLOW_CLEANUP_REQUEST
         && event.key !== KEYS.TIMEOUT_RETRY_REQUEST
+        && event.key !== KEYS.AUTH_HOLD
+        && event.key !== KEYS.ANCHOR_STATE
         && event.key !== KEYS.FINAL_READY
         && event.key !== KEYS.FINAL_PAYLOAD
       ) return;
@@ -292,6 +297,10 @@
           ? 'workflow-cleanup'
           : event.key === KEYS.TIMEOUT_RETRY_REQUEST
             ? 'timeout-quote-retry'
+            : event.key === KEYS.AUTH_HOLD
+              ? 'auth-hold'
+              : event.key === KEYS.ANCHOR_STATE
+                ? 'anchor-state'
           : 'final-home-payload';
       markExternalWake(reason);
     };
@@ -475,18 +484,23 @@
     return signalMs >= (pauseMs - 1000);
   }
 
+  function getActiveMissingPayloadTriggerForTicket(ticketId = '') {
+    const wantedId = norm(ticketId || '');
+    const trigger = readSharedJson(KEYS.MISSING_PAYLOAD_TRIGGER, null);
+    if (!trigger || trigger.ready !== true) return null;
+    const triggerId = norm(trigger.ticketId || trigger.azId || '');
+    if (!triggerId) return null;
+    if (wantedId && triggerId !== wantedId) return null;
+
+    const requestedAtMs = Date.parse(norm(trigger.requestedAt || ''));
+    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) return null;
+    return trigger;
+  }
+
   function hasActiveMissingPayloadTriggerForPause(pause) {
     const ticketId = norm(pause?.ticketId || '');
     if (!ticketId) return false;
-
-    const trigger = readSharedJson(KEYS.MISSING_PAYLOAD_TRIGGER, null);
-    if (!trigger || trigger.ready !== true) return false;
-    const triggerId = norm(trigger.ticketId || trigger.azId || '');
-    if (triggerId !== ticketId) return false;
-
-    const requestedAtMs = Date.parse(norm(trigger.requestedAt || ''));
-    if (Number.isFinite(requestedAtMs) && (Date.now() - requestedAtMs) > (10 * 60 * 1000)) return false;
-    return true;
+    return !!getActiveMissingPayloadTriggerForTicket(ticketId);
   }
 
   function hasCompletedMissingPayloadHandoff(pause) {
@@ -831,6 +845,122 @@
     try { sessionStorage.setItem(key, String(value == null ? '' : value)); } catch {}
   }
 
+  function parseIsoMs(value) {
+    const ms = Date.parse(norm(value || ''));
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  function readAuthHold() {
+    const hold = readJson(KEYS.AUTH_HOLD, null);
+    return hold && typeof hold === 'object' && !Array.isArray(hold) ? hold : null;
+  }
+
+  function readAnchorState() {
+    const value = readJson(KEYS.ANCHOR_STATE, null);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  function isAuthHoldActive(hold) {
+    if (!hold || typeof hold !== 'object') return false;
+    const holdState = norm(hold.state || '').toLowerCase();
+    if (holdState !== 'recovering' && holdState !== 'blocked') return false;
+
+    const expiresAtMs = parseIsoMs(hold.expiresAt || '');
+    if (expiresAtMs && Date.now() > expiresAtMs) return false;
+
+    const updatedAtMs = parseIsoMs(hold.updatedAt || hold.claimedAt || '');
+    if (!updatedAtMs) return false;
+    return (Date.now() - updatedAtMs) <= 30000;
+  }
+
+  function buildAuthGateSnapshot() {
+    const hold = readAuthHold();
+    if (isAuthHoldActive(hold)) {
+      const holdState = norm(hold.state || '').toLowerCase();
+      return {
+        state: holdState === 'blocked' ? 'blocked' : 'recovering',
+        message: norm(hold.reason || hold.system || 'Auth recovery in progress') || 'Auth recovery in progress'
+      };
+    }
+
+    const anchors = readAnchorState();
+    const systems = ['apex', 'gwpc'];
+    let blockedMessage = '';
+    const recoveringMessages = [];
+
+    for (const system of systems) {
+      const entry = anchors?.[system];
+      if (!entry || typeof entry !== 'object') continue;
+      const sessionState = norm(entry.sessionState || '').toLowerCase();
+      if (!sessionState) continue;
+      const label = `${system.toUpperCase()} ${norm(entry.authMarker || entry.pageKind || sessionState) || sessionState}`;
+      if (sessionState === 'blocked') {
+        blockedMessage = label;
+        break;
+      }
+      if (sessionState === 'recovering' || sessionState === 'login_required') {
+        recoveringMessages.push(label);
+      }
+    }
+
+    if (blockedMessage) {
+      return {
+        state: 'blocked',
+        message: blockedMessage
+      };
+    }
+
+    if (recoveringMessages.length) {
+      return {
+        state: 'recovering',
+        message: recoveringMessages.join(' | ')
+      };
+    }
+
+    return {
+      state: 'healthy',
+      message: ''
+    };
+  }
+
+  async function waitForAuthHealthy(contextLabel = 'auth') {
+    let lastLogAt = 0;
+
+    while (state.running && !state.destroyed) {
+      const gate = buildAuthGateSnapshot();
+      const gateKey = `${gate.state}|${gate.message}`;
+
+      if (gate.state === 'healthy') {
+        state.authGateLogKey = '';
+        if (state.lastStatus === 'AUTH RECOVERING') {
+          setStatus(`RUNNING (${state.mode ? state.mode.toUpperCase() : 'HOME'})`);
+        }
+        return true;
+      }
+
+      if (gate.state === 'blocked') {
+        if (state.authGateLogKey !== gateKey) {
+          state.authGateLogKey = gateKey;
+          log(`Auth blocked while ${contextLabel}: ${gate.message || 'manual login required'}`, 'error');
+        }
+        stopRun('AUTH BLOCKED');
+        return false;
+      }
+
+      setStatus('AUTH RECOVERING');
+      if (state.authGateLogKey !== gateKey || (Date.now() - lastLogAt) >= 8000) {
+        state.authGateLogKey = gateKey;
+        lastLogAt = Date.now();
+        log(`Waiting for auth recovery while ${contextLabel}: ${gate.message || 'anchor recovery in progress'}`, 'warn');
+      }
+
+      const ok = await waitForWakeOrTimeout(1000);
+      if (!ok) return false;
+    }
+
+    return false;
+  }
+
   function clearFinisherCloseSignal() {
     try {
       localStorage.removeItem(KEYS.FINISHER_CLOSE_SIGNAL);
@@ -856,6 +986,23 @@
     try {
       GM_deleteValue(KEYS.TIMEOUT_RETRY_REQUEST);
     } catch {}
+  }
+
+  function clearMirroredFinalPayloadForNewRun(ticketId = '') {
+    const cleanTicketId = norm(ticketId || '');
+    try {
+      localStorage.removeItem(KEYS.FINAL_PAYLOAD);
+    } catch {}
+    try {
+      localStorage.removeItem(KEYS.FINAL_READY);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.FINAL_PAYLOAD);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.FINAL_READY);
+    } catch {}
+    log(`Cleared mirrored final payload handoff before Home quote run${cleanTicketId ? ` | ${cleanTicketId}` : ''}`, 'ok');
   }
 
   function markTimeoutRetryLaunched(request) {
@@ -1112,6 +1259,7 @@
       if (!reopened) return false;
     }
 
+    clearMirroredFinalPayloadForNewRun(cleanTicketId);
     log(`Retrying Farmers Home Quote after GWPC timeout${attemptLabel} | ${cleanTicketId}`, 'warn');
     const quoteStarted = await startQuoteFlow();
     if (!quoteStarted) {
@@ -1845,6 +1993,7 @@
         writeScanState('payload-saved', ready.payload.ticketId, pageLabel);
         log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/${FIELD_ORDER.length}`, 'ok');
         clearFinisherCloseSignal();
+        clearMirroredFinalPayloadForNewRun(ticketId);
 
         const quoteStarted = await startQuoteFlow();
         if (!quoteStarted) {
@@ -1896,11 +2045,13 @@
     let drawerHiddenLogged = false;
     let finalPayloadReadyLogged = false;
     let mismatchFallbackSent = false;
+    let directFailureHandoffStarted = false;
     let waitStartedAt = Date.now();
     const maxWaitMs = Math.max(0, Number(options.maxWaitMs || 0));
     const timeoutLabel = norm(options.timeoutLabel || 'finisher');
 
     while (state.running && !state.destroyed) {
+      if (!(await waitForAuthHealthy('waiting for finisher'))) return false;
       if (maxWaitMs && (Date.now() - waitStartedAt) >= maxWaitMs) {
         log(`Timed out waiting for ${timeoutLabel} close trigger | ${ticketId}`, 'error');
         return false;
@@ -1922,6 +2073,40 @@
       if (consumeFinisherWakeTrigger(ticketId)) {
         return true;
       }
+
+      const directMissingPayloadTrigger = getActiveMissingPayloadTriggerForTicket(ticketId);
+      if (directMissingPayloadTrigger) {
+        const reason = norm(directMissingPayloadTrigger.reason || 'MAIN/PAYLOAD FAILED') || 'MAIN/PAYLOAD FAILED';
+        if (!directFailureHandoffStarted) {
+          directFailureHandoffStarted = true;
+          log(`Direct missing payload trigger received while waiting for finisher | ${ticketId} | ${reason}`, 'warn');
+        }
+
+        let openInfo = getOpenTicketInfo();
+        let ticketReadyForFinisher = isTicketDrawerOpen() && String(openInfo.ticketId || '') === String(ticketId);
+        if (!ticketReadyForFinisher && options.card instanceof Element) {
+          const reopened = await openCard(options.card, ticketId);
+          log(reopened ? `Reopened ticket for direct failed path | ${ticketId}` : `Could not reopen ticket for direct failed path | ${ticketId}`, reopened ? 'ok' : 'error');
+          openInfo = getOpenTicketInfo();
+          ticketReadyForFinisher = isTicketDrawerOpen() && String(openInfo.ticketId || '') === String(ticketId);
+        }
+
+        if (!ticketReadyForFinisher) {
+          setStatus('Waiting to reopen failed ticket');
+          await waitForWakeOrTimeout(CFG.ticketClosePollMs);
+          continue;
+        }
+
+        clearFinisherCloseSignal();
+        const handoffPause = setMissingPayloadHandoffPause(ticketId, reason);
+        setStatus('DIRECT FAIL HANDOFF ACTIVE');
+        clearDockHighlight();
+        log(`Launcher handed direct failed path to finisher | ${ticketId}`, 'warn');
+        startMissingPayloadHandoffMonitor(handoffPause);
+        stopRun('Missing payload handed to finisher', { manual: true });
+        return false;
+      }
+
       if (!finalPayloadReadyLogged && consumeFinalPayloadReady(ticketId, waitStartedAt)) {
         finalPayloadReadyLogged = true;
         log(`Final Home payload ready for AZ ${ticketId}; waiting for finisher to fill fields/tag/close`, 'ok');

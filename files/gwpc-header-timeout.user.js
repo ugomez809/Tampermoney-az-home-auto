@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.16
+// @version      2.3.23
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -21,9 +21,10 @@
 
   if (window.top !== window.self) return;
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
+  if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.16';
+  const VERSION = '2.3.23';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -68,6 +69,7 @@
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
     timeoutRetryLimit: 3,
+    timeoutRetryRequestMaxWaitMs: 10000,
     timeoutRetryCloseDelayMs: 800,
     timeoutRetryCloseRetryMs: 1200,
     timeoutRetryCloseAttempts: 6,
@@ -132,6 +134,7 @@
     sharedRulesSyncing: false,
     sharedRulesSyncQueued: false,
     lastSharedRulesSyncError: '',
+    bootSharedRulesPending: false,
     savedWatchAlertWebhookUrl: '',
     savedTimeoutTextWebhookUrl: '',
     lastScanAt: 0,
@@ -143,6 +146,18 @@
     selectorSkipLogKeys: new Map(),
     last360ValueLogKeys: new Set()
   };
+
+  function isAnchorTab() {
+    try {
+      if (sessionStorage.getItem('tm_anchor_role_v1')) return true;
+    } catch {}
+
+    try {
+      return new URL(location.href).searchParams.get('hb_anchor') === '1';
+    } catch {
+      return false;
+    }
+  }
 
   boot();
 
@@ -199,6 +214,7 @@
     if (state.watchModeEnabled) {
       log('Watch mode restored: ON');
     }
+    state.bootSharedRulesPending = sharedRulesSyncEnabled();
 
     scheduleObserve();
     scheduleScan('start');
@@ -830,6 +846,17 @@
     }
 
     if (activeRequest?.ready === true && activeRequestScope === current.scope) {
+      const requestedMs = Date.parse(normalizeText(activeRequest.requestedAt || ''));
+      const requestAgeMs = Number.isFinite(requestedMs) ? (Date.now() - requestedMs) : 0;
+      if (requestAgeMs >= CFG.timeoutRetryRequestMaxWaitMs) {
+        log(
+          `Launcher retry wait exceeded ${Math.round(CFG.timeoutRetryRequestMaxWaitMs / 1000)}s; ` +
+          `continuing normal timeout flow | ${context.product.toUpperCase()} | AZ ${context.job['AZ ID']} | ${context.header}`
+        );
+        clearTimeoutRetryRequest();
+        writeTimeoutRetryRequestedContext('');
+        return false;
+      }
       setStatus(`Waiting for launcher retry (${Math.max(1, activeRequest.attempt || current.retries)}/${CFG.timeoutRetryLimit})`);
       return true;
     }
@@ -1037,7 +1064,7 @@
       version: VERSION
     };
     try {
-      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2));
+      writeSharedJsonValue(FORCE_SEND_KEY, request);
       if (event.triggerType === 'selector') {
         log(
           `Raised webhook send signal for ${String(context.product || '').toUpperCase()} selector | ` +
@@ -1110,6 +1137,7 @@
     const normalized = normalizeText(reason).toLowerCase();
     if (!normalized) return 0;
     if (normalized === 'text fingerprint not found on visible element') return 100;
+    if (normalized === 'rule missing text fingerprint') return 95;
     if (normalized === 'visible element text empty') return 90;
     if (normalized === 'fingerprint score mismatch') return 80;
     if (normalized === 'candidate not visible') return 60;
@@ -1969,15 +1997,23 @@
     const pageAddress = normalizeText(context.pageIdentity?.mailingAddress || '');
 
     const stored = readRuntimeState();
-    const runtimeKey = nextAzId && nextProduct && nextHeader ? [nextAzId, nextProduct, nextHeader].join('|') : '';
+    const runtimeKey = nextAzId && nextProduct && nextHeader
+      ? [nextAzId, nextProduct, nextSubmission || '(no-submission)', nextHeader].join('|')
+      : '';
     let headerSinceMs = nextHeader ? Date.now() : 0;
+    const canResumeStoredTimer = !!(
+      runtimeKey
+      && normalizeText(stored.key || '') === runtimeKey
+      && normalizeText(state.lastRuntimePersistKey) === runtimeKey
+      && Number.isFinite(Number(stored.headerSinceMs))
+    );
 
-    if (runtimeKey && normalizeText(stored.key || '') === runtimeKey && Number.isFinite(Number(stored.headerSinceMs))) {
+    if (canResumeStoredTimer) {
       headerSinceMs = Number(stored.headerSinceMs) || headerSinceMs;
     }
 
     if (runtimeKey && normalizeText(state.lastRuntimePersistKey) !== runtimeKey) {
-      headerSinceMs = normalizeText(stored.key || '') === runtimeKey ? headerSinceMs : Date.now();
+      headerSinceMs = Date.now();
       writeRuntimeState({
         key: runtimeKey,
         azId: nextAzId,
@@ -2913,7 +2949,8 @@
     });
   }
 
-  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones) {
+  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones, options = {}) {
+    const preferRemoteDisabled = options.preferRemoteDisabled === true;
     const localMap = new Map((Array.isArray(localRules) ? localRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const remoteMap = new Map((Array.isArray(remoteRules) ? remoteRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const tombstoneMap = new Map(Object.entries(isPlainObject(tombstones) ? tombstones : {}).map(([id, value]) => [normalizeText(id), value]).filter(([id]) => id));
@@ -2940,6 +2977,15 @@
       const remoteEnabled = remoteRule ? remoteRule.enabled !== false : false;
 
       if (remoteRule && remoteEnabled === false) {
+        if (preferRemoteDisabled) {
+          nextTombstones[ruleId] = {
+            ruleId,
+            disabledAt: normalizeText(remoteRule.updatedAt || tombstone?.disabledAt || nowIso()),
+            updatedBy: normalizeText(remoteRule.updatedBy || tombstone?.updatedBy || ''),
+            clientId: normalizeText(remoteRule.clientId || tombstone?.clientId || '')
+          };
+          continue;
+        }
         if (localRule && localMs > Math.max(remoteMs, tombstoneMs)) {
           nextRules.push(localRule);
           upserts.push(localRule);
@@ -2993,6 +3039,7 @@
   async function syncSharedRules(options = {}) {
     if (!sharedRulesSyncEnabled()) return false;
     const force = options.force === true;
+    const isBootSync = normalizeText(options.reason || '') === 'boot';
     if (!force && state.lastSharedRulesSyncAt && (Date.now() - state.lastSharedRulesSyncAt) < CFG.sharedRulesRefreshMs) {
       return false;
     }
@@ -3004,7 +3051,9 @@
       const localRules = getSelectorRules();
       const tombstones = readSelectorRuleTombstones();
       const remoteRules = await fetchSharedSelectorRules();
-      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones);
+      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones, {
+        preferRemoteDisabled: isBootSync
+      });
 
       const localSignature = buildRulesSignature(localRules);
       const nextSignature = buildRulesSignature(reconciled.rules);
@@ -3043,8 +3092,17 @@
       }
       return false;
     } finally {
+      const releaseBootGate = isBootSync && state.bootSharedRulesPending;
+      if (releaseBootGate) {
+        state.bootSharedRulesPending = false;
+      }
       state.sharedRulesSyncing = false;
       renderButtons();
+      if (releaseBootGate && !state.destroyed) {
+        setTimeout(() => {
+          scheduleScan('boot-shared-rules-ready');
+        }, 0);
+      }
       if (state.sharedRulesSyncQueued) {
         state.sharedRulesSyncQueued = false;
         setTimeout(() => {
@@ -3156,6 +3214,22 @@
     if (!isPlainObject(raw)) return null;
     const enabled = raw.enabled === false ? false : toBoolean(raw.enabled, true);
     const selector = normalizeText(raw.selector || raw.cssSelector || '');
+    const fingerprintRaw = isPlainObject(raw.fingerprint) ? raw.fingerprint : {};
+    const fingerprintScopeRaw = isPlainObject(fingerprintRaw.scope) ? fingerprintRaw.scope : {};
+    const scopeProduct = normalizeText(
+      raw.scopeProduct ||
+      raw.product ||
+      fingerprintRaw.scopeProduct ||
+      fingerprintScopeRaw.product ||
+      ''
+    ).toLowerCase();
+    const scopeHeader = normalizeText(
+      raw.scopeHeader ||
+      raw.header ||
+      fingerprintRaw.scopeHeader ||
+      fingerprintScopeRaw.header ||
+      ''
+    );
     const savedErrorText = normalizeText(
       raw.savedErrorText ||
       raw.errorText ||
@@ -3176,15 +3250,19 @@
 
     const fingerprint = isPlainObject(raw.fingerprint)
       ? {
-          tag: normalizeText(raw.fingerprint.tag || ''),
-          id: normalizeText(raw.fingerprint.id || ''),
-          name: normalizeText(raw.fingerprint.name || ''),
-          role: normalizeText(raw.fingerprint.role || ''),
-          ariaLabel: normalizeText(raw.fingerprint.ariaLabel || ''),
-          classTokens: Array.isArray(raw.fingerprint.classTokens)
-            ? raw.fingerprint.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
+          tag: normalizeText(fingerprintRaw.tag || ''),
+          id: normalizeText(fingerprintRaw.id || ''),
+          name: normalizeText(fingerprintRaw.name || ''),
+          role: normalizeText(fingerprintRaw.role || ''),
+          ariaLabel: normalizeText(fingerprintRaw.ariaLabel || ''),
+          classTokens: Array.isArray(fingerprintRaw.classTokens)
+            ? fingerprintRaw.classTokens.map((value) => normalizeText(value)).filter(Boolean).slice(0, 4)
             : [],
-          textFingerprint
+          textFingerprint,
+          scope: {
+            product: scopeProduct,
+            header: scopeHeader
+          }
         }
       : {
           tag: '',
@@ -3193,7 +3271,11 @@
           role: '',
           ariaLabel: '',
           classTokens: [],
-          textFingerprint
+          textFingerprint,
+          scope: {
+            product: scopeProduct,
+            header: scopeHeader
+          }
         };
 
     const ruleId = normalizeText(raw.ruleId || raw.id || buildRuleId(selector, textFingerprint));
@@ -3208,6 +3290,8 @@
       label: normalizeText(raw.label || raw.errorName || 'Saved selector error'),
       savedErrorText,
       fingerprint,
+      scopeProduct,
+      scopeHeader,
       createdAt: normalizeText(raw.createdAt || nowIso()),
       updatedAt: normalizeText(raw.updatedAt || raw.createdAt || nowIso()),
       sourceScript: normalizeText(raw.sourceScript || ''),
@@ -3223,6 +3307,38 @@
     const list = Array.isArray(parsed) ? parsed : [];
     const normalized = list.map(normalizeRule).filter((rule) => !!rule && rule.enabled !== false);
     return normalized;
+  }
+
+  function buildRuleFingerprintWithScope(fingerprint, context = {}) {
+    const base = isPlainObject(fingerprint) ? { ...fingerprint } : {};
+    base.scope = {
+      product: normalizeText(context?.product || '').toLowerCase(),
+      header: normalizeText(context?.header || '')
+    };
+    return base;
+  }
+
+  function getSelectorRuleScopeFailure(rule, context) {
+    const scopeProduct = normalizeText(rule?.scopeProduct || '').toLowerCase();
+    const scopeHeader = normalizeText(rule?.scopeHeader || '');
+    const selector = normalizeText(rule?.selector || '');
+    const textFingerprint = normalizeText(rule?.fingerprint?.textFingerprint || '');
+    const currentProduct = normalizeText(context?.product || '').toLowerCase();
+    const currentHeader = normalizeText(context?.header || '');
+
+    if (scopeProduct && scopeProduct !== currentProduct) {
+      return `rule scoped to ${scopeProduct}`;
+    }
+    if (scopeHeader && scopeHeader !== currentHeader) {
+      return `rule scoped to header "${scopeHeader}"`;
+    }
+    if (!textFingerprint && !is360ValueRule(rule, selector)) {
+      return 'rule missing text fingerprint';
+    }
+    if (!scopeProduct && !scopeHeader && !textFingerprint) {
+      return 'legacy rule missing scope and text fingerprint';
+    }
+    return '';
   }
 
   function saveSelectorRules(rules, options = {}) {
@@ -3517,7 +3633,10 @@
         selector: draft.selector,
         label: savedErrorText,
         savedErrorText,
-        fingerprint: draft.fingerprint,
+        fingerprint: buildRuleFingerprintWithScope(draft.fingerprint, {
+          product: state.current.product,
+          header: state.current.header
+        }),
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
@@ -3703,8 +3822,6 @@
     if (!isVisible(el)) return fail('candidate not visible');
 
     const matchedText = getVisibleElementLogText(el, 600);
-    if (!matchedText) return fail('visible element text empty');
-
     const fingerprint = isPlainObject(rule.fingerprint) ? rule.fingerprint : {};
     const current = buildElementFingerprint(el);
 
@@ -3715,29 +3832,41 @@
 
     if (fingerprint.tag) {
       required += 1;
-      if (fingerprint.tag === current.tag) score += 1;
+      if (fingerprint.tag === current.tag) {
+        score += 1;
+      }
     }
     if (fingerprint.id) {
       required += 1;
-      if (fingerprint.id === current.id) score += 1;
+      if (fingerprint.id === current.id) {
+        score += 1;
+      }
     }
     if (fingerprint.name) {
       required += 1;
-      if (fingerprint.name === current.name) score += 1;
+      if (fingerprint.name === current.name) {
+        score += 1;
+      }
     }
     if (fingerprint.role) {
       required += 1;
-      if (fingerprint.role === current.role) score += 1;
+      if (fingerprint.role === current.role) {
+        score += 1;
+      }
     }
     if (fingerprint.ariaLabel) {
       required += 1;
-      if (fingerprint.ariaLabel === current.ariaLabel) score += 1;
+      if (fingerprint.ariaLabel === current.ariaLabel) {
+        score += 1;
+      }
     }
     if (Array.isArray(fingerprint.classTokens) && fingerprint.classTokens.length) {
       required += 1;
       const currentSet = new Set(current.classTokens || []);
       const allFound = fingerprint.classTokens.every((token) => currentSet.has(token));
-      if (allFound) score += 1;
+      if (allFound) {
+        score += 1;
+      }
     }
     if (fingerprint.textFingerprint) {
       required += 1;
@@ -3750,8 +3879,11 @@
       }
     }
 
-    if (textRequired && !textMatches) return fail('text fingerprint not found on visible element');
     if (required === 0) return fail('fingerprint empty');
+
+    if (textRequired && !textMatches) {
+      return fail(matchedText ? 'text fingerprint not found on visible element' : 'visible element text empty');
+    }
 
     let ok = false;
     if (textRequired) {
@@ -3951,11 +4083,17 @@
 
   function processSelectorMatches() {
     if (!savedSelectorRulesEnabled()) return;
+    if (state.bootSharedRulesPending) return;
     const context = buildEventContext();
     if (!context.ok) return;
     if (!context.product || !context.productLabel) return;
 
     for (const rule of getSelectorRules()) {
+      const scopeFailure = getSelectorRuleScopeFailure(rule, context);
+      if (scopeFailure) {
+        logSelectorRuleSkipped(context, rule, { reason: scopeFailure });
+        continue;
+      }
       const dedupeKey = ['selector', context.job['AZ ID'], context.product, normalizeText(rule.ruleId || '')].join('|');
       if (hasSentOrPendingDedupe(dedupeKey)) continue;
       const match = findRuleMatch(rule);
