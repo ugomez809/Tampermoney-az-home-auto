@@ -38,6 +38,7 @@ For one-by-one installs instead of the bundle:
 
 | Script | Install |
 | --- | --- |
+| 13 AUTO AgencyZoom Zillow Ticket Enricher | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js) |
 | AgencyZoom Quote Launcher + Payload Grabber | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js) |
 | GWPC Shared Ticket Handoff | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-ticket-handoff.user.js) |
 | AgencyZoom Ticket Finisher + Tagger | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js) |
