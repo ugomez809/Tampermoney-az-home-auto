@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.22
+// @version      1.18.23
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, validates force-send signals, clears failure-only bundles after send, and blocks resend loops.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.22';
+  const VERSION = '1.18.23';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -35,6 +35,8 @@
   const LOG_TICK_MS = 2000;
   const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
   const SCRIPT_ID = 'webhook-submission';
+  const PANEL_ID = 'az-to-gwpc-webhook-panel';
+  const PANEL_STYLE_ID = 'az-to-gwpc-webhook-panel-style';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
   const GLOBAL_PAUSE_KEY = 'tm_pc_global_pause_v1';
@@ -104,6 +106,7 @@
     hydrateWebhookStorage();
     hydrateAgencyNameStorage();
     buildUI();
+    ensurePanelPresent();
     syncWebhookUi();
     renderButtons();
     log('Script loaded');
@@ -1525,6 +1528,7 @@
 
   function tick() {
     if (state.destroyed) return;
+    ensurePanelPresent('tick');
     if (state.busy) {
       writeActivityState('working', state.lastStatus || 'Sending webhook');
       return;
@@ -1715,8 +1719,27 @@
     if (state.unpauseBtn) state.unpauseBtn.disabled = state.busy || (!isGloballyPaused() && !hasForceSendRequest());
   }
 
+  // GWPC can occasionally drop our injected panel node while the script keeps running.
+  function ensurePanelPresent(reason = '') {
+    const livePanel = document.getElementById(PANEL_ID);
+    const panelMissing = !state.panel || !state.panel.isConnected || !livePanel || state.panel !== livePanel || !state.statusEl?.isConnected;
+    if (!panelMissing) return false;
+    const priorStatus = state.lastStatus || 'Waiting for current job handoff';
+    const hadPanelBefore = Boolean(state.panel || livePanel);
+    buildUI();
+    syncWebhookUi();
+    renderButtons();
+    renderLogs();
+    setStatus(priorStatus);
+    if (hadPanelBefore && reason) log(`Webhook panel restored (${reason})`);
+    return true;
+  }
+
   function buildUI() {
+    try { document.getElementById(PANEL_ID)?.remove(); } catch {}
+    try { document.getElementById(PANEL_STYLE_ID)?.remove(); } catch {}
     const style = document.createElement('style');
+    style.id = PANEL_STYLE_ID;
     style.textContent = `
       #az-to-gwpc-webhook-panel{position:fixed;right:12px;bottom:12px;width:${CFG.panelWidth}px;background:#111827;color:#f9fafb;border:1px solid #374151;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.35);z-index:${CFG.zIndex};font:12px/1.35 Arial,sans-serif;overflow:hidden}
       #az-to-gwpc-webhook-panel *{box-sizing:border-box}
@@ -1739,7 +1762,7 @@
     document.documentElement.appendChild(style);
 
     const panel = document.createElement('div');
-    panel.id = 'az-to-gwpc-webhook-panel';
+    panel.id = PANEL_ID;
     panel.setAttribute('data-hb-script-id', SCRIPT_ID);
     panel.innerHTML = `
       <div class="hb-head">${SCRIPT_NAME} V${VERSION}</div>
