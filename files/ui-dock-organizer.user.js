@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.7.6
+// @version      1.7.7
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__HB_UI_DOCK_ORGANIZER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Cross-Origin UI Dock Organizer';
-  const VERSION = '1.7.6';
+  const VERSION = '1.7.7';
 
   // Log-export integration — 3-origin dynamic key.
   const LOG_PERSIST_KEY = (() => {
@@ -372,6 +372,7 @@
     if (!(el instanceof HTMLElement)) return false;
     if (!el.isConnected) return false;
     if (isOrganizerPanel(el)) return false;
+    if (el.getAttribute('data-hb-dock-ignore') === '1') return false;
 
     const tag = (el.tagName || '').toUpperCase();
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') return false;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.23
+// @version      1.18.24
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, validates force-send signals, clears failure-only bundles after send, and blocks resend loops.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_TO_GWPC_WEBHOOK_SUBMISSION_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Webhook Submission';
-  const VERSION = '1.18.23';
+  const VERSION = '1.18.24';
 
   // Log-export integration: persist state.logLines to a tracked key so
   // storage-tools' LOGS TXT/CLEAR LOGS buttons can reach this script's
@@ -1764,6 +1764,7 @@
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     panel.setAttribute('data-hb-script-id', SCRIPT_ID);
+    panel.setAttribute('data-hb-dock-ignore', '1');
     panel.innerHTML = `
       <div class="hb-head">${SCRIPT_NAME} V${VERSION}</div>
       <div class="hb-body">
