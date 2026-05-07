@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.0
+// @version      1.3.1
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -24,7 +24,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
 
   const GM_KEYS = {
@@ -62,13 +62,8 @@
   ];
 
   const TAG_ORDER = [
-    { key: 'bqDotTag', label: 'BQ replacement tag (BQ.)' },
-    { key: 'bqfDotTag', label: 'BQF replacement tag (BQF.)' }
-  ];
-
-  const LEGACY_TAG_RULES = [
-    { sourceLabel: 'BQ', targetKey: 'bqDotTag' },
-    { sourceLabel: 'BQF', targetKey: 'bqfDotTag' }
+    { key: 'addTag', label: 'What Tag will be added?' },
+    { key: 'removeTag', label: 'What tag will be removed?' }
   ];
 
   const CFG = {
@@ -2793,14 +2788,33 @@
     return true;
   }
 
-  async function applyLegacyTagReplacement() {
+  async function applyConfiguredTagReplacement() {
     const openTagLabels = getOpenTicketTagLabels();
-    const legacyMatches = LEGACY_TAG_RULES.filter((item) =>
-      openTagLabels.some((label) => lowerTagText(label) === lowerTagText(item.sourceLabel))
-    );
+    const targets = getTagTargets();
+    const addRecord = targets.addTag;
+    const removeRecord = targets.removeTag;
 
-    if (!legacyMatches.length) {
-      log('No BQ/BQF replacement needed on this ticket');
+    if (!isPlainObject(addRecord) || !isPlainObject(removeRecord)) {
+      log('Missing configured tag targets');
+      return false;
+    }
+
+    const configuredAddLabel = cleanTagText(addRecord.label || '');
+    const configuredRemoveLabel = cleanTagText(removeRecord.label || '');
+    if (!configuredAddLabel || !configuredRemoveLabel) {
+      log('Configured tag labels are missing');
+      return false;
+    }
+
+    const hasRemoveTag = openTagLabels.some((label) => lowerTagText(label) === lowerTagText(configuredRemoveLabel));
+    const hasAddTag = openTagLabels.some((label) => lowerTagText(label) === lowerTagText(configuredAddLabel));
+
+    if (!hasRemoveTag) {
+      if (hasAddTag) {
+        log(`Tag replacement not needed; ${configuredAddLabel} is already on this ticket`);
+      } else {
+        log(`Tag replacement not needed; ${configuredRemoveLabel} is not on this ticket`);
+      }
       return true;
     }
 
@@ -2825,33 +2839,41 @@
       return false;
     }
 
-    const targets = getTagTargets();
-    const replacements = [];
-    for (const match of legacyMatches) {
-      const record = targets[match.targetKey];
-      if (!isPlainObject(record)) {
-        log(`Missing saved tag target: ${match.targetKey}`);
-        return false;
-      }
-      const resolved = resolveStoredTagValue(selectEl, match.targetKey, record);
-      if (!resolved.value) {
-        log(`Stored tag value missing for ${record.label || match.targetKey}`);
-        return false;
-      }
-      replacements.push({ ...match, record, resolved });
+    const addResolved = resolveStoredTagValue(selectEl, 'addTag', addRecord);
+    if (!addResolved.value) {
+      log(`Stored tag value missing for ${addRecord.label || 'addTag'}`);
+      return false;
     }
 
-    const sourceSet = new Set(replacements.map((item) => lowerTagText(item.sourceLabel)));
-    const targetSet = new Set(replacements.map((item) => lowerTagText(item.resolved.label || item.record.label || '')));
+    const removeResolved = resolveStoredTagValue(selectEl, 'removeTag', removeRecord);
+    if (!removeResolved.value) {
+      log(`Stored tag value missing for ${removeRecord.label || 'removeTag'}`);
+      return false;
+    }
+
+    const addLabel = cleanTagText(addResolved.label || addRecord.label || '');
+    const removeLabel = cleanTagText(removeResolved.label || removeRecord.label || '');
+    if (!addLabel || !removeLabel) {
+      log('Resolved tag labels are missing');
+      return false;
+    }
+
+    if (lowerTagText(addLabel) === lowerTagText(removeLabel)) {
+      log(`Tag replacement skipped; add/remove tag are both ${addLabel}`);
+      return true;
+    }
+
+    const filteredOpenLabels = openTagLabels.filter((label) => {
+      const normalized = lowerTagText(label);
+      if (!normalized) return false;
+      if (normalized === lowerTagText(removeLabel)) return false;
+      if (normalized === lowerTagText(addLabel)) return false;
+      return true;
+    });
+
     const preserveInfo = resolveTagValuesByLabels(
       selectEl,
-      openTagLabels.filter((label) => {
-        const normalized = lowerTagText(label);
-        if (!normalized) return false;
-        if (sourceSet.has(normalized)) return false;
-        if (targetSet.has(normalized)) return false;
-        return true;
-      })
+      filteredOpenLabels
     );
 
     if (preserveInfo.missingLabels.length) {
@@ -2860,13 +2882,12 @@
 
     const nextValues = [
       ...preserveInfo.values,
-      ...replacements.map((item) => item.resolved.value)
+      addResolved.value
     ];
     setSelectedTagValues(selectEl, nextValues);
     await maybeClickTagApplyButton();
 
-    const summary = replacements.map((item) => `${item.sourceLabel}->${item.resolved.label || item.record.label || item.targetKey}`).join(', ');
-    log(`Applied tag replacement: ${summary}`);
+    log(`Applied tag replacement: ${removeLabel}->${addLabel}`);
     return true;
   }
 
@@ -2931,7 +2952,7 @@
       log('No Zillow field values needed to be applied');
     }
 
-    const tagsOk = await applyLegacyTagReplacement();
+    const tagsOk = await applyConfiguredTagReplacement();
     if (!tagsOk) {
       setStatus('Tag replacement failed');
       return false;
