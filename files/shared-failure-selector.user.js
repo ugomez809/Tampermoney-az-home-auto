@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.7
-// @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the shared sheet, publishes failed-path note reasons on LEX, and leaves GWPC webhook posting to Header Timeout Monitor.
+// @version      1.0.0
+// @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__TM_SHARED_FAILURE_SELECTOR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'Cross-Origin Shared Failure Selector';
-  const VERSION = '1.0.7';
+  const VERSION = '1.0.0';
   const UI_ATTR = 'data-tm-shared-failure-selector-ui';
 
   const RULES_KEY = 'tm_pc_header_timeout_selector_rules_v1';
@@ -794,11 +794,15 @@
   }
 
   function saveGwpcSelectorEvent(rule, matchedEl) {
-    const logKey = `gwpc-disabled|${rule.ruleId}`;
-    if (state.lastMatchLogKey !== logKey) {
-      state.lastMatchLogKey = logKey;
-      log(`GWPC selector matched but webhook posting is disabled in this script | ${rule.ruleId}`);
+    if (gwpcTimeoutMonitorOwnsRules()) {
+      const logKey = `gwpc-owned|${rule.ruleId}`;
+      if (state.lastMatchLogKey !== logKey) {
+        state.lastMatchLogKey = logKey;
+        log(`GWPC selector matched but GWPC Header Timeout Monitor owns bundle posting | ${rule.ruleId}`);
+      }
+      return false;
     }
+
     const job = readCurrentJob();
     const azId = extractAzId(job);
     if (!azId) {
@@ -853,18 +857,18 @@
     next.meta.updatedAt = nowIso();
     next.meta.lastWriter = SCRIPT_NAME;
     try { localStorage.setItem(BUNDLE_KEY, JSON.stringify(next, null, 2)); } catch {}
-    const forceSendRequest = {
-      azId,
-      product: 'home',
-      eventId,
-      triggerType: 'selector',
-      reason: `selector:${eventId}`,
-      requestedAt: nowIso(),
-      source: SCRIPT_NAME,
-      version: VERSION
-    };
-    try { localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(forceSendRequest, null, 2)); } catch {}
-    try { GM_setValue(FORCE_SEND_KEY, forceSendRequest); } catch {}
+    try {
+      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify({
+        azId,
+        product: 'home',
+        eventId,
+        triggerType: 'selector',
+        reason: `selector:${eventId}`,
+        requestedAt: nowIso(),
+        source: SCRIPT_NAME,
+        version: VERSION
+      }, null, 2));
+    } catch {}
     log(`Saved GWPC selector event to bundle | ${rule.ruleId} | ${message}`);
     return true;
   }

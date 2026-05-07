@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.10
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC clears stale run-state before applying a fresh job, seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
+// @version      1.9.7
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.10';
+  const VERSION = '1.9.7';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -157,9 +157,7 @@
 
   function hasForceSendRequest() {
     const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
-    if (request && typeof request === 'object' && request.requestedAt) return true;
-    const sharedRequest = gmGetJson(FORCE_SEND_KEY, null);
-    return !!(sharedRequest && typeof sharedRequest === 'object' && sharedRequest.requestedAt);
+    return !!(request && typeof request === 'object' && request.requestedAt);
   }
 
   function runAzCapture() {
@@ -718,7 +716,6 @@
     for (const key of keysToRemove) {
       try { localStorage.removeItem(key); } catch {}
     }
-    try { GM_setValue(GWPC_KEYS.forceSend, null); } catch {}
     try { GM_setValue(GWPC_KEYS.currentJob, null); } catch {}
   }
 

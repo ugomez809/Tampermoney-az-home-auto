@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.23
+// @version      2.3.16
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.23';
+  const VERSION = '2.3.16';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -68,7 +68,6 @@
     bootstrapRetryMs: 500,
     timeoutMs: 120000,
     timeoutRetryLimit: 3,
-    timeoutRetryRequestMaxWaitMs: 10000,
     timeoutRetryCloseDelayMs: 800,
     timeoutRetryCloseRetryMs: 1200,
     timeoutRetryCloseAttempts: 6,
@@ -133,7 +132,6 @@
     sharedRulesSyncing: false,
     sharedRulesSyncQueued: false,
     lastSharedRulesSyncError: '',
-    bootSharedRulesPending: false,
     savedWatchAlertWebhookUrl: '',
     savedTimeoutTextWebhookUrl: '',
     lastScanAt: 0,
@@ -201,7 +199,6 @@
     if (state.watchModeEnabled) {
       log('Watch mode restored: ON');
     }
-    state.bootSharedRulesPending = sharedRulesSyncEnabled();
 
     scheduleObserve();
     scheduleScan('start');
@@ -1040,7 +1037,7 @@
       version: VERSION
     };
     try {
-      writeSharedJsonValue(FORCE_SEND_KEY, request);
+      localStorage.setItem(FORCE_SEND_KEY, JSON.stringify(request, null, 2));
       if (event.triggerType === 'selector') {
         log(
           `Raised webhook send signal for ${String(context.product || '').toUpperCase()} selector | ` +
@@ -1789,12 +1786,6 @@
 
   function clearOwnedSendArtifacts() {
     try { localStorage.removeItem(KEYS.pendingPost); } catch {}
-    try {
-      const request = safeJsonParse(localStorage.getItem(FORCE_SEND_KEY), null);
-      if (normalizeText(request?.source || '') === SCRIPT_NAME) {
-        localStorage.removeItem(FORCE_SEND_KEY);
-      }
-    } catch {}
   }
 
   function readSentEventsStore() {
@@ -2171,20 +2162,6 @@
         'Mailing Address': context.job['Mailing Address'] || context.identity.mailingAddress || '',
         'SubmissionNumber': context.submission || context.job['SubmissionNumber'] || ''
       }
-    };
-  }
-
-  function buildManualSelectorMatchInfo(el) {
-    const meta = buildElementLogMeta(el);
-    return {
-      ok: true,
-      reason: '',
-      element: el instanceof Element ? el : null,
-      matchedText: getVisibleElementLogText(el, 600) || meta.text,
-      textDriftTolerated: false,
-      elementTag: meta.tag,
-      elementId: meta.id,
-      elementClass: meta.className
     };
   }
 
@@ -2936,8 +2913,7 @@
     });
   }
 
-  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones, options = {}) {
-    const preferRemoteDisabled = options.preferRemoteDisabled === true;
+  function reconcileSharedSelectorRules(localRules, remoteRules, tombstones) {
     const localMap = new Map((Array.isArray(localRules) ? localRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const remoteMap = new Map((Array.isArray(remoteRules) ? remoteRules : []).map((rule) => [normalizeText(rule.ruleId || ''), rule]).filter(([id]) => id));
     const tombstoneMap = new Map(Object.entries(isPlainObject(tombstones) ? tombstones : {}).map(([id, value]) => [normalizeText(id), value]).filter(([id]) => id));
@@ -2964,15 +2940,6 @@
       const remoteEnabled = remoteRule ? remoteRule.enabled !== false : false;
 
       if (remoteRule && remoteEnabled === false) {
-        if (preferRemoteDisabled) {
-          nextTombstones[ruleId] = {
-            ruleId,
-            disabledAt: normalizeText(remoteRule.updatedAt || tombstone?.disabledAt || nowIso()),
-            updatedBy: normalizeText(remoteRule.updatedBy || tombstone?.updatedBy || ''),
-            clientId: normalizeText(remoteRule.clientId || tombstone?.clientId || '')
-          };
-          continue;
-        }
         if (localRule && localMs > Math.max(remoteMs, tombstoneMs)) {
           nextRules.push(localRule);
           upserts.push(localRule);
@@ -3026,22 +2993,18 @@
   async function syncSharedRules(options = {}) {
     if (!sharedRulesSyncEnabled()) return false;
     const force = options.force === true;
-    const isBootSync = normalizeText(options.reason || '') === 'boot';
     if (!force && state.lastSharedRulesSyncAt && (Date.now() - state.lastSharedRulesSyncAt) < CFG.sharedRulesRefreshMs) {
       return false;
     }
 
     state.sharedRulesSyncing = true;
     renderButtons();
-    let syncSucceeded = false;
 
     try {
       const localRules = getSelectorRules();
       const tombstones = readSelectorRuleTombstones();
       const remoteRules = await fetchSharedSelectorRules();
-      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones, {
-        preferRemoteDisabled: isBootSync
-      });
+      const reconciled = reconcileSharedSelectorRules(localRules, remoteRules, tombstones);
 
       const localSignature = buildRulesSignature(localRules);
       const nextSignature = buildRulesSignature(reconciled.rules);
@@ -3065,7 +3028,6 @@
 
       state.lastSharedRulesSyncAt = Date.now();
       state.lastSharedRulesSyncError = '';
-      syncSucceeded = true;
 
       const pulledCount = localSignature !== nextSignature ? reconciled.rules.length : 0;
       const changedCount = reconciled.upserts.length + reconciled.disables.length;
@@ -3079,24 +3041,10 @@
         state.lastSharedRulesSyncError = message;
         log(`Shared rules sync failed: ${message}`);
       }
-      if (state.bootSharedRulesPending) {
-        setTimeout(() => {
-          syncSharedRules({ force: true, reason: 'boot-retry' }).catch(() => {});
-        }, 15000);
-      }
       return false;
     } finally {
-      const releaseBootGate = state.bootSharedRulesPending && syncSucceeded;
-      if (releaseBootGate) {
-        state.bootSharedRulesPending = false;
-      }
       state.sharedRulesSyncing = false;
       renderButtons();
-      if (releaseBootGate && !state.destroyed) {
-        setTimeout(() => {
-          scheduleScan('boot-shared-rules-ready');
-        }, 0);
-      }
       if (state.sharedRulesSyncQueued) {
         state.sharedRulesSyncQueued = false;
         setTimeout(() => {
@@ -3563,22 +3511,18 @@
       }
 
       const rules = getSelectorRules();
-      const normalizedFingerprintText = truncateText(savedErrorText, 160);
-      const ruleId = buildRuleId(draft.selector, normalizedFingerprintText);
+      const ruleId = buildRuleId(draft.selector, draft.fingerprint.textFingerprint || draft.previewText || '');
       const nextRule = {
         ruleId,
         selector: draft.selector,
         label: savedErrorText,
         savedErrorText,
-        fingerprint: {
-          ...(isPlainObject(draft.fingerprint) ? draft.fingerprint : {}),
-          textFingerprint: normalizedFingerprintText
-        },
+        fingerprint: draft.fingerprint,
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
 
-      const existingIdx = rules.findIndex((rule) => normalizeText(rule.ruleId) === ruleId);
+      const existingIdx = rules.findIndex((rule) => normalizeText(rule.ruleId) === ruleId || normalizeText(rule.selector) === draft.selector);
       if (existingIdx >= 0) {
         nextRule.createdAt = normalizeText(rules[existingIdx].createdAt || nowIso());
         rules[existingIdx] = nextRule;
@@ -3588,16 +3532,6 @@
 
       saveSelectorRules(rules, { reason: 'rule-saved' });
       closeSelectorSession('Selector rule saved');
-
-      const immediateContext = buildEventContext();
-      if (immediateContext.ok) {
-        const immediateEvent = buildSelectorEvent(immediateContext, nextRule, buildManualSelectorMatchInfo(target));
-        if (dispatchEvent(immediateEvent, immediateContext)) {
-          log('Saved selector rule dispatched immediately from current page');
-          return;
-        }
-      }
-
       scheduleScan('rule-saved');
     });
 
@@ -4017,7 +3951,6 @@
 
   function processSelectorMatches() {
     if (!savedSelectorRulesEnabled()) return;
-    if (state.bootSharedRulesPending) return;
     const context = buildEventContext();
     if (!context.ok) return;
     if (!context.product || !context.productLabel) return;

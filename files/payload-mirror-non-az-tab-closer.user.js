@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.1.14
-// @description  After clean HOME webhook success, mirrors the final GWPC Home payload into shared GM storage and closes the non-AZ tab. Failure/timeout paths mirror only.
+// @version      1.0.23
+// @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.1.14';
+  const VERSION = '1.0.23';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -94,8 +94,6 @@
     ],
     ignoreCloseLeaseTtlMs: 8000,
     ignoreCloseLeaseHeartbeatMs: 1500,
-    closeTabsEnabled: true,
-    samePageCloseEnabled: false,
     maxLogLines: 70,
     zIndex: 2147483647,
     panelWidth: 330,
@@ -681,12 +679,6 @@
   }
 
   function closeLexTabAfterSnag(azId = '') {
-    if (!CFG.closeTabsEnabled) {
-      log(`LEX snag detected; close disabled${azId ? ` | AZ ${azId}` : ''}`);
-      setStatus('LEX snag -> failed path');
-      return;
-    }
-
     state.closeAttempted = true;
     writeSession(SS_KEYS.closeAttempted, '1');
     state.closeAttempts += 1;
@@ -1002,7 +994,6 @@
 
   function checkGwpcSamePageCloseWatchdog() {
     if (!isGwpcHost()) return;
-    if (!CFG.samePageCloseEnabled) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
     if (getActiveIgnoreCloseLease()) return;
     if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
@@ -1207,47 +1198,6 @@
     const ready = readReadySignal();
     if (!ready || ready.ready !== true) return false;
     return buildSignalKey(ready) === buildSignalKey(signal);
-  }
-
-  function hasBundleTimeout(bundle) {
-    return !!(bundle?.timeout?.ready && Array.isArray(bundle?.timeout?.events) && bundle.timeout.events.length);
-  }
-
-  function hasSectionErrors(section) {
-    if (!isPlainObject(section?.data)) return false;
-    if (Array.isArray(section.data.errors) && section.data.errors.length) return true;
-    return !!(isPlainObject(section.data.latestError) && norm(section.data.latestError.errorType || section.data.latestError.errorName || section.data.latestError.errorText));
-  }
-
-  function hasBundleHomeError(bundle) {
-    if (hasSectionErrors(bundle?.home)) return true;
-    return Array.isArray(bundle?.timeout?.events)
-      && bundle.timeout.events.some((event) => norm(event?.product).toLowerCase() === 'home');
-  }
-
-  function isCleanHomeBundle(bundle) {
-    return !!(
-      bundle?.home?.ready === true
-      && isPlainObject(bundle?.home?.data)
-      && !hasBundleTimeout(bundle)
-      && !hasBundleHomeError(bundle)
-    );
-  }
-
-  function signalDeclaresCleanHomeSuccess(signal) {
-    const summary = isPlainObject(signal?.summary) ? signal.summary : {};
-    if (signal?.cleanHomeSuccess === true || summary.cleanHomeSuccess === true) return true;
-    return summary.hasHome === true && summary.hasTimeout === false && summary.hasHomeError === false;
-  }
-
-  function shouldCloseAfterSuccessSignal(signal) {
-    if (!CFG.closeTabsEnabled) return false;
-    if (signalDeclaresCleanHomeSuccess(signal)) return true;
-
-    const bundle = readLocalJson('tm_pc_webhook_bundle_v1') || {};
-    const signalAzId = norm(signal?.azId || '');
-    if (signalAzId && norm(bundle?.['AZ ID'] || '') !== signalAzId) return false;
-    return isCleanHomeBundle(bundle);
   }
 
   function unwrapProductPayload(raw) {
@@ -1568,12 +1518,6 @@
   function startCountdown(signal) {
     if (!signal || !buildSignalKey(signal)) return;
     if (state.countdownEndsAt) return;
-    if (!CFG.closeTabsEnabled) {
-      markSignalHandled(buildSignalKey(signal));
-      log(`Close countdown skipped; mirror-only mode for AZ ${signal.azId}`);
-      setStatus('Payload mirrored; close disabled');
-      return;
-    }
 
     state.countdownEndsAt = Date.now() + CFG.closeDelayMs;
     state.closeAttempted = false;
@@ -1585,7 +1529,6 @@
   }
 
   function publishCloseSignal(signal) {
-    if (!CFG.closeTabsEnabled) return;
     const signalKey = buildSignalKey(signal);
     if (!signalKey || state.closeSignalKey === signalKey) return;
     state.closeSignalKey = signalKey;
@@ -1594,8 +1537,7 @@
       postedAt: norm(signal.postedAt || ''),
       closeAt: nowIso(),
       source: SCRIPT_NAME,
-      version: VERSION,
-      cleanHomeSuccess: signalDeclaresCleanHomeSuccess(signal) || shouldCloseAfterSuccessSignal(signal)
+      version: VERSION
     });
     log(`Close signal published for AZ ${signal.azId}`);
   }
@@ -1607,7 +1549,6 @@
   }
 
   function tryCloseCurrentTab() {
-    if (!CFG.closeTabsEnabled) return;
     const wasClosed = !!window.closed;
     try { window.close(); } catch {}
     if (window.closed || wasClosed) return;
@@ -1633,13 +1574,6 @@
   }
 
   function attemptClose(signal = null) {
-    if (!CFG.closeTabsEnabled) {
-      const signalKey = buildSignalKey(signal || state.activeSignal || readCloseSignal());
-      if (signalKey) markSignalHandled(signalKey);
-      setStatus('Payload mirrored; close disabled');
-      return;
-    }
-
     const effectiveSignal = isPlainObject(signal) ? signal : (state.activeSignal || readCloseSignal());
     if (!state.activeSignal && !isFreshCloseSignal(effectiveSignal)) return;
     if (shouldHoldOpenForWebhookFatalError()) return;
@@ -1712,17 +1646,6 @@
     }
     if (isAzHost()) {
       bridgePayloadToAzLocal();
-    }
-
-    if (!shouldCloseAfterSuccessSignal(signal)) {
-      markSignalHandled(signalKey);
-      if (readyMatchesSignal(signal)) {
-        log(`Close skipped for non-clean webhook success | AZ ${signal.azId}`);
-        setStatus('Payload mirrored; close skipped');
-      } else {
-        setStatus('Waiting for mirrored payload');
-      }
-      return;
     }
 
     if (readyMatchesSignal(signal)) {
