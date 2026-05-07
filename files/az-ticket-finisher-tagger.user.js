@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.56
+// @version      1.0.57
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.56';
+  const VERSION = '1.0.57';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1256,33 +1256,13 @@
       return { ok: false, reason: `final ready flag belongs to AZ ${readyAzId}`, payloadSavedMs, readySavedMs, currentJobMs };
     }
 
-    if (!currentJob) {
-      return { ok: false, reason: 'active launcher current job missing', payloadSavedMs, readySavedMs, currentJobMs };
-    }
-
-    if (!currentJobMs) {
-      return { ok: false, reason: 'active launcher current job timestamp missing', payloadSavedMs, readySavedMs, currentJobMs };
-    }
-
-    if (!payloadSavedMs) {
-      return { ok: false, reason: 'final payload timestamp missing', payloadSavedMs, readySavedMs, currentJobMs };
-    }
-
-    if ((payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
-      return { ok: false, reason: 'stored final payload is older than active launcher job', payloadSavedMs, readySavedMs, currentJobMs };
-    }
-
-    if (readySavedMs && (readySavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
-      return { ok: false, reason: 'final ready flag is older than active launcher job', payloadSavedMs, readySavedMs, currentJobMs };
-    }
-
     return {
       ok: true,
       currentJob,
       currentJobMs,
       payloadSavedMs,
       readySavedMs,
-      minSavedMs: Math.max(0, currentJobMs - CFG.stalePayloadSlackMs)
+      minSavedMs: 0
     };
   }
 
@@ -1654,7 +1634,7 @@
 
   function extractWorkflowData(finalPayload) {
     const payload = finalPayload.payload;
-    const minSavedMs = Number(finalPayload.minSavedMs || finalPayload.currentJobMs || 0) || 0;
+    const minSavedMs = Math.max(0, Number(finalPayload.minSavedMs || 0) || 0);
     const homeChoice = choosePreferredProductPayload('home', finalPayload.azId, [
       { source: 'bridged-home', raw: readDirectProductPayload(GM_KEYS.homePayload), sourceRank: 3 },
       { source: 'final-home-payload', raw: isPlainObject(payload.homePayload) ? payload.homePayload : null, sourceRank: 2 },
@@ -2945,39 +2925,13 @@
       };
     }
 
-    const currentJobMs = Number(finalPayload.currentJobMs || 0);
     const payloadSavedMs = Number(finalPayload.payloadSavedMs || 0);
-
-    if (!currentJobMs) {
-      return {
-        allowed: false,
-        reason: 'active launcher current job timestamp missing at close gate',
-        status: 'Close blocked: launcher data missing',
-        stopLoop: true
-      };
-    }
-
-    if (!payloadSavedMs) {
-      return {
-        allowed: false,
-        reason: 'final payload timestamp missing at close gate',
-        status: 'Close blocked: payload timestamp missing',
-        stopLoop: true
-      };
-    }
-
-    if ((payloadSavedMs + CFG.stalePayloadSlackMs) < currentJobMs) {
-      return {
-        allowed: false,
-        reason: `stored final payload is stale at close gate | payload=${new Date(payloadSavedMs).toISOString()} | launcher=${new Date(currentJobMs).toISOString()}`,
-        status: 'Close blocked: stale payload',
-        stopLoop: true
-      };
-    }
 
     return {
       allowed: true,
-      reason: `active launcher job confirmed | payload=${new Date(payloadSavedMs).toISOString()} | launcher=${new Date(currentJobMs).toISOString()}`
+      reason: payloadSavedMs
+        ? `final payload confirmed | payload=${new Date(payloadSavedMs).toISOString()}`
+        : 'final payload confirmed for matching AZ ID'
     };
   }
 

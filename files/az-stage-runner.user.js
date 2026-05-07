@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.40
+// @version      2.5.41
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.40';
+  const VERSION = '2.5.41';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -988,6 +988,23 @@
     } catch {}
   }
 
+  function clearMirroredFinalPayloadForNewRun(ticketId = '') {
+    const cleanTicketId = norm(ticketId || '');
+    try {
+      localStorage.removeItem(KEYS.FINAL_PAYLOAD);
+    } catch {}
+    try {
+      localStorage.removeItem(KEYS.FINAL_READY);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.FINAL_PAYLOAD);
+    } catch {}
+    try {
+      GM_deleteValue(KEYS.FINAL_READY);
+    } catch {}
+    log(`Cleared mirrored final payload handoff before Home quote run${cleanTicketId ? ` | ${cleanTicketId}` : ''}`, 'ok');
+  }
+
   function markTimeoutRetryLaunched(request) {
     const timeoutContextKey = norm(request?.timeoutContextKey || '');
     const scope = norm(request?.scope || '');
@@ -1242,6 +1259,7 @@
       if (!reopened) return false;
     }
 
+    clearMirroredFinalPayloadForNewRun(cleanTicketId);
     log(`Retrying Farmers Home Quote after GWPC timeout${attemptLabel} | ${cleanTicketId}`, 'warn');
     const quoteStarted = await startQuoteFlow();
     if (!quoteStarted) {
@@ -1975,6 +1993,7 @@
         writeScanState('payload-saved', ready.payload.ticketId, pageLabel);
         log(`Payload saved + shared | ${ready.payload.ticketId} | ${ready.filledCount}/${FIELD_ORDER.length}`, 'ok');
         clearFinisherCloseSignal();
+        clearMirroredFinalPayloadForNewRun(ticketId);
 
         const quoteStarted = await startQuoteFlow();
         if (!quoteStarted) {
