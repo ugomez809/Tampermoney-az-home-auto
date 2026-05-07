@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.24
+// @version      1.0.25
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.24';
+  const VERSION = '1.0.25';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -731,6 +731,16 @@
     };
   }
 
+  function readCopyableMirrorSnapshotWithLogs() {
+    const snapshot = readDownloadableMirrorSnapshot();
+    if (!snapshot) return null;
+    return {
+      ...snapshot,
+      copiedAt: nowIso(),
+      logs: Array.isArray(state.logs) ? state.logs.slice() : []
+    };
+  }
+
   function buildDownloadFilename(snapshot) {
     const azId = norm(snapshot?.azId || 'unknown');
     const stamp = new Date()
@@ -760,6 +770,55 @@
     setTimeout(() => URL.revokeObjectURL(url), 2000);
     log(`Mirror downloaded for AZ ${snapshot.azId || '(unknown)'}`);
     setStatus('Mirror downloaded');
+  }
+
+  async function copyMirrorSnapshotWithLogs() {
+    const snapshot = readCopyableMirrorSnapshotWithLogs();
+    if (!snapshot) {
+      log('Copy skipped: no mirrored payload available yet');
+      setStatus('No mirrored payload to copy');
+      return false;
+    }
+
+    const text = JSON.stringify(snapshot, null, 2);
+    let copied = false;
+
+    if (navigator?.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {}
+    }
+
+    if (!copied) {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'readonly');
+      Object.assign(textarea.style, {
+        position: 'fixed',
+        top: '-1000px',
+        left: '-1000px',
+        opacity: '0'
+      });
+      document.documentElement.appendChild(textarea);
+      try {
+        textarea.focus();
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        copied = document.execCommand('copy');
+      } catch {}
+      textarea.remove();
+    }
+
+    if (!copied) {
+      log('Copy failed: clipboard access was blocked');
+      setStatus('Copy failed');
+      return false;
+    }
+
+    log(`Mirror + logs copied for AZ ${snapshot.azId || '(unknown)'}`);
+    setStatus('Mirror + logs copied');
+    return true;
   }
 
   function readCloseSignal() {
@@ -2000,11 +2059,17 @@
       state.ui.toggle.style.background = state.running ? '#b91c1c' : '#15803d';
     }
 
+    const canDownload = !!readDownloadableMirrorSnapshot();
     if (state.ui.download) {
-      const canDownload = !!readDownloadableMirrorSnapshot();
       state.ui.download.disabled = !canDownload;
       state.ui.download.style.opacity = canDownload ? '1' : '.55';
       state.ui.download.style.cursor = canDownload ? 'pointer' : 'not-allowed';
+    }
+
+    if (state.ui.copy) {
+      state.ui.copy.disabled = !canDownload;
+      state.ui.copy.style.opacity = canDownload ? '1' : '.55';
+      state.ui.copy.style.cursor = canDownload ? 'pointer' : 'not-allowed';
     }
 
     if (state.ui.ignoreClose) {
@@ -2069,6 +2134,7 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button id="tm-payload-mirror-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button id="tm-payload-mirror-download" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#1d4ed8;color:#fff;font-weight:800;cursor:pointer;">DOWNLOAD MIRROR</button>
+          <button id="tm-payload-mirror-copy" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">COPY MIRROR + LOGS</button>
           <button id="tm-payload-mirror-ignore-close" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">IGNORE CLOSE OFF</button>
           <button id="tm-payload-mirror-apex-wake" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">APEX WAKE ON</button>
         </div>
@@ -2088,6 +2154,7 @@
     state.ui.head = panel.querySelector('#tm-payload-mirror-head');
     state.ui.toggle = panel.querySelector('#tm-payload-mirror-toggle');
     state.ui.download = panel.querySelector('#tm-payload-mirror-download');
+    state.ui.copy = panel.querySelector('#tm-payload-mirror-copy');
     state.ui.ignoreClose = panel.querySelector('#tm-payload-mirror-ignore-close');
     state.ui.apexWake = panel.querySelector('#tm-payload-mirror-apex-wake');
     state.ui.status = panel.querySelector('#tm-payload-mirror-status');
@@ -2118,6 +2185,11 @@
 
     state.ui.download?.addEventListener('click', () => {
       downloadMirrorSnapshot();
+      renderAll();
+    });
+
+    state.ui.copy?.addEventListener('click', async () => {
+      await copyMirrorSnapshotWithLogs();
       renderAll();
     });
 
