@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.41
+// @version      2.5.42
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.41';
+  const VERSION = '2.5.42';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -145,10 +145,11 @@
     'tm_pc_header_timeout_retry_state_v1',
     'tm_pc_header_timeout_retry_request_v1',
     'tm_pc_webhook_submit_sent_meta_v17',
-    'tm_pc_webhook_submit_url_v17',
     'tm_pc_webhook_submit_stopped_v17',
     'tm_pc_webhook_post_success_v1',
     'tm_pc_payload_mirror_close_signal_v1',
+    'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
+    'tm_pc_payload_mirror_ignore_close_lease_v1',
     'tm_pc_payload_mirror_last_handled_signal_v1',
     'tm_pc_payload_mirror_close_attempted_v1',
     'tm_az_gwpc_final_payload_v1',
@@ -156,11 +157,17 @@
     KEYS.MAIN_PAYLOAD_FAILURES,
     'tm_pc_header_timeout_runtime_v2',
     'tm_pc_header_timeout_sent_events_v2',
+    'tm_pc_header_timeout_retry_requested_context_v1',
+    'tm_pc_header_timeout_pending_post_v2',
+    'tm_pc_header_timeout_watch_pending_v1',
+    'tm_pc_webhook_fatal_error_hold_v1',
     'tm_pc_flow_stage_v1',
     'tm_az_ticket_finisher_runs_v1',
     KEYS.WORKFLOW_CLEANUP_REQUEST,
     KEYS.FINISHER_CLOSE_SIGNAL,
     KEYS.MISSING_PAYLOAD_TRIGGER,
+    'tm_payload_mirror_tab_heartbeats_v1',
+    'tm_payload_mirror_apex_wake_state_v1',
     'tm_shared_cache_az_payload_v1',
     'tm_shared_cache_apex_payload_v1',
     'tm_shared_cache_apex_ready_v1',
@@ -173,8 +180,7 @@
   ]);
 
   const CLEAR_PREFIXES = [
-    'aqb_',
-    'tm_pc_payload_mirror_'
+    'aqb_'
   ];
 
   const FIELD_ORDER = [

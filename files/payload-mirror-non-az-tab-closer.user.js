@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.23
+// @version      1.0.24
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.23';
+  const VERSION = '1.0.24';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -51,6 +51,7 @@
     webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
     tabHeartbeats: 'tm_payload_mirror_tab_heartbeats_v1',
     apexWakeState: 'tm_payload_mirror_apex_wake_state_v1',
+    runtimeCleanupRequest: 'tm_pc_runtime_cleanup_request_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
     missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
     azCurrentJob: 'tm_az_current_job_v1',
@@ -77,10 +78,72 @@
     'tm_pc_header_timeout_sent_events_v2'
   ];
 
+  const GWPC_LOCAL_RUNTIME_CLEANUP_KEYS = [
+    'tm_pc_home_quote_grab_payload_v1',
+    'tm_pc_auto_quote_grab_payload_v1',
+    'tm_pc_webhook_bundle_v1',
+    'tm_pc_current_job_v1',
+    'tm_pc_webhook_submit_sent_meta_v17',
+    'tm_pc_webhook_submit_stopped_v17',
+    'tm_pc_webhook_post_success_v1',
+    'tm_pc_flow_stage_v1',
+    'tm_pc_payload_mirror_close_signal_v1',
+    'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
+    'tm_pc_payload_mirror_ignore_close_lease_v1',
+    'tm_pc_header_timeout_runtime_v2',
+    'tm_pc_header_timeout_sent_events_v2',
+    'tm_pc_header_timeout_retry_state_v1',
+    'tm_pc_header_timeout_retry_request_v1',
+    'tm_pc_header_timeout_retry_requested_context_v1',
+    'tm_pc_header_timeout_pending_post_v2',
+    'tm_pc_header_timeout_watch_pending_v1',
+    'tm_pc_webhook_fatal_error_hold_v1',
+    'tm_az_gwpc_final_payload_v1',
+    'tm_az_gwpc_final_payload_ready_v1',
+    'tm_az_missing_payload_fallback_trigger_v1',
+    'tm_az_current_job_v1',
+    'tm_shared_az_job_v1'
+  ];
+
+  const GWPC_SHARED_RUNTIME_CLEANUP_KEYS = [
+    GM_KEYS.success,
+    GM_KEYS.finalPayload,
+    GM_KEYS.finalReady,
+    GM_KEYS.closeSignal,
+    GM_KEYS.lexCloseConsumed,
+    GM_KEYS.ignoreCloseLease,
+    GM_KEYS.webhookFatalHold,
+    GM_KEYS.tabHeartbeats,
+    GM_KEYS.apexWakeState,
+    GM_KEYS.homePayload,
+    GM_KEYS.missingPayloadTrigger,
+    GM_KEYS.azCurrentJob,
+    GM_KEYS.currentJob,
+    GM_KEYS.sharedJob,
+    'tm_pc_auto_quote_grab_payload_v1',
+    'tm_pc_webhook_bundle_v1',
+    'tm_pc_webhook_submit_sent_meta_v17',
+    'tm_pc_webhook_submit_stopped_v17',
+    'tm_pc_flow_stage_v1',
+    'tm_pc_header_timeout_runtime_v2',
+    'tm_pc_header_timeout_sent_events_v2',
+    'tm_pc_header_timeout_retry_state_v1',
+    'tm_pc_header_timeout_retry_request_v1',
+    'tm_pc_header_timeout_retry_requested_context_v1',
+    'tm_pc_header_timeout_pending_post_v2',
+    'tm_pc_header_timeout_watch_pending_v1'
+  ];
+
+  const GWPC_SESSION_RUNTIME_CLEANUP_KEYS = [
+    SS_KEYS.handledSignal,
+    SS_KEYS.closeAttempted
+  ];
+
   const CFG = {
     tickMs: 400,
     maxSignalAgeMs: 90000,
     closeSignalMaxAgeMs: 20000,
+    runtimeCleanupRequestMaxAgeMs: 10 * 60 * 1000,
     closeDelayMs: 5000,
     samePageCloseMs: 5 * 60 * 1000,
     tabHeartbeatMs: 5000,
@@ -111,6 +174,7 @@
     tickTimer: null,
     gmSuccessListener: null,
     gmReadyListener: null,
+    gmRuntimeCleanupListener: null,
     activeSignal: null,
     activeSignalKey: '',
     countdownEndsAt: 0,
@@ -130,6 +194,7 @@
     lastIgnoreCloseLeaseHeartbeatAt: 0,
     lastIgnoreCloseSignalKey: '',
     lastWebhookFatalHoldLogKey: '',
+    lastRuntimeCleanupDeferredKey: '',
     samePageSignature: '',
     samePageSinceAt: 0,
     samePageCloseAttempted: false,
@@ -147,6 +212,7 @@
 
     log(`Loaded v${VERSION}`);
     log(`Host: ${location.hostname}`);
+    consumeRuntimeCleanupRequest('init-bootstrap');
     writeTabHeartbeat(true);
     if (isAzHost()) log(`APEX wake monitor ${state.apexWakeEnabled ? 'ON' : 'OFF'}`);
     setStatus(state.running ? 'Watching for webhook success' : 'Stopped');
@@ -161,6 +227,12 @@
       try {
         state.gmReadyListener = GM_addValueChangeListener(GM_KEYS.finalReady, () => {
           scheduleImmediateCheck('gm-ready');
+        });
+      } catch {}
+
+      try {
+        state.gmRuntimeCleanupListener = GM_addValueChangeListener(GM_KEYS.runtimeCleanupRequest, () => {
+          scheduleImmediateCheck('gm-runtime-cleanup');
         });
       } catch {}
 
@@ -311,6 +383,155 @@
   function readSession(key) {
     try { return sessionStorage.getItem(key) || ''; }
     catch { return ''; }
+  }
+
+  function clearLocalKey(key) {
+    if (!key) return;
+    try { localStorage.removeItem(key); } catch {}
+  }
+
+  function clearSessionKey(key) {
+    if (!key) return;
+    try { sessionStorage.removeItem(key); } catch {}
+  }
+
+  function clearSharedKey(key) {
+    if (!key) return;
+    clearLocalKey(key);
+    writeGM(key, null);
+  }
+
+  function readRuntimeCleanupRequest() {
+    const value = readGM(GM_KEYS.runtimeCleanupRequest, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function buildRuntimeCleanupRequestKey(request) {
+    return [
+      norm(request?.azId || ''),
+      norm(request?.requestedAt || ''),
+      norm(request?.nonce || '')
+    ].join('|');
+  }
+
+  function clearRuntimeCleanupRequest(request = null) {
+    const current = readRuntimeCleanupRequest();
+    const currentKey = buildRuntimeCleanupRequestKey(current);
+    const requestKey = buildRuntimeCleanupRequestKey(request || current);
+    if (requestKey && currentKey && requestKey !== currentKey) return false;
+    clearLocalKey(GM_KEYS.runtimeCleanupRequest);
+    writeGM(GM_KEYS.runtimeCleanupRequest, null);
+    return true;
+  }
+
+  function readLocalGwpcAzIdForRuntimeCleanup() {
+    if (!isGwpcHost()) return '';
+    const keys = [
+      'tm_pc_current_job_v1',
+      'tm_pc_webhook_bundle_v1',
+      'tm_pc_home_quote_grab_payload_v1',
+      'tm_pc_auto_quote_grab_payload_v1'
+    ];
+    for (const key of keys) {
+      const value = readLocalJson(key);
+      const data = isPlainObject(value?.data) ? value.data : value;
+      const azId = norm(
+        value?.['AZ ID']
+        || value?.azId
+        || value?.ticketId
+        || value?.currentJob?.['AZ ID']
+        || value?.currentJob?.azId
+        || data?.['AZ ID']
+        || data?.azId
+        || data?.ticketId
+        || data?.currentJob?.['AZ ID']
+        || ''
+      );
+      if (azId) return azId;
+    }
+    return '';
+  }
+
+  function resetRuntimeCloseState() {
+    state.activeSignal = null;
+    state.activeSignalKey = '';
+    state.countdownEndsAt = 0;
+    state.mirrored = false;
+    state.closeAttempted = false;
+    state.closeAttempts = 0;
+    state.closeSignalKey = '';
+    state.lastIgnoreCloseSignalKey = '';
+    state.lastWebhookFatalHoldLogKey = '';
+    state.lexSnagHandledKey = '';
+    resetSamePageWatch('');
+    clearSessionKey(SS_KEYS.handledSignal);
+    clearSessionKey(SS_KEYS.closeAttempted);
+  }
+
+  function applyGwpcRuntimeCleanup(request, reason = '') {
+    const cleanAzId = norm(request?.azId || '');
+    let cleared = 0;
+
+    for (const key of GWPC_LOCAL_RUNTIME_CLEANUP_KEYS) {
+      clearLocalKey(key);
+      cleared += 1;
+    }
+    for (const key of GWPC_SESSION_RUNTIME_CLEANUP_KEYS) {
+      clearSessionKey(key);
+      cleared += 1;
+    }
+    for (const key of GWPC_SHARED_RUNTIME_CLEANUP_KEYS) {
+      clearSharedKey(key);
+      cleared += 1;
+    }
+
+    resetRuntimeCloseState();
+    clearRuntimeCleanupRequest(request);
+    log(
+      `GWPC runtime cleanup applied | AZ ${cleanAzId || '(unknown)'} | ${cleared} keys` +
+      `${reason ? ` | ${reason}` : ''}`
+    );
+    setStatus(cleanAzId ? `Runtime cleaned for ${cleanAzId}` : 'Runtime cleaned');
+    return true;
+  }
+
+  function consumeRuntimeCleanupRequest(reason = 'runtime-cleanup') {
+    if (!isGwpcHost()) return false;
+
+    const request = readRuntimeCleanupRequest();
+    const requestKey = buildRuntimeCleanupRequestKey(request);
+    if (!request || !requestKey) {
+      state.lastRuntimeCleanupDeferredKey = '';
+      return false;
+    }
+
+    const requestedAtMs = parseTimeMs(request.requestedAt);
+    if (requestedAtMs && (Date.now() - requestedAtMs) > CFG.runtimeCleanupRequestMaxAgeMs) {
+      clearRuntimeCleanupRequest(request);
+      log(`Discarded stale runtime cleanup request | AZ ${norm(request.azId || '(unknown)')}`);
+      state.lastRuntimeCleanupDeferredKey = '';
+      return false;
+    }
+
+    const requestAzId = norm(request.azId || '');
+    if (!requestAzId) {
+      clearRuntimeCleanupRequest(request);
+      state.lastRuntimeCleanupDeferredKey = '';
+      return false;
+    }
+
+    const pageAzId = readLocalGwpcAzIdForRuntimeCleanup();
+    if (pageAzId && pageAzId !== requestAzId) {
+      const deferredKey = `${requestKey}|${pageAzId}`;
+      if (state.lastRuntimeCleanupDeferredKey !== deferredKey) {
+        state.lastRuntimeCleanupDeferredKey = deferredKey;
+        log(`GWPC runtime cleanup deferred | request AZ ${requestAzId} | page AZ ${pageAzId}`);
+      }
+      return false;
+    }
+
+    state.lastRuntimeCleanupDeferredKey = '';
+    return applyGwpcRuntimeCleanup(request, reason);
   }
 
   function log(message) {
@@ -1657,6 +1878,10 @@
 
   function tick(reason = 'tick') {
     if (state.destroyed) return;
+    if (consumeRuntimeCleanupRequest(reason)) {
+      renderAll();
+      return;
+    }
     writeTabHeartbeat();
     closeOwnedApexWakeTabIfReady();
     refreshIgnoreCloseLeaseHeartbeat();

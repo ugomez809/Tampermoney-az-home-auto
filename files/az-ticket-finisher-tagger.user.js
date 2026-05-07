@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.57
+// @version      1.0.58
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.57';
+  const VERSION = '1.0.58';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -40,13 +40,67 @@
     finalPayload: 'tm_az_gwpc_final_payload_v1',
     finalReady: 'tm_az_gwpc_final_payload_ready_v1',
     homePayload: 'tm_pc_home_quote_grab_payload_v1',
+    autoPayload: 'tm_pc_auto_quote_grab_payload_v1',
+    webhookBundle: 'tm_pc_webhook_bundle_v1',
     azCurrentJob: 'tm_az_current_job_v1',
     currentJob: 'tm_pc_current_job_v1',
+    sharedJob: 'tm_shared_az_job_v1',
     missingPayloadTrigger: 'tm_az_missing_payload_fallback_trigger_v1',
     fieldTargets: 'tm_az_ticket_finisher_field_targets_v1',
     tagTargets: 'tm_az_ticket_finisher_tag_targets_v1',
-    runs: 'tm_az_ticket_finisher_runs_v1'
+    runs: 'tm_az_ticket_finisher_runs_v1',
+    webhookSubmitSentMeta: 'tm_pc_webhook_submit_sent_meta_v17',
+    webhookSubmitStopped: 'tm_pc_webhook_submit_stopped_v17',
+    webhookSuccess: 'tm_pc_webhook_post_success_v1',
+    flowStage: 'tm_pc_flow_stage_v1',
+    closeSignal: 'tm_pc_payload_mirror_close_signal_v1',
+    lexCloseConsumed: 'tm_pc_payload_mirror_lex_close_consumed_signal_v1',
+    ignoreCloseLease: 'tm_pc_payload_mirror_ignore_close_lease_v1',
+    lastHandledSignal: 'tm_pc_payload_mirror_last_handled_signal_v1',
+    closeAttempted: 'tm_pc_payload_mirror_close_attempted_v1',
+    runtimeCleanupRequest: 'tm_pc_runtime_cleanup_request_v1',
+    webhookFatalHold: 'tm_pc_webhook_fatal_error_hold_v1',
+    timeoutRuntime: 'tm_pc_header_timeout_runtime_v2',
+    timeoutSentEvents: 'tm_pc_header_timeout_sent_events_v2',
+    timeoutRetryState: 'tm_pc_header_timeout_retry_state_v1',
+    timeoutRetryRequest: 'tm_pc_header_timeout_retry_request_v1',
+    timeoutRetryRequestedContext: 'tm_pc_header_timeout_retry_requested_context_v1',
+    timeoutPendingPost: 'tm_pc_header_timeout_pending_post_v2',
+    timeoutWatchPending: 'tm_pc_header_timeout_watch_pending_v1'
   };
+
+  const SHARED_RUNTIME_CLEANUP_KEYS = [
+    GM_KEYS.finalPayload,
+    GM_KEYS.finalReady,
+    GM_KEYS.homePayload,
+    GM_KEYS.autoPayload,
+    GM_KEYS.webhookBundle,
+    GM_KEYS.currentJob,
+    GM_KEYS.azCurrentJob,
+    GM_KEYS.sharedJob,
+    GM_KEYS.missingPayloadTrigger,
+    GM_KEYS.runs,
+    GM_KEYS.webhookSubmitSentMeta,
+    GM_KEYS.webhookSubmitStopped,
+    GM_KEYS.webhookSuccess,
+    GM_KEYS.flowStage,
+    GM_KEYS.closeSignal,
+    GM_KEYS.lexCloseConsumed,
+    GM_KEYS.ignoreCloseLease,
+    GM_KEYS.lastHandledSignal,
+    GM_KEYS.closeAttempted,
+    GM_KEYS.runtimeCleanupRequest,
+    GM_KEYS.webhookFatalHold,
+    GM_KEYS.timeoutRuntime,
+    GM_KEYS.timeoutSentEvents,
+    GM_KEYS.timeoutRetryState,
+    GM_KEYS.timeoutRetryRequest,
+    GM_KEYS.timeoutRetryRequestedContext,
+    GM_KEYS.timeoutPendingPost,
+    GM_KEYS.timeoutWatchPending,
+    'tm_payload_mirror_tab_heartbeats_v1',
+    'tm_payload_mirror_apex_wake_state_v1'
+  ];
 
   const LS_KEYS = {
     running: 'tm_az_ticket_finisher_running_v1',
@@ -388,6 +442,60 @@
     try { localStorage.removeItem(GM_KEYS.finalPayload); } catch {}
     try { localStorage.removeItem(GM_KEYS.finalReady); } catch {}
     log(`Cleared mirrored final payload handoff${cleanAzId ? ` | ${cleanAzId}` : ''}`);
+  }
+
+  function clearSharedRuntimeKey(key) {
+    if (!key) return;
+    try { localStorage.removeItem(key); } catch {}
+    try { GM_setValue(key, null); } catch {}
+  }
+
+  function publishRuntimeCleanupRequest(azId, reason = '') {
+    const cleanAzId = norm(azId || '');
+    if (!cleanAzId) return null;
+
+    const request = {
+      azId: cleanAzId,
+      requestedAt: nowIso(),
+      nonce: `cleanup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      source: SCRIPT_NAME,
+      version: VERSION,
+      reason: norm(reason || 'finisher cleanup') || 'finisher cleanup'
+    };
+
+    writeGM(GM_KEYS.runtimeCleanupRequest, request);
+    log(`Published GWPC runtime cleanup request | AZ ${cleanAzId} | ${request.reason}`);
+    return request;
+  }
+
+  function resetLocalRuntimeCleanupState() {
+    state.lastPayloadSeenKey = '';
+    state.lastPayloadSourceSignature = '';
+    state.lastFinalPayloadRejectLogKey = '';
+    state.lastMissingPayloadTriggerLogKey = '';
+    state.lastOpenTicketFallbackKey = '';
+    clearRejectedFinalPayloadState();
+    resetWaitingTicketMismatch();
+    resetLauncherDataMissing();
+  }
+
+  function clearSharedRuntimeForAz(azId, options = {}) {
+    const cleanAzId = norm(azId || '');
+    if (!cleanAzId) return 0;
+
+    const reason = norm(options?.reason || '') || 'finisher cleanup';
+    const publishGwpcRequest = options?.publishGwpcRequest !== false;
+    let cleared = 0;
+
+    for (const key of SHARED_RUNTIME_CLEANUP_KEYS) {
+      clearSharedRuntimeKey(key);
+      cleared += 1;
+    }
+
+    resetLocalRuntimeCleanupState();
+    if (publishGwpcRequest) publishRuntimeCleanupRequest(cleanAzId, reason);
+    log(`Cleared shared runtime state | AZ ${cleanAzId} | ${cleared} keys`);
+    return cleared;
   }
 
   function deepClone(value) {
@@ -3171,10 +3279,12 @@
         }
         saveRunRecord(runs, data.azId, runRecord);
         markFrontRunCompleted(runTicketId || data.azId);
+        clearSharedRuntimeForAz(data.azId, {
+          reason: data.missingPayloadFallback ? 'finisher completed after missing payload fallback' : 'finisher completed',
+          publishGwpcRequest: true
+        });
         sendTicketClosedSignal(data.azId);
         requestWorkflowCleanup(data.azId);
-        clearMissingPayloadTrigger(data.azId);
-        clearFinalPayloadHandoff(data.azId);
         setStatus('Completed');
         log(`Ticket finishing complete for AZ ${data.azId}`);
       } else {
@@ -3558,6 +3668,26 @@
     renderAll();
   }
 
+  function runManualRuntimeCleanup() {
+    const openTicket = getOpenTicketInfo();
+    const ticketId = norm(openTicket.ticketId || '');
+    if (!ticketId) {
+      setStatus('Open ticket required');
+      log('Manual runtime cleanup skipped: open ticket not detected');
+      renderAll();
+      return;
+    }
+
+    clearSharedRuntimeForAz(ticketId, {
+      reason: 'manual finisher panel cleanup',
+      publishGwpcRequest: true
+    });
+    state.activeAzId = ticketId;
+    setStatus(`Runtime cleaned for ${ticketId}`);
+    log(`Manual runtime cleanup completed | AZ ${ticketId}`);
+    renderAll();
+  }
+
   function escapeHtml(value) {
     return String(value || '')
       .replace(/&/g, '&amp;')
@@ -3599,6 +3729,7 @@
         <div ${UI_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-force" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">FORCE RUN</button>
+          <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-clean-runtime" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#b45309;color:#fff;font-weight:800;cursor:pointer;">CLEAN RUNTIME</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-missing-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0d9488;color:#fff;font-weight:800;cursor:pointer;">ADD MISSING FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">REDO ALL FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-ticket-finisher-reset-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET FIELD TARGETS</button>
@@ -3621,6 +3752,7 @@
     state.ui.head = panel.querySelector('#tm-az-ticket-finisher-head');
     state.ui.toggle = panel.querySelector('#tm-az-ticket-finisher-toggle');
     state.ui.force = panel.querySelector('#tm-az-ticket-finisher-force');
+    state.ui.cleanRuntime = panel.querySelector('#tm-az-ticket-finisher-clean-runtime');
     state.ui.setMissingFields = panel.querySelector('#tm-az-ticket-finisher-set-missing-fields');
     state.ui.setFields = panel.querySelector('#tm-az-ticket-finisher-set-fields');
     state.ui.resetFields = panel.querySelector('#tm-az-ticket-finisher-reset-fields');
@@ -3665,6 +3797,7 @@
       tick();
     });
 
+    state.ui.cleanRuntime?.addEventListener('click', runManualRuntimeCleanup);
     state.ui.setMissingFields?.addEventListener('click', startMissingFieldPicker);
     state.ui.setFields?.addEventListener('click', () => startPicker('fields'));
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
@@ -3680,6 +3813,8 @@
 
   function renderAll() {
     const payload = getFinalPayload();
+    const openTicket = getOpenTicketInfo();
+    const canCleanRuntime = !state.busy && !!norm(openTicket.ticketId || '');
     if (state.ui.azId) state.ui.azId.textContent = norm(state.activeAzId || payload?.azId || '-') || '-';
     if (state.ui.payload) state.ui.payload.textContent = payload ? 'Found' : 'Missing';
     if (state.ui.fields) state.ui.fields.textContent = getFieldTargetStatusText();
@@ -3693,6 +3828,14 @@
     if (state.ui.force) {
       state.ui.force.disabled = state.busy;
       state.ui.force.style.opacity = state.busy ? '0.65' : '1';
+    }
+
+    if (state.ui.cleanRuntime) {
+      state.ui.cleanRuntime.disabled = !canCleanRuntime;
+      state.ui.cleanRuntime.style.opacity = canCleanRuntime ? '1' : '0.5';
+      state.ui.cleanRuntime.title = canCleanRuntime
+        ? 'Clear transient runtime state for the current open ticket'
+        : 'Open an AZ ticket to clean runtime state';
     }
 
     renderLogs();
