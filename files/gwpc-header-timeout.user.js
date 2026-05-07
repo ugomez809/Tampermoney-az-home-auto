@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.22
+// @version      2.3.23
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -23,7 +23,7 @@
   try { window.__TM_GWPC_HEADER_TIMEOUT_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.22';
+  const VERSION = '2.3.23';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -2174,6 +2174,20 @@
     };
   }
 
+  function buildManualSelectorMatchInfo(el) {
+    const meta = buildElementLogMeta(el);
+    return {
+      ok: true,
+      reason: '',
+      element: el instanceof Element ? el : null,
+      matchedText: getVisibleElementLogText(el, 600) || meta.text,
+      textDriftTolerated: false,
+      elementTag: meta.tag,
+      elementId: meta.id,
+      elementClass: meta.className
+    };
+  }
+
   function dispatchEvent(event, contextOverride = null, options = {}) {
     if (!options.manual && !timeoutActionsEnabled()) {
       log('Timeout actions are OFF. Event skipped.');
@@ -3549,18 +3563,22 @@
       }
 
       const rules = getSelectorRules();
-      const ruleId = buildRuleId(draft.selector, draft.fingerprint.textFingerprint || draft.previewText || '');
+      const normalizedFingerprintText = truncateText(savedErrorText, 160);
+      const ruleId = buildRuleId(draft.selector, normalizedFingerprintText);
       const nextRule = {
         ruleId,
         selector: draft.selector,
         label: savedErrorText,
         savedErrorText,
-        fingerprint: draft.fingerprint,
+        fingerprint: {
+          ...(isPlainObject(draft.fingerprint) ? draft.fingerprint : {}),
+          textFingerprint: normalizedFingerprintText
+        },
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
 
-      const existingIdx = rules.findIndex((rule) => normalizeText(rule.ruleId) === ruleId || normalizeText(rule.selector) === draft.selector);
+      const existingIdx = rules.findIndex((rule) => normalizeText(rule.ruleId) === ruleId);
       if (existingIdx >= 0) {
         nextRule.createdAt = normalizeText(rules[existingIdx].createdAt || nowIso());
         rules[existingIdx] = nextRule;
@@ -3570,6 +3588,16 @@
 
       saveSelectorRules(rules, { reason: 'rule-saved' });
       closeSelectorSession('Selector rule saved');
+
+      const immediateContext = buildEventContext();
+      if (immediateContext.ok) {
+        const immediateEvent = buildSelectorEvent(immediateContext, nextRule, buildManualSelectorMatchInfo(target));
+        if (dispatchEvent(immediateEvent, immediateContext)) {
+          log('Saved selector rule dispatched immediately from current page');
+          return;
+        }
+      }
+
       scheduleScan('rule-saved');
     });
 
