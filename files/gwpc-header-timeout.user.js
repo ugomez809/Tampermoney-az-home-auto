@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.22
+// @version      2.3.23
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.22';
+  const VERSION = '2.3.23';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1137,6 +1137,7 @@
     const normalized = normalizeText(reason).toLowerCase();
     if (!normalized) return 0;
     if (normalized === 'text fingerprint not found on visible element') return 100;
+    if (normalized === 'rule missing text fingerprint') return 95;
     if (normalized === 'visible element text empty') return 90;
     if (normalized === 'fingerprint score mismatch') return 80;
     if (normalized === 'candidate not visible') return 60;
@@ -1192,7 +1193,6 @@
 
     log(
       `Selector rule matched | ruleId=${normalizeText(rule?.ruleId || '')} | label=${quoteLogValue(ruleLabel, 160)} | ` +
-      `textDrift=${matchInfo?.textDriftTolerated === true ? 'yes' : 'no'} | ` +
       `sentError=${quoteLogValue(sentError, 280)} | selector=${quoteLogValue(selector, 260)} | ` +
       `matchedTag=${quoteLogValue(meta.tag, 80)} | matchedClass=${quoteLogValue(meta.className, 160)} | matchedId=${quoteLogValue(meta.id, 120)} | ` +
       `matchedText=${quoteLogValue(matchedText, 320)} | header=${quoteLogValue(header, 120)} | ` +
@@ -1997,15 +1997,23 @@
     const pageAddress = normalizeText(context.pageIdentity?.mailingAddress || '');
 
     const stored = readRuntimeState();
-    const runtimeKey = nextAzId && nextProduct && nextHeader ? [nextAzId, nextProduct, nextHeader].join('|') : '';
+    const runtimeKey = nextAzId && nextProduct && nextHeader
+      ? [nextAzId, nextProduct, nextSubmission || '(no-submission)', nextHeader].join('|')
+      : '';
     let headerSinceMs = nextHeader ? Date.now() : 0;
+    const canResumeStoredTimer = !!(
+      runtimeKey
+      && normalizeText(stored.key || '') === runtimeKey
+      && normalizeText(state.lastRuntimePersistKey) === runtimeKey
+      && Number.isFinite(Number(stored.headerSinceMs))
+    );
 
-    if (runtimeKey && normalizeText(stored.key || '') === runtimeKey && Number.isFinite(Number(stored.headerSinceMs))) {
+    if (canResumeStoredTimer) {
       headerSinceMs = Number(stored.headerSinceMs) || headerSinceMs;
     }
 
     if (runtimeKey && normalizeText(state.lastRuntimePersistKey) !== runtimeKey) {
-      headerSinceMs = normalizeText(stored.key || '') === runtimeKey ? headerSinceMs : Date.now();
+      headerSinceMs = Date.now();
       writeRuntimeState({
         key: runtimeKey,
         azId: nextAzId,
@@ -3313,6 +3321,7 @@
   function getSelectorRuleScopeFailure(rule, context) {
     const scopeProduct = normalizeText(rule?.scopeProduct || '').toLowerCase();
     const scopeHeader = normalizeText(rule?.scopeHeader || '');
+    const selector = normalizeText(rule?.selector || '');
     const textFingerprint = normalizeText(rule?.fingerprint?.textFingerprint || '');
     const currentProduct = normalizeText(context?.product || '').toLowerCase();
     const currentHeader = normalizeText(context?.header || '');
@@ -3322,6 +3331,9 @@
     }
     if (scopeHeader && scopeHeader !== currentHeader) {
       return `rule scoped to header "${scopeHeader}"`;
+    }
+    if (!textFingerprint && !is360ValueRule(rule, selector)) {
+      return 'rule missing text fingerprint';
     }
     if (!scopeProduct && !scopeHeader && !textFingerprint) {
       return 'legacy rule missing scope and text fingerprint';
@@ -3793,9 +3805,8 @@
     renderAll();
   }
 
-  function matchRuleToElement(rule, el, options = {}) {
+  function matchRuleToElement(rule, el) {
     const meta = buildElementLogMeta(el);
-    const allowTextDrift = options.allowTextDrift === true;
     const fail = (reason) => ({
       ok: false,
       reason,
@@ -3816,59 +3827,45 @@
 
     let required = 0;
     let score = 0;
-    let structuralRequired = 0;
-    let structuralScore = 0;
     let textRequired = false;
     let textMatches = false;
 
     if (fingerprint.tag) {
       required += 1;
-      structuralRequired += 1;
       if (fingerprint.tag === current.tag) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (fingerprint.id) {
       required += 1;
-      structuralRequired += 1;
       if (fingerprint.id === current.id) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (fingerprint.name) {
       required += 1;
-      structuralRequired += 1;
       if (fingerprint.name === current.name) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (fingerprint.role) {
       required += 1;
-      structuralRequired += 1;
       if (fingerprint.role === current.role) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (fingerprint.ariaLabel) {
       required += 1;
-      structuralRequired += 1;
       if (fingerprint.ariaLabel === current.ariaLabel) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (Array.isArray(fingerprint.classTokens) && fingerprint.classTokens.length) {
       required += 1;
-      structuralRequired += 1;
       const currentSet = new Set(current.classTokens || []);
       const allFound = fingerprint.classTokens.every((token) => currentSet.has(token));
       if (allFound) {
         score += 1;
-        structuralScore += 1;
       }
     }
     if (fingerprint.textFingerprint) {
@@ -3884,20 +3881,12 @@
 
     if (required === 0) return fail('fingerprint empty');
 
-    const textDriftTolerated = textRequired
-      && !textMatches
-      && allowTextDrift
-      && structuralRequired > 0
-      && structuralScore === structuralRequired;
-
-    if (textRequired && !textMatches && !textDriftTolerated) {
+    if (textRequired && !textMatches) {
       return fail(matchedText ? 'text fingerprint not found on visible element' : 'visible element text empty');
     }
 
     let ok = false;
-    if (textDriftTolerated) {
-      ok = true;
-    } else if (textRequired) {
+    if (textRequired) {
       if (required === 1) ok = score === 1;
       else if (required <= 3) ok = score === required;
       else ok = score >= (required - 1);
@@ -3914,7 +3903,6 @@
       reason: '',
       element: el,
       matchedText,
-      textDriftTolerated,
       elementTag: meta.tag,
       elementId: meta.id,
       elementClass: meta.className
@@ -4048,7 +4036,6 @@
 
     let bestFailure = null;
     let sawNodes = false;
-    const visibleCandidates = [];
     for (const doc of getAllDocs()) {
       let nodes = [];
       try {
@@ -4068,9 +4055,6 @@
       }
       if (nodes.length) sawNodes = true;
       for (const node of nodes) {
-        if (node instanceof Element && !isScriptUiElement(node) && isVisible(node)) {
-          visibleCandidates.push(node);
-        }
         const result = matchRuleToElement(rule, node);
         if (result.ok) {
           return {
@@ -4083,20 +4067,6 @@
           selector
         });
       }
-    }
-
-    if (visibleCandidates.length === 1) {
-      const driftResult = matchRuleToElement(rule, visibleCandidates[0], { allowTextDrift: true });
-      if (driftResult.ok) {
-        return {
-          ...driftResult,
-          selector
-        };
-      }
-      bestFailure = pickBetterSelectorFailure(bestFailure, {
-        ...driftResult,
-        selector
-      });
     }
 
     return bestFailure || {
