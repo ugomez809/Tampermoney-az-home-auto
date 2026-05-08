@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         14 AUTO AgencyZoom Pipeline Keeper
 // @namespace    autoflow.az-pipeline-keeper
-// @version      1.0.0
-// @description  AUTO-profile helper that keeps AgencyZoom on the exact pipeline page, redirects stray AgencyZoom pages back to pipeline, and sweeps stale Zillow tabs on a 3-minute cleanup pulse.
+// @version      1.0.1
+// @description  AUTO-profile helper that keeps one exact AgencyZoom pipeline tab alive, closes extra AgencyZoom tabs when a leader exists, redirects stray AgencyZoom pages back to pipeline, and sweeps stale Zillow tabs on a 3-minute cleanup pulse.
 // @match        https://app.agencyzoom.com/*
 // @match        https://www.zillow.com/*
 // @match        https://zillow.com/*
@@ -24,7 +24,7 @@
   try { window.__AZ_PIPELINE_KEEPER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '14 AUTO AgencyZoom Pipeline Keeper';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
   const GM_KEYS = {
@@ -204,11 +204,13 @@
   function handlePipelineTick() {
     const leader = getLeader();
 
-    if (!isFreshLeader(leader) || isLeaderSelf(leader)) {
-      maybeRefreshLeaderHeartbeat();
-    } else {
-      maybeLogRole('Pipeline follower waiting for cleanup pulse');
+    if (isFreshLeader(leader) && !isLeaderSelf(leader)) {
+      maybeLogRole('Duplicate AgencyZoom pipeline tab detected; attempting to close this copy');
+      scheduleCloseSelf(`pipeline-duplicate-${String(leader.tabId || 'other')}`);
+      return;
     }
+
+    maybeRefreshLeaderHeartbeat();
 
     const activeLeader = getLeader();
     if (!isLeaderSelf(activeLeader)) return;
@@ -221,6 +223,13 @@
   }
 
   function handleAgencyZoomRecoveryTick() {
+    const leader = getLeader();
+    if (isFreshLeader(leader) && !isLeaderSelf(leader)) {
+      maybeLogRole('Extra AgencyZoom tab detected while pipeline leader exists; attempting to close this tab');
+      scheduleCloseSelf(`agencyzoom-follower-${String(leader.tabId || 'other')}`);
+      return;
+    }
+
     maybeLogRole('AgencyZoom stray page detected; sending this tab back to the pipeline');
     scheduleRedirectToPipeline();
   }
@@ -278,18 +287,22 @@
 
     state.lastHandledCleanupToken = token;
 
-    if (isExactPipelinePage()) {
-      const leader = getLeader();
-      if (isFreshLeader(leader) && !isLeaderSelf(leader)) {
-        log('Duplicate pipeline tab received cleanup pulse; attempting to close this copy');
-        scheduleCloseSelf(token);
-      }
-      return;
-    }
-
+    const leader = getLeader();
     if (isAgencyZoomOrigin()) {
-      log('AgencyZoom non-pipeline page received cleanup pulse; redirecting back to the exact pipeline page');
-      scheduleRedirectToPipeline();
+      if (isFreshLeader(leader) && !isLeaderSelf(leader)) {
+        if (isExactPipelinePage()) {
+          log('Duplicate pipeline tab received cleanup pulse; attempting to close this copy');
+        } else {
+          log('Extra AgencyZoom tab received cleanup pulse while pipeline leader exists; attempting to close this tab');
+        }
+        scheduleCloseSelf(token);
+        return;
+      }
+
+      if (!isExactPipelinePage()) {
+        log('AgencyZoom non-pipeline page received cleanup pulse; redirecting back to the exact pipeline page');
+        scheduleRedirectToPipeline();
+      }
       return;
     }
 
