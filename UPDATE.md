@@ -12,7 +12,7 @@ header moves when a script is updated.
 
 ### Full wipe reinstall bundle
 
-If you're doing a full Tampermonkey wipe and want the renamed dashboard list in one shot, use the bundle below instead of clicking 24 install links one by one.
+If you're doing a full Tampermonkey wipe and want the renamed dashboard list in one shot, use the bundle below instead of clicking 25 install links one by one.
 
 - [Download full reinstall bundle](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/bundles/tampermonkey-full-reinstall-bundle.zip)
 
@@ -39,6 +39,7 @@ For one-by-one installs instead of the bundle:
 | Script | Install |
 | --- | --- |
 | 13 AUTO AgencyZoom Zillow Ticket Enricher | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js) |
+| 14 AUTO AgencyZoom Pipeline Keeper | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-pipeline-keeper.user.js) |
 | AgencyZoom Quote Launcher + Payload Grabber | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js) |
 | GWPC Shared Ticket Handoff | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-ticket-handoff.user.js) |
 | AgencyZoom Ticket Finisher + Tagger | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js) |

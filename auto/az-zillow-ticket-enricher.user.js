@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.2
+// @version      1.3.3
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -26,8 +26,9 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
+  const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
@@ -150,7 +151,8 @@
     currentAddress: '',
     zillowSummary: '',
     lastStatus: '',
-    mainReadyTicketId: ''
+    mainReadyTicketId: '',
+    lastWrongAzUrl: ''
   };
 
   init();
@@ -228,6 +230,10 @@
 
   function isPipelinePage() {
     return /\/referral\/pipeline/i.test(location.pathname + location.search);
+  }
+
+  function isLeadDetailPage() {
+    return /\/lead\/index(?:$|[/?#])/i.test(location.pathname);
   }
 
   function loadRunning() {
@@ -1145,6 +1151,37 @@
       .filter(Boolean);
 
     return { ticketId, name, tags };
+  }
+
+  function getActivePipelineTicketContext(expectedTicketId = '') {
+    if (!isPipelinePage()) {
+      return {
+        ok: false,
+        reason: isLeadDetailPage()
+          ? 'Lead details page detected; pipeline ticket drawer required'
+          : 'Pipeline ticket drawer required'
+      };
+    }
+
+    if (!isTicketDrawerOpen()) {
+      return { ok: false, reason: 'No open pipeline ticket drawer found' };
+    }
+
+    const info = getOpenTicketInfo();
+    const openTicketId = norm(info.ticketId || '');
+    if (!openTicketId) {
+      return { ok: false, reason: 'Open pipeline ticket id could not be read' };
+    }
+
+    const wantedTicketId = norm(expectedTicketId || '');
+    if (wantedTicketId && openTicketId !== wantedTicketId) {
+      return {
+        ok: false,
+        reason: `Open pipeline ticket ${openTicketId} does not match expected ${wantedTicketId}`
+      };
+    }
+
+    return { ok: true, ticketId: openTicketId, info };
   }
 
   function isTicketDrawerOpen() {
@@ -3026,6 +3063,13 @@
   }
 
   async function applyZillowResultToTicket(job) {
+    const applyContext = getActivePipelineTicketContext(job?.ticketId);
+    if (!applyContext.ok) {
+      setStatus(applyContext.reason);
+      log(`Blocked Zillow apply: ${applyContext.reason}`);
+      return false;
+    }
+
     const targets = getFieldTargets();
     const baseFields = {
       'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
@@ -3089,6 +3133,13 @@
     const tagsOk = await applyConfiguredTagReplacement();
     if (!tagsOk) {
       setStatus('Tag replacement failed');
+      return false;
+    }
+
+    const finalContext = getActivePipelineTicketContext(job?.ticketId);
+    if (!finalContext.ok) {
+      setStatus(finalContext.reason);
+      log(`Blocked Zillow completion: ${finalContext.reason}`);
       return false;
     }
 
@@ -3288,9 +3339,31 @@
     }
     if (!state.running) {
       setStatus('Stopped');
+      state.lastWrongAzUrl = '';
       renderAll();
       return;
     }
+    if (!isPipelinePage()) {
+      const wrongUrl = String(location.href || '');
+      const wrongPageReason = isLeadDetailPage()
+        ? 'Lead details page detected; returning to pipeline'
+        : 'Wrong AgencyZoom page detected; returning to pipeline';
+      if (state.lastWrongAzUrl !== wrongUrl) {
+        state.lastWrongAzUrl = wrongUrl;
+        log(wrongPageReason);
+      }
+      setStatus(wrongPageReason);
+      state.activeTicketId = '';
+      state.mainReadyTicketId = '';
+      try {
+        location.replace(PIPELINE_ROOT_URL);
+      } catch {
+        try { location.href = PIPELINE_ROOT_URL; } catch {}
+      }
+      renderAll();
+      return;
+    }
+    state.lastWrongAzUrl = '';
     if (maybeRefreshForIdleZillowOpenGap()) return;
     if (state.busy) return;
 
@@ -3327,7 +3400,17 @@
         requestedAt: nowIso()
       }));
     } catch {}
-    location.reload();
+    try {
+      if (isPipelinePage()) {
+        location.reload();
+        return;
+      }
+    } catch {}
+    try {
+      location.replace(PIPELINE_ROOT_URL);
+      return;
+    } catch {}
+    try { location.href = PIPELINE_ROOT_URL; } catch {}
   }
 
   function ensureHoverBox() {
