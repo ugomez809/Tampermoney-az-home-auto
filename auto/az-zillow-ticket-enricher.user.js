@@ -1,18 +1,21 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.2.6
+// @version      1.3.4
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
 // @match        https://zillow.com/*
+// @exclude      https://app.agencyzoom.com/login*
 // @run-at       document-end
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/auto/az-zillow-ticket-enricher.user.js
 // ==/UserScript==
@@ -24,13 +27,19 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.2.6';
+  const VERSION = '1.3.4';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
+  const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
+  const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
-    tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1'
+    tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1',
+    customFields: 'tm_az_zillow_ticket_enricher_custom_fields_v1',
+    providerPicker: 'tm_az_zillow_ticket_enricher_provider_picker_v1',
+    zillowOpenLease: 'tm_az_zillow_ticket_enricher_zillow_open_lease_v1',
+    zillowTabHeartbeat: 'tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
@@ -41,12 +50,19 @@
 
   const LS_KEYS = {
     running: 'tm_az_zillow_ticket_enricher_running_v1',
-    panelPos: 'tm_az_zillow_ticket_enricher_panel_pos_v1'
+    panelPos: 'tm_az_zillow_ticket_enricher_panel_pos_v1',
+    lastZillowOpenAt: 'tm_az_zillow_ticket_enricher_last_zillow_open_at_v1',
+    webhookUrl: 'tm_az_zillow_ticket_enricher_webhook_url_v1',
+    azTabSlot: 'tm_auto_single_agencyzoom_tab_slot_v1',
+    zillowTabSlot: 'tm_auto_single_zillow_tab_slot_v1'
   };
 
   const SS_KEYS = {
-    bootstrapReload: 'tm_az_zillow_ticket_enricher_bootstrap_reload_v1'
+    bootstrapReload: 'tm_az_zillow_ticket_enricher_bootstrap_reload_v1',
+    zillowTabJobId: 'tm_az_zillow_ticket_enricher_zillow_tab_job_id_v1'
   };
+
+  const ZILLOW_JOB_HASH_KEY = 'tm-az-zillow-job';
 
   const FIELD_ORDER = [
     'Zillow URL',
@@ -56,13 +72,8 @@
   ];
 
   const TAG_ORDER = [
-    { key: 'bqDotTag', label: 'BQ replacement tag (BQ.)' },
-    { key: 'bqfDotTag', label: 'BQF replacement tag (BQF.)' }
-  ];
-
-  const LEGACY_TAG_RULES = [
-    { sourceLabel: 'BQ', targetKey: 'bqDotTag' },
-    { sourceLabel: 'BQF', targetKey: 'bqfDotTag' }
+    { key: 'addTag', label: 'What Tag will be added?' },
+    { key: 'removeTag', label: 'What tag will be removed?' }
   ];
 
   const CFG = {
@@ -91,6 +102,10 @@
     zillowMaxLaunches: 0,
     zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
+    azRefreshIfNoZillowOpenMs: 300000,
+    pageSlotTtlMs: 12000,
+    zillowOpenLeaseMs: 20000,
+    zillowTabHeartbeatStaleMs: 15000,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -128,6 +143,7 @@
 
   const state = {
     destroyed: false,
+    tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
     logs: [],
@@ -139,27 +155,37 @@
     pickerKeydown: null,
     hoverBox: null,
     hoveredEl: null,
+    providerBanner: null,
     tickTimer: null,
     activeTicketId: '',
     currentAddress: '',
     zillowSummary: '',
     lastStatus: '',
-    mainReadyTicketId: ''
+    mainReadyTicketId: '',
+    lastWrongAzUrl: '',
+    lastSingletonLog: ''
   };
 
   init();
 
   function init() {
+    window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
+    if (isAgencyZoomLoginPage()) return;
+    if (!claimSingletonPageSlot()) return;
+
     const legacyJobStateCleared = clearLegacyJobState();
     const resumedAfterReload = consumeBootstrapReloadToken();
-    const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
-    const staleJobReset = azJobReset ? '' : resetStaleActiveJobOnBoot();
+    const azJobReset = '';
+    const staleJobReset = resetStaleActiveJobOnBoot();
+    if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
+    if (isAzOrigin() && !getLastZillowOpenAt()) setLastZillowOpenAt();
 
     if (isAzOrigin()) {
       buildUi();
       bindUi();
       restorePanelPos();
       ensureHoverBox();
+      syncWebhookUi();
       renderAll();
     }
 
@@ -185,8 +211,6 @@
       state.tickTimer = setInterval(zillowTick, CFG.tickMs);
       zillowTick();
     }
-
-    window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
   }
 
   function cleanup() {
@@ -195,6 +219,7 @@
     try { clearInterval(state.tickTimer); } catch {}
     stopPicker('', false);
     try { state.hoverBox?.remove(); } catch {}
+    try { state.providerBanner?.remove(); } catch {}
     try { state.panel?.remove(); } catch {}
     try { delete window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__; } catch {}
   }
@@ -212,12 +237,20 @@
     return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
   }
 
+  function isAgencyZoomLoginPage() {
+    return isAzOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
+  }
+
   function isZillowOrigin() {
     return /(^|\.)zillow\.com$/i.test(location.hostname);
   }
 
   function isPipelinePage() {
     return /\/referral\/pipeline/i.test(location.pathname + location.search);
+  }
+
+  function isLeadDetailPage() {
+    return /\/lead\/index(?:$|[/?#])/i.test(location.pathname);
   }
 
   function loadRunning() {
@@ -238,6 +271,85 @@
     } catch {}
   }
 
+  function getLastZillowOpenAt() {
+    try {
+      return norm(localStorage.getItem(LS_KEYS.lastZillowOpenAt) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function setLastZillowOpenAt(value = nowIso()) {
+    const next = norm(value || nowIso()) || nowIso();
+    try { localStorage.setItem(LS_KEYS.lastZillowOpenAt, next); } catch {}
+    return next;
+  }
+
+  function getLastZillowOpenAgeMs() {
+    return getIsoAgeMs(getLastZillowOpenAt() || nowIso());
+  }
+
+  function normalizeWebhookUrl(value) {
+    const text = norm(value);
+    if (!text) return '';
+    try {
+      const parsed = new URL(text);
+      if (!/^https?:$/i.test(parsed.protocol || '')) return '';
+      return parsed.toString();
+    } catch {
+      return '';
+    }
+  }
+
+  function readWebhookUrl() {
+    try {
+      return normalizeWebhookUrl(localStorage.getItem(LS_KEYS.webhookUrl) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function saveWebhookUrl(value) {
+    const normalized = normalizeWebhookUrl(value);
+    try {
+      if (normalized) localStorage.setItem(LS_KEYS.webhookUrl, normalized);
+      else localStorage.removeItem(LS_KEYS.webhookUrl);
+    } catch {}
+    return normalized;
+  }
+
+  function updateActiveWebhookUi(url = readWebhookUrl()) {
+    if (state.ui.activeWebhook) state.ui.activeWebhook.textContent = norm(url || '') || '(empty)';
+  }
+
+  function syncWebhookUi() {
+    const saved = readWebhookUrl();
+    if (state.ui.webhookUrl && state.ui.webhookUrl.value !== saved) state.ui.webhookUrl.value = saved;
+    updateActiveWebhookUi(saved);
+  }
+
+  function persistWebhookFromUi(withLog = false) {
+    const raw = norm(state.ui.webhookUrl?.value || '');
+    if (raw && !normalizeWebhookUrl(raw)) {
+      updateActiveWebhookUi(readWebhookUrl());
+      if (withLog) log('Webhook URL invalid; not saved');
+      return '';
+    }
+
+    const before = readWebhookUrl();
+    const saved = saveWebhookUrl(raw);
+    updateActiveWebhookUi(saved);
+    if (withLog && saved !== before) {
+      log(saved ? 'Webhook URL saved' : 'Webhook URL cleared');
+    }
+    return saved;
+  }
+
+  function getWebhookUrl() {
+    const uiValue = normalizeWebhookUrl(state.ui.webhookUrl?.value || '');
+    return uiValue || readWebhookUrl();
+  }
+
   function readGM(key, fallback = null) {
     try {
       const value = GM_getValue(key, fallback);
@@ -255,6 +367,136 @@
     try { GM_deleteValue(key); } catch {}
   }
 
+  function getSharedTabId() {
+    try {
+      const existing = sessionStorage.getItem(SHARED_TAB_ID_KEY);
+      if (existing) return existing;
+      const next = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      sessionStorage.setItem(SHARED_TAB_ID_KEY, next);
+      return next;
+    } catch {
+      return `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+  }
+
+  function readLocalJson(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed == null ? fallback : parsed;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeLocalJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function logSingletonOnce(key, message) {
+    const token = `${key}|${message}`;
+    if (state.lastSingletonLog === token) return;
+    state.lastSingletonLog = token;
+    log(message);
+  }
+
+  function closeDuplicateTabSoon() {
+    for (const delay of [150, 1200, 2500, 4000]) {
+      setTimeout(() => {
+        try { window.close(); } catch {}
+        try { window.open('', '_self'); } catch {}
+        try { window.close(); } catch {}
+      }, delay);
+    }
+  }
+
+  function getPageSlotKey() {
+    if (isAzOrigin()) return LS_KEYS.azTabSlot;
+    if (isZillowOrigin()) return LS_KEYS.zillowTabSlot;
+    return '';
+  }
+
+  function claimSingletonPageSlot() {
+    const key = getPageSlotKey();
+    if (!key) return true;
+
+    const now = Date.now();
+    const current = readLocalJson(key, null);
+    const currentTabId = String(current?.tabId || '');
+    const currentTs = Number(current?.ts || 0);
+    if (currentTabId && currentTabId !== state.tabId && currentTs > 0 && (now - currentTs) <= CFG.pageSlotTtlMs) {
+      const kind = isAzOrigin() ? 'AgencyZoom' : 'Zillow';
+      logSingletonOnce(`page-slot-${kind}`, `${kind} tab slot already owned by another tab; suppressing this copy`);
+      closeDuplicateTabSoon();
+      return false;
+    }
+
+    writeLocalJson(key, {
+      tabId: state.tabId,
+      ts: now,
+      url: String(location.href || ''),
+      script: SCRIPT_NAME
+    });
+    return true;
+  }
+
+  function getFreshZillowTabHeartbeat() {
+    const heartbeat = readGM(GM_KEYS.zillowTabHeartbeat, null);
+    if (!isPlainObject(heartbeat)) return null;
+    const ts = Number(heartbeat.ts || 0);
+    if (!ts || (Date.now() - ts) > CFG.zillowTabHeartbeatStaleMs) return null;
+    return heartbeat;
+  }
+
+  function recordZillowTabHeartbeat() {
+    if (!isZillowOrigin()) return;
+    writeGM(GM_KEYS.zillowTabHeartbeat, {
+      tabId: state.tabId,
+      ts: Date.now(),
+      url: String(location.href || ''),
+      script: SCRIPT_NAME
+    });
+  }
+
+  function getFreshZillowOpenLease() {
+    const lease = readGM(GM_KEYS.zillowOpenLease, null);
+    if (!isPlainObject(lease)) return null;
+    const ts = Number(lease.ts || 0);
+    if (!ts || (Date.now() - ts) > CFG.zillowOpenLeaseMs) return null;
+    return lease;
+  }
+
+  function claimZillowOpenSlot(url, reason = '') {
+    const heartbeat = getFreshZillowTabHeartbeat();
+    if (heartbeat) {
+      logSingletonOnce('zillow-heartbeat', `Skipped opening Zillow; an existing Zillow tab is active: ${norm(heartbeat.url || '') || 'unknown URL'}`);
+      return false;
+    }
+
+    const lease = getFreshZillowOpenLease();
+    if (lease) {
+      logSingletonOnce('zillow-open-lease', `Skipped opening Zillow; another open request is still settling: ${norm(lease.url || '') || 'unknown URL'}`);
+      return false;
+    }
+
+    writeGM(GM_KEYS.zillowOpenLease, {
+      tabId: state.tabId,
+      ts: Date.now(),
+      url: norm(url || ''),
+      reason: norm(reason || '')
+    });
+    return true;
+  }
+
+  function clearZillowOpenSlot() {
+    deleteGM(GM_KEYS.zillowOpenLease);
+  }
+
+  function hasFreshZillowOpenBlock() {
+    return !!(getFreshZillowTabHeartbeat() || getFreshZillowOpenLease());
+  }
+
   function readTargets(key) {
     const value = readGM(key, {});
     return isPlainObject(value) ? value : {};
@@ -268,8 +510,75 @@
     return readTargets(GM_KEYS.fieldTargets);
   }
 
+  function getCustomFields() {
+    return readTargets(GM_KEYS.customFields);
+  }
+
+  function saveCustomFields(value) {
+    saveTargets(GM_KEYS.customFields, value);
+  }
+
   function getTagTargets() {
     return readTargets(GM_KEYS.tagTargets);
+  }
+
+  function getProviderPickerRequest() {
+    const value = readGM(GM_KEYS.providerPicker, null);
+    return isPlainObject(value) ? value : null;
+  }
+
+  function saveProviderPickerRequest(value) {
+    if (!isPlainObject(value)) return;
+    writeGM(GM_KEYS.providerPicker, deepClone(value));
+  }
+
+  function clearProviderPickerRequest() {
+    deleteGM(GM_KEYS.providerPicker);
+  }
+
+  function getZillowTabJobId() {
+    if (!isZillowOrigin()) return '';
+    try {
+      return norm(sessionStorage.getItem(SS_KEYS.zillowTabJobId) || '');
+    } catch {
+      return '';
+    }
+  }
+
+  function setZillowTabJobId(jobId) {
+    if (!isZillowOrigin()) return;
+    const value = norm(jobId);
+    try {
+      if (value) sessionStorage.setItem(SS_KEYS.zillowTabJobId, value);
+      else sessionStorage.removeItem(SS_KEYS.zillowTabJobId);
+    } catch {}
+  }
+
+  function readZillowJobIdFromLocation() {
+    if (!isZillowOrigin()) return '';
+    const hash = String(location.hash || '').replace(/^#/, '');
+    if (!hash) return '';
+
+    for (const segment of hash.split('&')) {
+      const [rawKey, rawValue = ''] = segment.split('=');
+      if (norm(rawKey) !== ZILLOW_JOB_HASH_KEY) continue;
+      try {
+        return norm(decodeURIComponent(rawValue || ''));
+      } catch {
+        return norm(rawValue || '');
+      }
+    }
+
+    return '';
+  }
+
+  function syncZillowTabJobIdFromLocation() {
+    const locationJobId = readZillowJobIdFromLocation();
+    if (locationJobId) {
+      setZillowTabJobId(locationJobId);
+      return locationJobId;
+    }
+    return getZillowTabJobId();
   }
 
   function getJob() {
@@ -343,6 +652,83 @@
       if (text) return text;
     }
     return '';
+  }
+
+  function isBaseFieldLabel(label) {
+    return FIELD_ORDER.some((item) => lower(item) === lower(label));
+  }
+
+  function canonicalFieldLabel(label) {
+    const clean = norm(label);
+    if (!clean) return '';
+    const builtIn = FIELD_ORDER.find((item) => lower(item) === lower(clean));
+    return builtIn || clean;
+  }
+
+  function getCustomFieldEntries() {
+    return Object.entries(getCustomFields())
+      .map(([key, value]) => {
+        const label = canonicalFieldLabel(value?.label || key);
+        return [label, isPlainObject(value) ? { ...value, label } : null];
+      })
+      .filter(([, value]) => isPlainObject(value) && norm(value.label));
+  }
+
+  function getSortedCustomFieldDefs() {
+    return getCustomFieldEntries()
+      .map(([, value]) => value)
+      .sort((a, b) => {
+        const aAt = Date.parse(norm(a.createdAt || a.updatedAt || '')) || 0;
+        const bAt = Date.parse(norm(b.createdAt || b.updatedAt || '')) || 0;
+        if (aAt !== bAt) return aAt - bAt;
+        return lower(a.label).localeCompare(lower(b.label));
+      });
+  }
+
+  function getCustomFieldDef(label) {
+    const wanted = canonicalFieldLabel(label);
+    if (!wanted || isBaseFieldLabel(wanted)) return null;
+    return getSortedCustomFieldDefs().find((item) => lower(item.label) === lower(wanted)) || null;
+  }
+
+  function saveCustomFieldDef(label, updates = {}) {
+    const fieldLabel = canonicalFieldLabel(label);
+    if (!fieldLabel || isBaseFieldLabel(fieldLabel)) return null;
+
+    const defs = getCustomFields();
+    const existing = isPlainObject(defs[fieldLabel]) ? defs[fieldLabel] : {};
+    defs[fieldLabel] = {
+      ...existing,
+      ...deepClone(updates),
+      label: fieldLabel,
+      normalizer: norm(updates.normalizer || existing.normalizer || inferFieldNormalizer(fieldLabel)),
+      createdAt: norm(existing.createdAt || updates.createdAt || nowIso()),
+      updatedAt: nowIso()
+    };
+    saveCustomFields(defs);
+    return defs[fieldLabel];
+  }
+
+  function getAllFieldLabels() {
+    const labels = [...FIELD_ORDER];
+    for (const item of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(item.label);
+      if (!label || labels.some((current) => lower(current) === lower(label))) continue;
+      labels.push(label);
+    }
+    return labels;
+  }
+
+  function inferFieldNormalizer(label) {
+    const text = lower(label);
+    if (!text) return 'text';
+    if (text.includes('url')) return 'url';
+    if (text.includes('sqft') || text.includes('square ft') || text.includes('square feet') || text.includes('square foot')) return 'integer';
+    if (text.includes('bath')) return 'decimal';
+    if (text.includes('bed')) return 'room';
+    if (text.includes('story') || text.includes('stories') || text.includes('year')) return 'integer';
+    if (text.includes('type')) return 'text';
+    return 'text';
   }
 
   function sleep(ms) {
@@ -427,6 +813,9 @@
       name: norm(el.getAttribute('name') || ''),
       role: norm(el.getAttribute('role') || ''),
       ariaLabel: norm(el.getAttribute('aria-label') || ''),
+      dataTestId: norm(el.getAttribute('data-testid') || ''),
+      dataTest: norm(el.getAttribute('data-test') || ''),
+      itemProp: norm(el.getAttribute('itemprop') || ''),
       classTokens: getStableClassTokens(el),
       textFingerprint: norm((el.innerText || el.textContent || '').slice(0, 160))
     };
@@ -456,6 +845,24 @@
     }
 
     if (el.id) return `#${cssEscape(el.id)}`;
+
+    const dataTestId = norm(el.getAttribute('data-testid') || '');
+    if (dataTestId) {
+      const selector = `${el.tagName.toLowerCase()}[data-testid="${cssEscape(dataTestId)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
+
+    const dataTest = norm(el.getAttribute('data-test') || '');
+    if (dataTest) {
+      const selector = `${el.tagName.toLowerCase()}[data-test="${cssEscape(dataTest)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
+
+    const itemProp = norm(el.getAttribute('itemprop') || '');
+    if (itemProp) {
+      const selector = `${el.tagName.toLowerCase()}[itemprop="${cssEscape(itemProp)}"]`;
+      if (isUniqueSelector(selector)) return selector;
+    }
 
     const name = norm(el.getAttribute('name') || '');
     if (name) {
@@ -511,6 +918,9 @@
     if (saved.name) { required += 1; if (saved.name === current.name) score += 1; }
     if (saved.role) { required += 1; if (saved.role === current.role) score += 1; }
     if (saved.ariaLabel) { required += 1; if (saved.ariaLabel === current.ariaLabel) score += 1; }
+    if (saved.dataTestId) { required += 1; if (saved.dataTestId === current.dataTestId) score += 1; }
+    if (saved.dataTest) { required += 1; if (saved.dataTest === current.dataTest) score += 1; }
+    if (saved.itemProp) { required += 1; if (saved.itemProp === current.itemProp) score += 1; }
     if (Array.isArray(saved.classTokens) && saved.classTokens.length) {
       required += 1;
       const currentSet = new Set(current.classTokens || []);
@@ -637,6 +1047,50 @@
     return norm(target.textContent || '') === want;
   }
 
+  function readCurrentFieldValue(target) {
+    if (!(target instanceof Element)) return '';
+    if (target instanceof HTMLSelectElement) {
+      return norm(target.selectedOptions?.[0]?.textContent || target.value || '');
+    }
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      return norm(target.value || target.getAttribute('value') || '');
+    }
+    if (target.getAttribute('contenteditable') === 'true' || target.getAttribute('role') === 'textbox') {
+      return norm(target.innerText || target.textContent || '');
+    }
+    return norm(target.textContent || '');
+  }
+
+  function hasMeaningfulExistingFieldValue(value) {
+    const text = norm(value);
+    if (!text) return false;
+
+    const lowered = lower(text)
+      .replace(/[.:]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!lowered) return false;
+
+    if (
+      lowered === '-' ||
+      lowered === '--' ||
+      lowered === '---' ||
+      lowered === 'none' ||
+      lowered === 'n/a' ||
+      lowered === 'na' ||
+      lowered === 'null' ||
+      lowered === 'select' ||
+      lowered === 'select one' ||
+      lowered === 'select option' ||
+      lowered === 'choose' ||
+      lowered === 'choose one' ||
+      lowered === 'choose option'
+    ) return false;
+
+    if (/^(select|choose)\b/.test(lowered)) return false;
+    return true;
+  }
+
   async function waitForEditableTarget(base) {
     const started = Date.now();
     let chosen = null;
@@ -675,6 +1129,11 @@
       if (!editableTarget) {
         await sleep(220);
         continue;
+      }
+
+      const currentValue = readCurrentFieldValue(target);
+      if (hasMeaningfulExistingFieldValue(currentValue)) {
+        return { ok: true, skipped: 'existing-value', currentValue };
       }
 
       if (target instanceof HTMLSelectElement) {
@@ -839,6 +1298,37 @@
       .filter(Boolean);
 
     return { ticketId, name, tags };
+  }
+
+  function getActivePipelineTicketContext(expectedTicketId = '') {
+    if (!isPipelinePage()) {
+      return {
+        ok: false,
+        reason: isLeadDetailPage()
+          ? 'Lead details page detected; pipeline ticket drawer required'
+          : 'Pipeline ticket drawer required'
+      };
+    }
+
+    if (!isTicketDrawerOpen()) {
+      return { ok: false, reason: 'No open pipeline ticket drawer found' };
+    }
+
+    const info = getOpenTicketInfo();
+    const openTicketId = norm(info.ticketId || '');
+    if (!openTicketId) {
+      return { ok: false, reason: 'Open pipeline ticket id could not be read' };
+    }
+
+    const wantedTicketId = norm(expectedTicketId || '');
+    if (wantedTicketId && openTicketId !== wantedTicketId) {
+      return {
+        ok: false,
+        reason: `Open pipeline ticket ${openTicketId} does not match expected ${wantedTicketId}`
+      };
+    }
+
+    return { ok: true, ticketId: openTicketId, info };
   }
 
   function isTicketDrawerOpen() {
@@ -1045,12 +1535,22 @@
 
   function getTicketOpenTargets(card) {
     const link = card?.querySelector(SEL.customerLink) || null;
-    return [card, link].filter((target, index, list) => target && list.indexOf(target) === index);
+    return [link, card].filter((target, index, list) => target && list.indexOf(target) === index);
   }
 
-  async function waitForOpenTicket(ticketId, timeoutMs = CFG.openTryMs) {
+  function describeTicketOpenTarget(target, card) {
+    if (!(target instanceof Element)) return 'unknown target';
+    if (target === card) return 'ticket card';
+
+    const tag = String(target.tagName || '').toLowerCase();
+    const classes = Array.from(target.classList || []).slice(0, 3).join('.');
+    return classes ? `${tag}.${classes}` : tag;
+  }
+
+  async function waitForOpenTicket(ticketId, timeoutMs = CFG.openTryMs, options = {}) {
     const started = Date.now();
-    let drawerSeenAt = 0;
+    let lastDrawerKey = '';
+    const targetLabel = norm(options?.targetLabel || 'ticket target');
 
     while ((Date.now() - started) < timeoutMs) {
       if (!state.running || state.destroyed) return false;
@@ -1058,13 +1558,16 @@
       if (String(info.ticketId || '') === String(ticketId || '')) return true;
 
       if (isTicketDrawerOpen()) {
-        if (!drawerSeenAt) drawerSeenAt = Date.now();
-        if ((Date.now() - drawerSeenAt) >= CFG.openCheckAfterClickMs) {
-          log(`Drawer detected open from side-actions after 2s | ${ticketId || '(unknown)'}`);
-          return true;
+        const openId = norm(info.ticketId || '');
+        const drawerKey = openId || '__blank__';
+        if (lastDrawerKey !== drawerKey) {
+          lastDrawerKey = drawerKey;
+          if (openId && openId !== norm(ticketId || '')) {
+            log(`Drawer opened for ${openId} after clicking ${targetLabel}; wanted ${ticketId || '(unknown)'}`);
+          } else if (!openId) {
+            log(`Drawer opened after clicking ${targetLabel}, but the ticket ID was not readable yet | wanted ${ticketId || '(unknown)'}`);
+          }
         }
-      } else {
-        drawerSeenAt = 0;
       }
 
       await sleep(120);
@@ -1080,7 +1583,12 @@
       await foregroundSleep(CFG.gapMs);
     }
     if (currentOpen && currentOpen === ticketId && isTicketDrawerOpen()) return true;
-    if (isTicketDrawerOpen()) return true;
+    if (isTicketDrawerOpen()) {
+      log(`Closing stray open drawer before opening ${ticketId} | ${currentOpen || 'unknown ticket'}`);
+      const closed = await closeTicketDrawer();
+      if (!closed) return false;
+      await foregroundSleep(CFG.gapMs);
+    }
 
     const targets = getTicketOpenTargets(card);
     const overallStart = Date.now();
@@ -1091,10 +1599,24 @@
 
       for (const target of targets) {
         if (!target) continue;
+        const targetLabel = describeTicketOpenTarget(target, card);
         strongClick(target);
-        log(`Clicked ticket target, waiting 2s for drawer...`);
-        const ok = await waitForOpenTicket(ticketId, CFG.openTryMs);
+        log(`Clicked ${targetLabel}, waiting for ticket ${ticketId}...`);
+        const ok = await waitForOpenTicket(ticketId, CFG.openTryMs, { targetLabel });
         if (ok) return true;
+
+        if (isTicketDrawerOpen()) {
+          const strayInfo = getOpenTicketInfo();
+          const strayId = norm(strayInfo.ticketId || '');
+          if (strayId && strayId !== norm(ticketId || '')) {
+            log(`Wrong drawer opened for ${strayId} while waiting for ${ticketId}; closing and retrying`);
+          } else {
+            log(`Drawer opened without a matching ticket ID after clicking ${targetLabel}; closing and retrying ${ticketId}`);
+          }
+          const closed = await closeTicketDrawer();
+          if (!closed) return false;
+          await foregroundSleep(CFG.gapMs);
+        }
       }
 
       const okGap = await foregroundSleep(CFG.gapMs);
@@ -1291,8 +1813,18 @@
 
   function getFieldTargetStatusText() {
     const targets = getFieldTargets();
-    const count = FIELD_ORDER.filter((label) => isPlainObject(targets[label]) && norm(targets[label].selector)).length;
-    return `${count}/${FIELD_ORDER.length} saved`;
+    const baseSaved = FIELD_ORDER.filter((label) => isPlainObject(targets[label]) && norm(targets[label].selector)).length;
+    const customDefs = getSortedCustomFieldDefs();
+    if (!customDefs.length) return `${baseSaved}/${FIELD_ORDER.length} saved`;
+
+    const customSaved = customDefs.filter((item) => {
+      const azTarget = targets[item.label];
+      return isPlainObject(azTarget)
+        && norm(azTarget.selector)
+        && isPlainObject(item.providerTarget)
+        && norm(item.providerTarget.selector);
+    }).length;
+    return `${baseSaved}/${FIELD_ORDER.length} base + ${customSaved}/${customDefs.length} custom`;
   }
 
   function getTagTargetStatusText() {
@@ -1302,20 +1834,103 @@
   }
 
   function normalizeRoomValue(value) {
-    return norm(value);
+    const text = norm(value);
+    if (!text) return '';
+    if (/^studio$/i.test(text)) return 'Studio';
+    const numberMatch = text.match(/\d+(?:\.\d+)?/);
+    return numberMatch ? numberMatch[0] : text;
   }
 
   function normalizeHomeType(value) {
     return norm(value);
   }
 
+  function normalizeCustomFieldValue(label, value, normalizer = '') {
+    const mode = lower(normalizer || inferFieldNormalizer(label));
+    const text = norm(value);
+    if (!text) return '';
+
+    if (mode === 'url') {
+      const urlMatch = text.match(/https?:\/\/\S+/i);
+      return norm(urlMatch ? urlMatch[0] : text);
+    }
+
+    if (mode === 'integer') {
+      const numberMatch = text.match(/[\d,]+/);
+      return numberMatch ? numberMatch[0].replace(/,/g, '') : '';
+    }
+
+    if (mode === 'decimal') {
+      const numberMatch = text.match(/\d+(?:\.\d+)?/);
+      return numberMatch ? numberMatch[0] : '';
+    }
+
+    if (mode === 'room') {
+      return normalizeRoomValue(text);
+    }
+
+    return text;
+  }
+
+  function getFallbackCustomFieldValue(label, value, job) {
+    const _job = job;
+    void _job;
+    return normalizeCustomFieldValue(label, value, inferFieldNormalizer(label));
+  }
+
+  function readElementDisplayValue(target) {
+    if (!(target instanceof Element)) return '';
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      return norm(target.value || target.getAttribute('value') || '');
+    }
+    if (target instanceof HTMLSelectElement) {
+      return norm(target.selectedOptions?.[0]?.textContent || target.value || '');
+    }
+    if (target instanceof HTMLAnchorElement && norm(target.href)) {
+      return norm(target.innerText || target.textContent || '') || norm(target.href);
+    }
+    return norm(target.innerText || target.textContent || target.getAttribute('aria-label') || '');
+  }
+
+  function extractCustomFieldValueFromProvider(fieldDef) {
+    if (!isPlainObject(fieldDef) || !isPlainObject(fieldDef.providerTarget)) return '';
+    const target = findSavedElement(fieldDef.providerTarget);
+    if (!(target instanceof Element)) return '';
+    return normalizeCustomFieldValue(fieldDef.label, readElementDisplayValue(target), fieldDef.normalizer);
+  }
+
+  function getCustomFieldValueMap(resultLike = {}) {
+    const source = isPlainObject(resultLike?.customFields) ? resultLike.customFields : {};
+    const values = {};
+    for (const fieldDef of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(fieldDef.label);
+      if (!label) continue;
+      values[label] = norm(source[label]);
+    }
+    return values;
+  }
+
+  function hasAnyCustomFieldValues(resultLike = {}) {
+    return Object.values(getCustomFieldValueMap(resultLike)).some((value) => !!norm(value));
+  }
+
+  function buildScrapedCustomFieldValues() {
+    const customFields = {};
+    for (const fieldDef of getSortedCustomFieldDefs()) {
+      const label = canonicalFieldLabel(fieldDef.label);
+      if (!label) continue;
+      customFields[label] = extractCustomFieldValueFromProvider(fieldDef);
+    }
+    return customFields;
+  }
+
   function extractBedroomTextValue(text) {
     const source = norm(text);
     if (!source) return '';
     const labeledMatch = source.match(/\b(?:Bedrooms?|Beds?)\s*:\s*([^|,;\n]+)/i);
-    if (labeledMatch) return norm(labeledMatch[0]);
+    if (labeledMatch) return norm(labeledMatch[1]);
     if (/\bstudio\b/i.test(source)) return 'Studio';
-    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:bd|bds|bed|beds|bedroom|bedrooms))\b/i);
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?)\s*(?:bd|bds|bed|beds|bedroom|bedrooms)\b/i);
     return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
@@ -1323,8 +1938,8 @@
     const source = norm(text);
     if (!source) return '';
     const labeledMatch = source.match(/\b(?:Bathrooms?|Baths?)\s*:\s*([^|,;\n]+)/i);
-    if (labeledMatch) return norm(labeledMatch[0]);
-    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?\s*(?:ba|bas|bath|baths|bathroom|bathrooms))\b/i);
+    if (labeledMatch) return norm(labeledMatch[1]);
+    const shorthandMatch = source.match(/\b(\d+(?:\.\d+)?)\s*(?:ba|bas|bath|baths|bathroom|bathrooms)\b/i);
     return shorthandMatch ? norm(shorthandMatch[1]) : '';
   }
 
@@ -1344,11 +1959,36 @@
       norm(result.bathrooms),
       norm(result.homeType)
     ].filter(Boolean);
-    return parts.join(' | ') || norm(result.zillowUrl || '') || '-';
+    const customParts = Object.entries(getCustomFieldValueMap(result))
+      .filter(([, value]) => !!norm(value))
+      .slice(0, 3)
+      .map(([label, value]) => `${label}: ${value}`);
+    return [...parts, ...customParts].join(' | ') || norm(result.zillowUrl || '') || '-';
   }
 
   function buildZillowSearchUrl(address) {
     return `https://www.zillow.com/homes/${encodeURIComponent(address)}`;
+  }
+
+  function buildScopedZillowUrl(url, jobId) {
+    const baseUrl = norm(url);
+    const scopeId = norm(jobId);
+    if (!baseUrl || !scopeId) return baseUrl;
+
+    try {
+      const parsed = new URL(baseUrl);
+      parsed.hash = `${ZILLOW_JOB_HASH_KEY}=${encodeURIComponent(scopeId)}`;
+      return parsed.toString();
+    } catch {
+      const cleaned = baseUrl.replace(/#.*$/, '');
+      return `${cleaned}#${ZILLOW_JOB_HASH_KEY}=${encodeURIComponent(scopeId)}`;
+    }
+  }
+
+  function createJobId(ticketId) {
+    const ticket = norm(ticketId || 'az') || 'az';
+    const random = Math.random().toString(36).slice(2, 8);
+    return `${ticket}-${Date.now()}-${random}`;
   }
 
   function isZillowListingPage() {
@@ -1403,26 +2043,100 @@
   }
 
   function getFallbackRoomValue(value) {
-    return firstNonEmpty(normalizeRoomValue(value), '0');
+    return normalizeRoomValue(value);
   }
 
   function getFallbackHomeType(value) {
-    return firstNonEmpty(normalizeHomeType(value), 'FAILED');
+    return normalizeHomeType(value);
   }
 
   function buildFallbackResult(job, overrides = null) {
-    const source = isPlainObject(job?.result) ? job.result : {};
     const extra = isPlainObject(overrides) ? overrides : {};
+    const extraCustom = getCustomFieldValueMap(extra);
+    const customFields = {};
+    for (const label of getAllFieldLabels().filter((item) => !isBaseFieldLabel(item))) {
+      customFields[label] = getFallbackCustomFieldValue(label, extraCustom[label], job);
+    }
     return {
-      zillowUrl: firstNonEmpty(extra.zillowUrl, source.zillowUrl, job?.searchUrl),
-      bedrooms: getFallbackRoomValue(firstNonEmpty(extra.bedrooms, source.bedrooms)),
-      bathrooms: getFallbackRoomValue(firstNonEmpty(extra.bathrooms, source.bathrooms)),
-      homeType: getFallbackHomeType(firstNonEmpty(extra.homeType, source.homeType))
+      zillowUrl: firstNonEmpty(extra.zillowUrl, job?.searchUrl),
+      bedrooms: getFallbackRoomValue(extra.bedrooms),
+      bathrooms: getFallbackRoomValue(extra.bathrooms),
+      homeType: getFallbackHomeType(extra.homeType),
+      customFields
     };
   }
 
   function resultHasRoomFacts(result) {
     return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
+  }
+
+  function buildWebhookPayload(job) {
+    const result = isPlainObject(job?.result) ? job.result : {};
+    return {
+      script: SCRIPT_NAME,
+      version: VERSION,
+      sentAt: nowIso(),
+      ticketId: norm(job?.ticketId || state.activeTicketId || ''),
+      jobId: norm(job?.jobId || ''),
+      address: firstNonEmpty(norm(job?.address || ''), norm(state.currentAddress || '')),
+      zillowUrl: firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || '')),
+      bedrooms: norm(result?.bedrooms || ''),
+      bathrooms: norm(result?.bathrooms || ''),
+      homeType: norm(result?.homeType || ''),
+      customFields: getCustomFieldValueMap(result)
+    };
+  }
+
+  function gmHttpRequest(details) {
+    return new Promise((resolve, reject) => {
+      try {
+        GM_xmlhttpRequest({
+          timeout: 45000,
+          ...details,
+          onload: (response) => resolve(response),
+          onerror: (error) => reject(error || new Error('Request failed')),
+          ontimeout: () => reject(new Error('Request timed out'))
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async function sendWebhookForJob(job) {
+    if (!isPlainObject(job)) return true;
+    if (norm(job.webhookDeliveredAt || '')) return true;
+
+    const endpoint = getWebhookUrl();
+    if (!endpoint) return true;
+
+    const payload = buildWebhookPayload(job);
+    if (!payload.ticketId) {
+      log('Webhook skipped: missing ticket ID');
+      return true;
+    }
+
+    setStatus(`Sending webhook for ${payload.ticketId}`);
+    const response = await gmHttpRequest({
+      method: 'POST',
+      url: endpoint,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      data: JSON.stringify(payload)
+    });
+
+    const status = Number(response?.status || 0);
+    if (!(status >= 200 && status < 300)) {
+      throw new Error(`Webhook HTTP ${status || 'error'}`);
+    }
+
+    job.webhookDeliveredAt = nowIso();
+    job.webhookEndpoint = endpoint;
+    job.updatedAt = nowIso();
+    saveJob(job);
+    log(`Webhook sent for AZ ${payload.ticketId}`);
+    return true;
   }
 
   function reportJobFailureOnce(job) {
@@ -1461,6 +2175,7 @@
 
   function promoteJobToFallback(job, reason, overrides = null) {
     if (!isPlainObject(job)) return false;
+    clearZillowOpenSlot();
     job.status = 'result-ready';
     job.updatedAt = nowIso();
     job.resultReadyAt = nowIso();
@@ -1477,9 +2192,13 @@
   }
 
   function closeCurrentTabSoon() {
-    setTimeout(() => {
-      try { window.close(); } catch {}
-    }, 250);
+    for (const delay of [250, 1200, 2500, 5000]) {
+      setTimeout(() => {
+        try { window.close(); } catch {}
+        try { window.open('', '_self'); } catch {}
+        try { window.close(); } catch {}
+      }, delay);
+    }
   }
 
   function getIsoAgeMs(value) {
@@ -1507,6 +2226,7 @@
 
   function createJob(ticketId, addressInfo) {
     const job = {
+      jobId: createJobId(ticketId || addressInfo?.ticketId || ''),
       ticketId: norm(ticketId || addressInfo?.ticketId || ''),
       address: norm(addressInfo?.address || ''),
       street: norm(addressInfo?.street || ''),
@@ -1527,6 +2247,15 @@
 
   function launchZillowSearch(job) {
     if (!isPlainObject(job) || !norm(job.searchUrl || '')) return false;
+    const launchUrl = buildScopedZillowUrl(job.searchUrl, job.jobId);
+    if (!claimZillowOpenSlot(launchUrl, `job-${norm(job.jobId || '')}`)) {
+      job.status = 'pending';
+      job.updatedAt = nowIso();
+      job.error = 'Waiting for existing Zillow tab to close';
+      saveJob(job);
+      return false;
+    }
+
     job.status = 'searching';
     job.updatedAt = nowIso();
     job.searchOpenedAt = nowIso();
@@ -1541,22 +2270,34 @@
 
     try {
       if (typeof GM_openInTab === 'function') {
-        GM_openInTab(job.searchUrl, { active: false, insert: true, setParent: true });
+        GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
+        setLastZillowOpenAt(job.searchOpenedAt);
         return true;
       }
     } catch {}
 
     try {
-      const opened = window.open(job.searchUrl, '_blank');
+      const opened = window.open(launchUrl, '_blank');
       if (opened) {
         try { opened.blur(); } catch {}
         setTimeout(() => { try { window.focus(); } catch {} }, 40);
         setTimeout(() => { try { window.focus(); } catch {} }, 220);
+        setLastZillowOpenAt(job.searchOpenedAt);
       }
-      return !!opened;
+      if (opened) return true;
     } catch {
-      return false;
+      // Fall through to clear the lease below.
     }
+
+    clearZillowOpenSlot();
+    return false;
+  }
+
+  function currentZillowTabMatchesJob(job) {
+    const tabJobId = syncZillowTabJobIdFromLocation();
+    const activeJobId = norm(job?.jobId || '');
+    if (!tabJobId || !activeJobId) return true;
+    return tabJobId === activeJobId;
   }
 
   function handleExistingZillowJob(job) {
@@ -1585,6 +2326,29 @@
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
 
+      if (jobStatus === 'pending' && !norm(job.searchOpenedAt || '')) {
+        if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+          return true;
+        }
+
+        const opened = launchZillowSearch(job);
+        if (opened) {
+          setStatus(`Opening Zillow for ${state.activeTicketId}`);
+          log(`Opened Zillow search: ${job.searchUrl}`);
+        } else if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+        } else {
+          job.status = 'failed';
+          job.updatedAt = nowIso();
+          job.error = 'Could not open Zillow tab';
+          saveJob(job);
+          setStatus('Could not open Zillow tab');
+          log('Could not open Zillow tab');
+        }
+        return true;
+      }
+
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
         promoteJobToFallback(job, 'Zillow opened but no property data ever loaded');
@@ -1597,6 +2361,8 @@
         if (reopened) {
           setStatus(`Relaunching Zillow for ${state.activeTicketId}`);
           log(`Relaunching stale Zillow search: ${job.searchUrl}`);
+        } else if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
         } else {
           job.status = 'failed';
           job.updatedAt = nowIso();
@@ -1788,7 +2554,8 @@
       zillowUrl: anchor.href,
       bedrooms,
       bathrooms,
-      homeType
+      homeType,
+      customFields: {}
     };
   }
 
@@ -1855,13 +2622,16 @@
   }
 
   function scrapeZillowResult() {
+    const bodyText = document.body?.innerText || '';
     const hints = readZillowScriptHints();
     const bedrooms = normalizeRoomValue(firstNonEmpty(
       extractFirstLabeledValue(['Bedrooms', 'Bedroom', 'Beds', 'Bed']),
+      extractBedroomTextValue(bodyText),
       hints.bedrooms
     ));
     const bathrooms = normalizeRoomValue(firstNonEmpty(
       extractFirstLabeledValue(['Bathrooms', 'Bathroom', 'Baths', 'Bath']),
+      extractBathroomTextValue(bodyText),
       hints.bathrooms
     ));
     const homeType = normalizeHomeType(firstNonEmpty(
@@ -1869,21 +2639,32 @@
       extractHomeTypeFromBody(),
       hints.homeType
     ));
+    const customFields = buildScrapedCustomFieldValues();
 
     return {
       zillowUrl: location.href,
       bedrooms,
       bathrooms,
-      homeType
+      homeType,
+      customFields
     };
   }
 
   async function zillowTick() {
     if (state.destroyed || !isZillowOrigin()) return;
+    if (!claimSingletonPageSlot()) return;
+    recordZillowTabHeartbeat();
 
+    if (await maybeHandleProviderPickerOnZillow()) return;
+
+    syncZillowTabJobIdFromLocation();
     const job = getJob();
-    if (!isPlainObject(job)) return;
+    if (!isPlainObject(job)) {
+      setZillowTabJobId('');
+      return;
+    }
     if (!['pending', 'searching', 'captcha'].includes(norm(job.status || ''))) return;
+    if (!currentZillowTabMatchesJob(job)) return;
 
     const verificationBlock = detectZillowVerificationBlock(job);
     if (verificationBlock) {
@@ -1906,7 +2687,11 @@
 
     if (!isZillowListingPage()) {
       const cardResult = scrapeZillowSearchResultCard(job);
-      const cardHasRoomFacts = resultHasRoomFacts(cardResult);
+      const cardHasAnyFacts = !!cardResult && (
+        resultHasRoomFacts(cardResult)
+        || !!norm(cardResult?.homeType)
+        || hasAnyCustomFieldValues(cardResult)
+      );
       if (!norm(job.listingNavigatedAt || '')) {
         const listing = findLikelyZillowListingLink(job);
         if (listing?.href) {
@@ -1918,13 +2703,14 @@
         }
       }
 
-      if (cardResult && cardHasRoomFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
+      if (cardResult && cardHasAnyFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
         job.status = 'result-ready';
         job.updatedAt = nowIso();
         job.resultReadyAt = nowIso();
         job.result = buildFallbackResult(job, cardResult);
         saveJob(job);
         try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
+        clearZillowOpenSlot();
         closeCurrentTabSoon();
         return;
       }
@@ -1950,11 +2736,12 @@
     const hasBedrooms = !!norm(scraped.bedrooms);
     const hasBathrooms = !!norm(scraped.bathrooms);
     const hasHomeType = !!norm(scraped.homeType);
+    const hasCustomFieldData = hasAnyCustomFieldValues(scraped);
     const hasRoomFacts = hasBedrooms || hasBathrooms;
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
 
-    if (!hasRoomFacts && !hasHomeType) {
+    if (!hasRoomFacts && !hasHomeType && !hasCustomFieldData) {
       if (listingAgeMs >= CFG.zillowFactSettleMs) {
         const reason = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
         promoteJobToFallback(job, reason, {
@@ -1979,6 +2766,7 @@
     saveJob(job);
 
     try { console.log(`[${SCRIPT_NAME}] Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`); } catch {}
+    clearZillowOpenSlot();
     closeCurrentTabSoon();
   }
 
@@ -2364,14 +3152,33 @@
     return true;
   }
 
-  async function applyLegacyTagReplacement() {
+  async function applyConfiguredTagReplacement() {
     const openTagLabels = getOpenTicketTagLabels();
-    const legacyMatches = LEGACY_TAG_RULES.filter((item) =>
-      openTagLabels.some((label) => lowerTagText(label) === lowerTagText(item.sourceLabel))
-    );
+    const targets = getTagTargets();
+    const addRecord = targets.addTag;
+    const removeRecord = targets.removeTag;
 
-    if (!legacyMatches.length) {
-      log('No BQ/BQF replacement needed on this ticket');
+    if (!isPlainObject(addRecord) || !isPlainObject(removeRecord)) {
+      log('Missing configured tag targets');
+      return false;
+    }
+
+    const configuredAddLabel = cleanTagText(addRecord.label || '');
+    const configuredRemoveLabel = cleanTagText(removeRecord.label || '');
+    if (!configuredAddLabel || !configuredRemoveLabel) {
+      log('Configured tag labels are missing');
+      return false;
+    }
+
+    const hasRemoveTag = openTagLabels.some((label) => lowerTagText(label) === lowerTagText(configuredRemoveLabel));
+    const hasAddTag = openTagLabels.some((label) => lowerTagText(label) === lowerTagText(configuredAddLabel));
+
+    if (!hasRemoveTag) {
+      if (hasAddTag) {
+        log(`Tag replacement not needed; ${configuredAddLabel} is already on this ticket`);
+      } else {
+        log(`Tag replacement not needed; ${configuredRemoveLabel} is not on this ticket`);
+      }
       return true;
     }
 
@@ -2396,33 +3203,41 @@
       return false;
     }
 
-    const targets = getTagTargets();
-    const replacements = [];
-    for (const match of legacyMatches) {
-      const record = targets[match.targetKey];
-      if (!isPlainObject(record)) {
-        log(`Missing saved tag target: ${match.targetKey}`);
-        return false;
-      }
-      const resolved = resolveStoredTagValue(selectEl, match.targetKey, record);
-      if (!resolved.value) {
-        log(`Stored tag value missing for ${record.label || match.targetKey}`);
-        return false;
-      }
-      replacements.push({ ...match, record, resolved });
+    const addResolved = resolveStoredTagValue(selectEl, 'addTag', addRecord);
+    if (!addResolved.value) {
+      log(`Stored tag value missing for ${addRecord.label || 'addTag'}`);
+      return false;
     }
 
-    const sourceSet = new Set(replacements.map((item) => lowerTagText(item.sourceLabel)));
-    const targetSet = new Set(replacements.map((item) => lowerTagText(item.resolved.label || item.record.label || '')));
+    const removeResolved = resolveStoredTagValue(selectEl, 'removeTag', removeRecord);
+    if (!removeResolved.value) {
+      log(`Stored tag value missing for ${removeRecord.label || 'removeTag'}`);
+      return false;
+    }
+
+    const addLabel = cleanTagText(addResolved.label || addRecord.label || '');
+    const removeLabel = cleanTagText(removeResolved.label || removeRecord.label || '');
+    if (!addLabel || !removeLabel) {
+      log('Resolved tag labels are missing');
+      return false;
+    }
+
+    if (lowerTagText(addLabel) === lowerTagText(removeLabel)) {
+      log(`Tag replacement skipped; add/remove tag are both ${addLabel}`);
+      return true;
+    }
+
+    const filteredOpenLabels = openTagLabels.filter((label) => {
+      const normalized = lowerTagText(label);
+      if (!normalized) return false;
+      if (normalized === lowerTagText(removeLabel)) return false;
+      if (normalized === lowerTagText(addLabel)) return false;
+      return true;
+    });
+
     const preserveInfo = resolveTagValuesByLabels(
       selectEl,
-      openTagLabels.filter((label) => {
-        const normalized = lowerTagText(label);
-        if (!normalized) return false;
-        if (sourceSet.has(normalized)) return false;
-        if (targetSet.has(normalized)) return false;
-        return true;
-      })
+      filteredOpenLabels
     );
 
     if (preserveInfo.missingLabels.length) {
@@ -2431,57 +3246,100 @@
 
     const nextValues = [
       ...preserveInfo.values,
-      ...replacements.map((item) => item.resolved.value)
+      addResolved.value
     ];
     setSelectedTagValues(selectEl, nextValues);
     await maybeClickTagApplyButton();
 
-    const summary = replacements.map((item) => `${item.sourceLabel}->${item.resolved.label || item.record.label || item.targetKey}`).join(', ');
-    log(`Applied tag replacement: ${summary}`);
+    log(`Applied tag replacement: ${removeLabel}->${addLabel}`);
     return true;
   }
 
   async function applyZillowResultToTicket(job) {
+    const applyContext = getActivePipelineTicketContext(job?.ticketId);
+    if (!applyContext.ok) {
+      setStatus(applyContext.reason);
+      log(`Blocked Zillow apply: ${applyContext.reason}`);
+      return false;
+    }
+
     const targets = getFieldTargets();
-    const fields = {
+    const baseFields = {
       'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
       'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
       'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
       'Home Type': getFallbackHomeType(job?.result?.homeType)
     };
+    const customFields = getCustomFieldValueMap(job?.result);
+    const labels = [
+      ...FIELD_ORDER,
+      ...getSortedCustomFieldDefs()
+        .map((item) => canonicalFieldLabel(item.label))
+        .filter((label) => !!label && !isBaseFieldLabel(label))
+    ];
 
     let changed = false;
-    for (const label of FIELD_ORDER) {
-      const value = norm(fields[label]);
+    let appliedCount = 0;
+    let skippedExistingCount = 0;
+
+    for (const label of labels) {
+      const value = norm(isBaseFieldLabel(label) ? baseFields[label] : customFields[label]);
       if (!value) {
         log(`Skipped blank Zillow field: ${label}`);
         continue;
       }
-      const result = await setFieldValue(targets[label], value);
+
+      const targetRecord = targets[label];
+      if (!isPlainObject(targetRecord) || !norm(targetRecord.selector)) {
+        log(`Skipped unsaved field target: ${label}`);
+        continue;
+      }
+
+      const result = await setFieldValue(targetRecord, value);
       if (result.ok) {
-        changed = true;
-        log(`Filled field: ${label} = ${value}`);
+        if (result.skipped === 'existing-value') {
+          skippedExistingCount += 1;
+          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}`);
+        } else {
+          changed = true;
+          appliedCount += 1;
+          log(`Filled field: ${label} = ${value}`);
+        }
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
       }
       await sleep(250);
     }
 
-    if (!changed) {
-      setStatus('No Zillow fields were applied');
-      log('No Zillow field values were applied');
-      return false;
+    if (changed) {
+      const updated = await clickUpdateButton();
+      if (!updated) {
+        setStatus('Ticket update failed');
+        return false;
+      }
+    } else if (skippedExistingCount) {
+      log(`No ticket field updates needed; ${skippedExistingCount} field(s) were already filled`);
+    } else {
+      log('No Zillow field values needed to be applied');
     }
 
-    await clickUpdateButton();
-
-    const tagsOk = await applyLegacyTagReplacement();
+    const tagsOk = await applyConfiguredTagReplacement();
     if (!tagsOk) {
       setStatus('Tag replacement failed');
       return false;
     }
 
+    const finalContext = getActivePipelineTicketContext(job?.ticketId);
+    if (!finalContext.ok) {
+      setStatus(finalContext.reason);
+      log(`Blocked Zillow completion: ${finalContext.reason}`);
+      return false;
+    }
+
     state.zillowSummary = summarizeResult(job?.result);
+    if (changed) setStatus(`Applied ${appliedCount} Zillow field(s)`);
+    else if (skippedExistingCount) setStatus('Ticket fields already filled');
+    else setStatus('No Zillow field changes needed');
     return true;
   }
 
@@ -2575,6 +3433,10 @@
       job = createJob(state.activeTicketId, addressInfo);
       const opened = launchZillowSearch(job);
       if (!opened) {
+        if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+          return;
+        }
         promoteJobToFallback(job, 'Could not open Zillow tab');
         setStatus('Using fallback Zillow data');
         return;
@@ -2591,6 +3453,8 @@
       if (reopened) {
         setStatus(`Address changed; reopened Zillow for ${state.activeTicketId}`);
         log(`Address changed; reopened Zillow search: ${job.searchUrl}`);
+      } else if (hasFreshZillowOpenBlock()) {
+        setStatus('Waiting for existing Zillow tab');
       } else {
         promoteJobToFallback(job, 'Could not reopen Zillow tab after address change');
         setStatus('Using fallback Zillow data');
@@ -2603,6 +3467,16 @@
     if (norm(job.status) === 'result-ready' && isPlainObject(job.result)) {
       const applied = await applyZillowResultToTicket(job);
       if (!applied) return;
+
+      try {
+        const webhookOk = await sendWebhookForJob(job);
+        if (!webhookOk) return;
+      } catch (error) {
+        const message = norm(error?.message || error || 'Webhook send failed') || 'Webhook send failed';
+        setStatus(message);
+        log(`Webhook failed: ${message}`);
+        return;
+      }
 
       const completedTicketId = state.activeTicketId;
       job.status = 'completed';
@@ -2642,17 +3516,56 @@
     setStatus(`Waiting for Zillow (${remaining}s)`);
   }
 
+  function maybeRefreshForIdleZillowOpenGap() {
+    if (!isAzOrigin() || !state.running || state.destroyed) return false;
+
+    const ageMs = getLastZillowOpenAgeMs();
+    if (ageMs < CFG.azRefreshIfNoZillowOpenMs) return false;
+
+    const roundedMinutes = Math.max(5, Math.floor(ageMs / 60000));
+    setLastZillowOpenAt();
+    setStatus(`Refreshing after ${roundedMinutes}m without Zillow opens`);
+    log(`Refreshing AgencyZoom after ${roundedMinutes} minute(s) without opening a Zillow page`);
+    requestBootstrapReload(`idle-no-zillow-open-${roundedMinutes}m`);
+    return true;
+  }
+
   async function tick() {
     if (state.destroyed || !isAzOrigin()) return;
+    if (isAgencyZoomLoginPage()) return;
+    if (!claimSingletonPageSlot()) return;
     if (state.picker) {
       renderAll();
       return;
     }
     if (!state.running) {
       setStatus('Stopped');
+      state.lastWrongAzUrl = '';
       renderAll();
       return;
     }
+    if (!isPipelinePage()) {
+      const wrongUrl = String(location.href || '');
+      const wrongPageReason = isLeadDetailPage()
+        ? 'Lead details page detected; returning to pipeline'
+        : 'Wrong AgencyZoom page detected; returning to pipeline';
+      if (state.lastWrongAzUrl !== wrongUrl) {
+        state.lastWrongAzUrl = wrongUrl;
+        log(wrongPageReason);
+      }
+      setStatus(wrongPageReason);
+      state.activeTicketId = '';
+      state.mainReadyTicketId = '';
+      try {
+        location.replace(PIPELINE_ROOT_URL);
+      } catch {
+        try { location.href = PIPELINE_ROOT_URL; } catch {}
+      }
+      renderAll();
+      return;
+    }
+    state.lastWrongAzUrl = '';
+    if (maybeRefreshForIdleZillowOpenGap()) return;
     if (state.busy) return;
 
     state.busy = true;
@@ -2688,11 +3601,21 @@
         requestedAt: nowIso()
       }));
     } catch {}
-    location.reload();
+    try {
+      if (isPipelinePage()) {
+        location.reload();
+        return;
+      }
+    } catch {}
+    try {
+      location.replace(PIPELINE_ROOT_URL);
+      return;
+    } catch {}
+    try { location.href = PIPELINE_ROOT_URL; } catch {}
   }
 
   function ensureHoverBox() {
-    if (state.hoverBox || !isAzOrigin()) return;
+    if (state.hoverBox) return;
     const box = document.createElement('div');
     box.setAttribute(UI_ATTR, '1');
     Object.assign(box.style, {
@@ -2706,6 +3629,42 @@
     });
     document.documentElement.appendChild(box);
     state.hoverBox = box;
+  }
+
+  function ensureProviderBanner() {
+    if (state.providerBanner || !isZillowOrigin()) return;
+    const banner = document.createElement('div');
+    banner.setAttribute(UI_ATTR, '1');
+    Object.assign(banner.style, {
+      position: 'fixed',
+      left: '12px',
+      right: '12px',
+      bottom: '12px',
+      zIndex: String(CFG.zIndex),
+      padding: '12px 14px',
+      borderRadius: '14px',
+      background: 'rgba(15, 23, 42, 0.96)',
+      color: '#e5e7eb',
+      border: '1px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 16px 38px rgba(0,0,0,0.35)',
+      font: '13px/1.45 Segoe UI, Tahoma, Arial, sans-serif'
+    });
+    banner.innerHTML = `<div ${UI_ATTR}="1" style="font-weight:800;margin-bottom:4px;">${SCRIPT_NAME}</div><div ${UI_ATTR}="1" id="tm-az-zillow-provider-banner-text">Preparing Zillow field capture...</div>`;
+    document.documentElement.appendChild(banner);
+    state.providerBanner = banner;
+  }
+
+  function setProviderBannerMessage(message) {
+    if (!isZillowOrigin()) return;
+    ensureProviderBanner();
+    const node = state.providerBanner?.querySelector?.('#tm-az-zillow-provider-banner-text');
+    if (node) node.textContent = norm(message || '') || 'Preparing Zillow field capture...';
+  }
+
+  function clearProviderBanner() {
+    if (!state.providerBanner) return;
+    try { state.providerBanner.remove(); } catch {}
+    state.providerBanner = null;
   }
 
   function isUiElement(el) {
@@ -2736,16 +3695,210 @@
     state.hoverBox.style.height = `${rect.height}px`;
   }
 
-  function startPicker(type) {
+  function buildFieldPickerItems(labels) {
+    return (Array.isArray(labels) ? labels : [])
+      .map((label) => canonicalFieldLabel(label))
+      .filter(Boolean)
+      .map((label) => ({ key: label, label }));
+  }
+
+  function openProviderCaptureTab(request) {
+    if (!isPlainObject(request) || !norm(request.searchUrl || '')) return false;
+    if (!claimZillowOpenSlot(request.searchUrl, `provider-${canonicalFieldLabel(request.label || '')}`)) return false;
+    try {
+      if (typeof GM_openInTab === 'function') {
+        GM_openInTab(request.searchUrl, { active: true, insert: true, setParent: true });
+        setLastZillowOpenAt();
+        return true;
+      }
+    } catch {}
+
+    try {
+      const opened = window.open(request.searchUrl, '_blank');
+      if (opened) {
+        try { opened.focus(); } catch {}
+        setLastZillowOpenAt();
+      }
+      if (opened) return true;
+    } catch {
+      // Fall through to clear the lease below.
+    }
+
+    clearZillowOpenSlot();
+    return false;
+  }
+
+  function requestCustomFieldProviderCapture(fieldConfig) {
+    if (!isPlainObject(fieldConfig)) return false;
+
+    const label = canonicalFieldLabel(fieldConfig.label);
+    if (!label || isBaseFieldLabel(label)) return false;
+
+    const addressInfo = isPlainObject(fieldConfig.addressInfo) ? fieldConfig.addressInfo : {};
+    const request = {
+      label,
+      normalizer: norm(fieldConfig.normalizer || inferFieldNormalizer(label)),
+      ticketId: norm(fieldConfig.ticketId || addressInfo.ticketId || ''),
+      address: norm(addressInfo.address || fieldConfig.address || ''),
+      street: norm(addressInfo.street || fieldConfig.street || ''),
+      city: norm(addressInfo.city || fieldConfig.city || ''),
+      state: norm(addressInfo.state || fieldConfig.state || ''),
+      postal: norm(addressInfo.postal || fieldConfig.postal || ''),
+      searchUrl: firstNonEmpty(fieldConfig.searchUrl, buildZillowSearchUrl(addressInfo.address || fieldConfig.address || '')),
+      requestedAt: nowIso()
+    };
+
+    saveCustomFieldDef(label, { normalizer: request.normalizer });
+    saveProviderPickerRequest(request);
+
+    const opened = openProviderCaptureTab(request);
+    if (opened) {
+      log(`Opened Zillow field capture for ${label}: ${request.searchUrl}`);
+    } else {
+      log(`Could not auto-open Zillow for ${label}; open this URL manually: ${request.searchUrl}`);
+    }
+    return opened;
+  }
+
+  async function startSingleFieldTargetFlow() {
     if (!isAzOrigin() || state.busy || state.picker) return;
+
+    const raw = window.prompt('Field name to add or update', 'Home Sqft');
+    const fieldLabel = canonicalFieldLabel(raw);
+    if (!fieldLabel) {
+      log('Add field target canceled');
+      return;
+    }
+
+    const builtIn = isBaseFieldLabel(fieldLabel);
+    let customField = null;
+
+    if (!builtIn) {
+      const openTicket = getOpenTicketInfo();
+      const ticketId = norm(openTicket.ticketId || '');
+      if (!ticketId) {
+        setStatus('Open a ticket on Main first');
+        log(`Open the AgencyZoom ticket before adding ${fieldLabel}`);
+        return;
+      }
+
+      const mainReady = await ensureMainTab();
+      if (!mainReady) {
+        setStatus('Main tab not ready');
+        return;
+      }
+
+      const addressInfo = readAzAddressInfo(ticketId);
+      if (!norm(addressInfo.address)) {
+        setStatus('Address read failed');
+        log(`Could not read address for ${fieldLabel} provider capture`);
+        return;
+      }
+
+      customField = {
+        label: fieldLabel,
+        normalizer: inferFieldNormalizer(fieldLabel),
+        ticketId,
+        addressInfo,
+        searchUrl: buildZillowSearchUrl(addressInfo.address)
+      };
+      saveCustomFieldDef(fieldLabel, { normalizer: customField.normalizer });
+    }
+
+    startPicker('field-single', {
+      items: buildFieldPickerItems([fieldLabel]),
+      customField,
+      doneMessage: builtIn
+        ? `${fieldLabel} target saved`
+        : `${fieldLabel} AZ target saved; select the Zillow source in the opened tab`
+    });
+  }
+
+  function startMissingFieldPicker() {
+    if (!isAzOrigin() || state.busy || state.picker) return;
+    const targets = getFieldTargets();
+    const missing = FIELD_ORDER.filter((label) => !(isPlainObject(targets[label]) && norm(targets[label].selector)));
+    if (!missing.length) {
+      setStatus('No missing base field targets');
+      log('No missing base field targets');
+      return;
+    }
+
+    startPicker('fields', {
+      items: buildFieldPickerItems(missing),
+      doneMessage: 'Missing field targets saved'
+    });
+  }
+
+  async function maybeHandleProviderPickerOnZillow() {
+    const request = getProviderPickerRequest();
+    if (!isPlainObject(request)) {
+      if (state.picker?.type === 'provider') stopPicker('', false);
+      clearProviderBanner();
+      return false;
+    }
+
+    const label = canonicalFieldLabel(request.label);
+    if (!label) {
+      clearProviderPickerRequest();
+      clearProviderBanner();
+      return false;
+    }
+
+    const activeProviderLabel = state.picker?.type === 'provider'
+      ? canonicalFieldLabel(state.picker.items?.[state.picker.index]?.label || '')
+      : '';
+    if (state.picker?.type === 'provider' && activeProviderLabel && activeProviderLabel !== label) {
+      stopPicker('', false);
+    }
+
+    if (!isZillowListingPage()) {
+      const listing = findLikelyZillowListingLink(request);
+      if (listing?.href && norm(listing.href) !== norm(location.href)) {
+        setProviderBannerMessage(`Opening the Zillow listing for ${label}...`);
+        try { location.assign(listing.href); } catch {}
+        return true;
+      }
+
+      setProviderBannerMessage(`Field capture for ${label}: open the Zillow listing for ${request.address || 'this address'}, then click the source element.`);
+      return true;
+    }
+
+    if (state.picker?.type !== 'provider') {
+      startPicker('provider', {
+        items: buildFieldPickerItems([label]),
+        providerRequest: request,
+        doneMessage: `Zillow source saved for ${label}`
+      });
+    } else {
+      setProviderBannerMessage(`Field capture for ${label}: click the Zillow source element. Press Esc to cancel.`);
+    }
+
+    return true;
+  }
+
+  function startPicker(type, options = {}) {
+    const allowOnZillow = type === 'provider';
+    if ((!allowOnZillow && !isAzOrigin()) || (allowOnZillow && !isZillowOrigin()) || state.busy || state.picker) return;
+
+    const items = Array.isArray(options.items) && options.items.length
+      ? options.items.map((item) => deepClone(item))
+      : (type === 'fields'
+        ? buildFieldPickerItems(FIELD_ORDER)
+        : TAG_ORDER.map((item) => deepClone(item)));
+    if (!items.length) {
+      log(`No picker items found for ${type}`);
+      return;
+    }
 
     state.picker = {
       type,
-      items: type === 'fields'
-        ? FIELD_ORDER.map((label) => ({ key: label, label }))
-        : TAG_ORDER.map((item) => deepClone(item)),
+      items,
       index: 0,
-      primerPending: type === 'tags'
+      primerPending: type === 'tags',
+      customField: isPlainObject(options.customField) ? deepClone(options.customField) : null,
+      providerRequest: isPlainObject(options.providerRequest) ? deepClone(options.providerRequest) : null,
+      doneMessage: norm(options.doneMessage || '')
     };
 
     ensureHoverBox();
@@ -2775,7 +3928,13 @@
     };
 
     state.pickerKeydown = (event) => {
-      if (event.key === 'Escape') stopPicker('Picker canceled');
+      if (event.key !== 'Escape') return;
+      if (state.picker?.type === 'provider') {
+        clearProviderPickerRequest();
+        stopPicker('Provider picker canceled');
+        return;
+      }
+      stopPicker('Picker canceled');
     };
 
     document.addEventListener('mousemove', state.pickerMove, true);
@@ -2786,6 +3945,9 @@
     if (type === 'tags') {
       setStatus(`Picker: click ${current.label}`);
       log(`Tag picker started: first click ignored. Use it to open tags, then click ${current.label}`);
+    } else if (type === 'provider') {
+      setProviderBannerMessage(`Field capture for ${current.label}: click the Zillow source element. Press Esc to cancel.`);
+      log(`Zillow provider picker started: click the source for ${current.label}`);
     } else {
       setStatus(`Picker: click ${current.label}`);
       log(`Field picker started: click ${current.label}`);
@@ -2795,6 +3957,7 @@
 
   function stopPicker(message, logIt = true) {
     if (!state.picker) return;
+    const pickerType = state.picker.type;
 
     document.removeEventListener('mousemove', state.pickerMove, true);
     document.removeEventListener('click', state.pickerClick, true);
@@ -2805,9 +3968,10 @@
     state.picker = null;
     state.hoveredEl = null;
     updateHoverBox(null);
+    if (pickerType === 'provider') clearProviderBanner();
 
     if (logIt && message) log(message);
-    setStatus(state.running ? 'Ready' : 'Stopped');
+    if (isAzOrigin()) setStatus(state.running ? 'Ready' : 'Stopped');
     renderAll();
   }
 
@@ -2815,7 +3979,7 @@
     if (!state.picker) return;
     const item = state.picker.items[state.picker.index];
 
-    if (state.picker.type === 'fields') {
+    if (state.picker.type === 'fields' || state.picker.type === 'field-single') {
       const selector = buildStableSelector(target);
       if (!selector) {
         log('Picker failed: could not build stable selector');
@@ -2832,6 +3996,35 @@
       const targets = getFieldTargets();
       targets[item.key] = record;
       saveTargets(GM_KEYS.fieldTargets, targets);
+      if (state.picker.type === 'field-single' && isPlainObject(state.picker.customField)) {
+        requestCustomFieldProviderCapture(state.picker.customField);
+      }
+    } else if (state.picker.type === 'provider') {
+      const selector = buildStableSelector(target);
+      if (!selector) {
+        log('Provider picker failed: could not build stable selector');
+        return;
+      }
+
+      const request = state.picker.providerRequest || getProviderPickerRequest() || {};
+      const label = canonicalFieldLabel(item.label || request.label || '');
+      if (!label) {
+        log('Provider picker failed: field label missing');
+        return;
+      }
+
+      saveCustomFieldDef(label, {
+        normalizer: norm(request.normalizer || inferFieldNormalizer(label)),
+        providerTarget: {
+          selector,
+          fingerprint: buildFingerprint(target),
+          label: readElementDisplayValue(target) || label,
+          href: target instanceof HTMLAnchorElement ? norm(target.href || '') : '',
+          sourceUrl: location.href,
+          savedAt: nowIso()
+        }
+      });
+      clearProviderPickerRequest();
     } else {
       const record = buildTagTargetRecord(target);
       if (!record) {
@@ -2850,7 +4043,13 @@
 
     state.picker.index += 1;
     if (state.picker.index >= state.picker.items.length) {
-      stopPicker(state.picker.type === 'fields' ? 'Field targets saved' : 'Tag targets saved');
+      const doneMessage = state.picker.doneMessage
+        || (state.picker.type === 'tags'
+          ? 'Tag targets saved'
+          : state.picker.type === 'provider'
+            ? 'Zillow provider target saved'
+            : 'Field targets saved');
+      stopPicker(doneMessage);
       return;
     }
 
@@ -2861,6 +4060,8 @@
 
   function resetFieldTargets() {
     saveTargets(GM_KEYS.fieldTargets, {});
+    saveCustomFields({});
+    clearProviderPickerRequest();
     log('Field targets reset');
     renderAll();
   }
@@ -2912,6 +4113,8 @@
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-clear-job" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">CLEAR JOB</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SET FIELD TARGETS</button>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-missing-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SET MISSING FIELDS</button>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-add-field-target" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">ADD FIELD TARGET</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-reset-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#f59e0b;color:#111827;font-weight:800;cursor:pointer;">SET TAG TARGETS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-reset-tags" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#475569;color:#fff;font-weight:800;cursor:pointer;">RESET TAGS</button>
@@ -2924,6 +4127,11 @@
           <div ${UI_ATTR}="1" style="opacity:.72;">Fields</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-fields">0/4 saved</div>
           <div ${UI_ATTR}="1" style="opacity:.72;">Tags</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-tags">0/2 saved</div>
         </div>
+        <div ${UI_ATTR}="1" style="margin-bottom:10px;">
+          <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;margin-bottom:4px;">Webhook URL</div>
+          <input ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-url" type="text" placeholder="https://..." style="width:100%;border:1px solid #243041;border-radius:10px;background:#020617;color:#e5e7eb;padding:8px 10px;">
+          <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;margin-top:5px;">Active: <span ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-active">(empty)</span></div>
+        </div>
         <textarea ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-logs" readonly style="width:100%;min-height:170px;max-height:240px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
     `;
@@ -2934,6 +4142,8 @@
     state.ui.toggle = panel.querySelector('#tm-az-zillow-ticket-enricher-toggle');
     state.ui.clearJob = panel.querySelector('#tm-az-zillow-ticket-enricher-clear-job');
     state.ui.setFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-fields');
+    state.ui.setMissingFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-missing-fields');
+    state.ui.addFieldTarget = panel.querySelector('#tm-az-zillow-ticket-enricher-add-field-target');
     state.ui.resetFields = panel.querySelector('#tm-az-zillow-ticket-enricher-reset-fields');
     state.ui.setTags = panel.querySelector('#tm-az-zillow-ticket-enricher-set-tags');
     state.ui.resetTags = panel.querySelector('#tm-az-zillow-ticket-enricher-reset-tags');
@@ -2943,6 +4153,8 @@
     state.ui.zillow = panel.querySelector('#tm-az-zillow-ticket-enricher-zillow');
     state.ui.fields = panel.querySelector('#tm-az-zillow-ticket-enricher-fields');
     state.ui.tags = panel.querySelector('#tm-az-zillow-ticket-enricher-tags');
+    state.ui.webhookUrl = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-url');
+    state.ui.activeWebhook = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-active');
     state.ui.logs = panel.querySelector('#tm-az-zillow-ticket-enricher-logs');
 
     makeDraggable(panel, state.ui.head);
@@ -2958,6 +4170,7 @@
         return;
       }
 
+      setLastZillowOpenAt();
       log('Automation started');
       if (isPipelinePage() && !getOpenTicketInfo().ticketId) {
         log('Reloading pipeline before scan');
@@ -2978,9 +4191,23 @@
     });
 
     state.ui.setFields?.addEventListener('click', () => startPicker('fields'));
+    state.ui.setMissingFields?.addEventListener('click', startMissingFieldPicker);
+    state.ui.addFieldTarget?.addEventListener('click', startSingleFieldTargetFlow);
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
     state.ui.setTags?.addEventListener('click', () => startPicker('tags'));
     state.ui.resetTags?.addEventListener('click', resetTagTargets);
+
+    state.ui.webhookUrl?.addEventListener('input', () => { persistWebhookFromUi(false); });
+    state.ui.webhookUrl?.addEventListener('change', () => { persistWebhookFromUi(true); });
+    state.ui.webhookUrl?.addEventListener('blur', () => { persistWebhookFromUi(true); });
+    state.ui.webhookUrl?.addEventListener('paste', () => {
+      setTimeout(() => persistWebhookFromUi(true), 0);
+    });
+    state.ui.webhookUrl?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      persistWebhookFromUi(true);
+      try { state.ui.webhookUrl.blur(); } catch {}
+    });
   }
 
   function renderAll() {
@@ -2997,15 +4224,26 @@
     }
     if (state.ui.fields) state.ui.fields.textContent = getFieldTargetStatusText();
     if (state.ui.tags) state.ui.tags.textContent = getTagTargetStatusText();
+    updateActiveWebhookUi(readWebhookUrl());
 
     if (state.ui.toggle) {
       state.ui.toggle.textContent = state.running ? 'STOP' : 'START';
       state.ui.toggle.style.background = state.running ? '#b91c1c' : '#15803d';
     }
 
-    if (state.ui.clearJob) {
-      state.ui.clearJob.disabled = state.busy;
-      state.ui.clearJob.style.opacity = state.busy ? '0.65' : '1';
+    const controlsLocked = state.busy || !!state.picker;
+    for (const button of [
+      state.ui.clearJob,
+      state.ui.setFields,
+      state.ui.setMissingFields,
+      state.ui.addFieldTarget,
+      state.ui.resetFields,
+      state.ui.setTags,
+      state.ui.resetTags
+    ]) {
+      if (!button) continue;
+      button.disabled = controlsLocked;
+      button.style.opacity = controlsLocked ? '0.65' : '1';
     }
 
     renderLogs();
