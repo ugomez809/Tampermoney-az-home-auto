@@ -7,3 +7,5 @@ https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricoch
 ```
 
 Tampermonkey uses the same raw GitHub URL in `@updateURL` and `@downloadURL`.
+
+The three-dot menu includes `Submit` and `Pick Element`. Picked elements are sent on every webhook payload through fixed columns `extraField01Name` / `extraField01Value` through `extraField10Name` / `extraField10Value`.
