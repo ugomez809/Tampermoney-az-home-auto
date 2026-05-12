@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.4
+// @version      1.3.5
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -27,7 +27,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.4';
+  const VERSION = '1.3.5';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
@@ -89,11 +89,12 @@
     openTotalMs: 12000,
     openCheckAfterClickMs: 2000,
     frontStableMs: 1200,
-    gapMs: 220,
+    gapMs: 2000,
+    majorStepDelayMs: 2000,
     mainReadyMs: 10000,
-    filterSettleMs: 1500,
-    actionSettleMs: 900,
-    updateSettleMs: 1200,
+    filterSettleMs: 2000,
+    actionSettleMs: 2000,
+    updateSettleMs: 2000,
     closeWaitMs: 5000,
     zillowWaitMs: 30000,
     zillowCaptchaRefreshMs: 180000,
@@ -1702,7 +1703,7 @@
 
     showBootstrapTab(mainTab);
     log('Clicked: Main tab');
-    await sleep(500);
+    await sleep(CFG.majorStepDelayMs);
 
     const ready = await waitFor(() => isMainTabReady(), CFG.mainReadyMs);
 
@@ -3308,7 +3309,7 @@
       } else {
         log(`Field failed: ${label} | ${result.reason}`);
       }
-      await sleep(250);
+      await sleep(CFG.majorStepDelayMs);
     }
 
     if (changed) {
@@ -3367,6 +3368,8 @@
         setStatus(`${CFG.savedQueryName} selected`);
         return;
       }
+
+      await sleep(CFG.majorStepDelayMs);
     }
 
     let openTicket = getOpenTicketInfo();
@@ -3391,6 +3394,7 @@
         return;
       }
 
+      await sleep(CFG.majorStepDelayMs);
       openTicket = getOpenTicketInfo();
       state.activeTicketId = norm(openTicket.ticketId || ticketId);
     }
@@ -3417,6 +3421,7 @@
       return;
     }
 
+    await sleep(CFG.majorStepDelayMs);
     const addressInfo = readAzAddressInfo(state.activeTicketId);
     state.currentAddress = norm(addressInfo.address || '');
     if (!state.currentAddress) {
@@ -3465,9 +3470,11 @@
     state.zillowSummary = summarizeResult(job?.result);
 
     if (norm(job.status) === 'result-ready' && isPlainObject(job.result)) {
+      await sleep(CFG.majorStepDelayMs);
       const applied = await applyZillowResultToTicket(job);
       if (!applied) return;
 
+      await sleep(CFG.majorStepDelayMs);
       try {
         const webhookOk = await sendWebhookForJob(job);
         if (!webhookOk) return;
@@ -3484,6 +3491,7 @@
       job.updatedAt = nowIso();
       saveJob(job);
 
+      await sleep(CFG.majorStepDelayMs);
       await closeTicketDrawer();
       clearJob();
       state.activeTicketId = '';
