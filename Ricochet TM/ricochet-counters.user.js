@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ricochet Pickup / Hangup Counters
 // @namespace    local.ricochet-counters
-// @version      0.4.0
+// @version      0.5.0
 // @description  Adds Pickup and Hangup counters to Ricochet and sends click/report webhooks.
 // @match        https://giainc.ricochet.me/*
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
@@ -14,15 +14,14 @@
 (function () {
   'use strict';
 
-  const SCRIPT_VERSION = '0.4.0';
+  const SCRIPT_VERSION = '0.5.0';
   const HOST_ID = 'rc-call-counter-host';
   const STYLE_ID = 'rc-call-counter-style';
-  const PICKER_HIGHLIGHT_ID = 'rc-field-picker-highlight';
-  const PICKER_BANNER_ID = 'rc-field-picker-banner';
   const STORAGE_PREFIX = 'rcCallCounter.';
   const ALLOW_NEGATIVE = false;
-  const EXTRA_FIELD_COUNT = 10;
   const CALIFORNIA_TIME_ZONE = 'America/Los_Angeles';
+  const COUNTER_RESET_HOUR = 23;
+  const COUNTER_RESET_MINUTE = 59;
   const DAILY_REPORT_HOUR = 17;
   const DAILY_REPORT_MINUTE = 25;
   const CLICK_WEBHOOK_URL = 'https://hooks.zapier.com/hooks/catch/20214705/4ygs2a0/';
@@ -35,11 +34,9 @@
   const reportSentDateKey = `${STORAGE_PREFIX}reportSentDate`;
   const reportLockKey = `${STORAGE_PREFIX}reportLock`;
   const clickedByOverrideKey = `${STORAGE_PREFIX}clickedByOverride`;
-  const extraFieldsKey = `${STORAGE_PREFIX}extraFields`;
 
   let globalListenersAttached = false;
   let dailyReportTimerStarted = false;
-  let activePicker = null;
 
   const counters = [
     { id: 'pickup', label: 'Pick Ups', payloadKey: 'pickupCount' },
@@ -125,6 +122,16 @@
     return `${parts.year}-${parts.month}-${parts.day}`;
   }
 
+  function getCounterDateKey(date = new Date()) {
+    const parts = getCaliforniaClockParts(date);
+    const hour = Number(parts.hour);
+    const minute = Number(parts.minute);
+    const isResetWindow = hour > COUNTER_RESET_HOUR || (hour === COUNTER_RESET_HOUR && minute >= COUNTER_RESET_MINUTE);
+    const counterDate = isResetWindow ? new Date(date.getTime() + 60000) : date;
+
+    return getCaliforniaDateKey(counterDate);
+  }
+
   function getCaliforniaTimestamp(date = new Date()) {
     const parts = getCaliforniaParts(date);
     const displayTime = `${parts.hour}:${parts.minute}:${parts.second}${parts.dayPeriod ? ` ${parts.dayPeriod}` : ''}`;
@@ -140,7 +147,7 @@
   }
 
   function ensureCurrentCounterDate() {
-    const today = getCaliforniaDateKey();
+    const today = getCounterDateKey();
     const savedDate = storageGet(counterDateKey);
 
     if (savedDate && savedDate !== today) {
@@ -364,42 +371,6 @@
         outline: none;
       }
 
-      #${PICKER_HIGHLIGHT_ID} {
-        position: fixed;
-        display: none;
-        pointer-events: none;
-        border: 2px solid #4da3df;
-        border-radius: 3px;
-        background: rgba(77, 163, 223, 0.14);
-        box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.18);
-        z-index: 2147483646;
-      }
-
-      #${PICKER_BANNER_ID} {
-        position: fixed;
-        left: 50%;
-        top: 62px;
-        transform: translateX(-50%);
-        display: none;
-        max-width: min(520px, calc(100vw - 24px));
-        padding: 8px 12px;
-        color: #fff;
-        background: rgba(44, 64, 84, 0.96);
-        border: 1px solid rgba(255, 255, 255, 0.25);
-        border-radius: 4px;
-        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
-        font-family: inherit;
-        font-size: 12px;
-        font-weight: 700;
-        line-height: 1.3;
-        text-align: center;
-        z-index: 2147483647;
-      }
-
-      body.rc-field-picker-active {
-        cursor: crosshair !important;
-      }
-
       @media (max-width: 767px) {
         #${HOST_ID}.rc-call-counter-host {
           justify-content: flex-start;
@@ -453,7 +424,6 @@
         </button>
         <div class="rc-counter-options-menu" role="menu">
           <button class="rc-counter-menu-action rc-counter-submit" type="button" role="menuitem">Submit</button>
-          <button class="rc-counter-menu-action rc-counter-pick-field" type="button" role="menuitem">Pick Element</button>
         </div>
       </div>
     `;
@@ -480,15 +450,6 @@
         event.stopPropagation();
         sendReportWebhook('manual_submit');
         setOptionsMenuOpen(host, false);
-        return;
-      }
-
-      const pickFieldButton = event.target.closest('.rc-counter-pick-field');
-      if (pickFieldButton) {
-        event.preventDefault();
-        event.stopPropagation();
-        setOptionsMenuOpen(host, false);
-        promptForElementPicker();
         return;
       }
 
@@ -529,363 +490,6 @@
   function toggleOptionsMenu(host) {
     const options = host.querySelector('.rc-counter-options');
     setOptionsMenuOpen(host, !options.classList.contains('is-open'));
-  }
-
-  function getSlotName(index) {
-    return String(index + 1).padStart(2, '0');
-  }
-
-  function createEmptyExtraFields() {
-    return Array.from({ length: EXTRA_FIELD_COUNT }, () => ({
-      name: '',
-      selector: '',
-      value: '',
-      updatedAtCalifornia: '',
-    }));
-  }
-
-  function normalizeExtraFields(fields) {
-    const normalized = createEmptyExtraFields();
-    if (!Array.isArray(fields)) return normalized;
-
-    fields.slice(0, EXTRA_FIELD_COUNT).forEach((field, index) => {
-      normalized[index] = {
-        name: field && field.name ? String(field.name) : '',
-        selector: field && field.selector ? String(field.selector) : '',
-        value: field && field.value ? String(field.value) : '',
-        updatedAtCalifornia: field && field.updatedAtCalifornia ? String(field.updatedAtCalifornia) : '',
-      };
-    });
-
-    return normalized;
-  }
-
-  function loadExtraFields() {
-    try {
-      return normalizeExtraFields(JSON.parse(storageGet(extraFieldsKey, '[]')));
-    } catch (error) {
-      console.warn('[Ricochet Counters] Unable to parse saved picker fields.', error);
-      return createEmptyExtraFields();
-    }
-  }
-
-  function saveExtraFields(fields) {
-    storageSet(extraFieldsKey, JSON.stringify(normalizeExtraFields(fields)));
-  }
-
-  function parseFieldPromptResponse(value) {
-    const trimmed = String(value || '').replace(/\s+/g, ' ').trim();
-    if (!trimmed) return null;
-
-    const slotMatch = trimmed.match(/^(?:slot\s*)?([1-9]|10)\s*[:.)-]\s*(.+)$/i);
-    if (!slotMatch) {
-      return {
-        name: trimmed,
-        slotIndex: null,
-      };
-    }
-
-    return {
-      name: slotMatch[2].trim(),
-      slotIndex: Number(slotMatch[1]) - 1,
-    };
-  }
-
-  function findExtraFieldSlot(fields, requestedSlotIndex, fieldName) {
-    if (Number.isInteger(requestedSlotIndex) && requestedSlotIndex >= 0 && requestedSlotIndex < EXTRA_FIELD_COUNT) {
-      return requestedSlotIndex;
-    }
-
-    const matchingIndex = fields.findIndex((field) => field.name.toLowerCase() === fieldName.toLowerCase());
-    if (matchingIndex >= 0) return matchingIndex;
-
-    const emptyIndex = fields.findIndex((field) => !field.name && !field.selector && !field.value);
-    return emptyIndex >= 0 ? emptyIndex : EXTRA_FIELD_COUNT - 1;
-  }
-
-  function promptForElementPicker() {
-    if (activePicker) cancelElementPicker();
-
-    const response = window.prompt('Field name for the payload. Optional: use "1: Field Name" through "10: Field Name" to replace a specific slot.');
-    if (response === null) return;
-
-    const parsed = parseFieldPromptResponse(response);
-    if (!parsed || !parsed.name) return;
-
-    startElementPicker(parsed.name, parsed.slotIndex);
-  }
-
-  function ensurePickerElements() {
-    let highlight = document.getElementById(PICKER_HIGHLIGHT_ID);
-    if (!highlight) {
-      highlight = document.createElement('div');
-      highlight.id = PICKER_HIGHLIGHT_ID;
-      document.body.appendChild(highlight);
-    }
-
-    let banner = document.getElementById(PICKER_BANNER_ID);
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = PICKER_BANNER_ID;
-      document.body.appendChild(banner);
-    }
-
-    return { highlight, banner };
-  }
-
-  function startElementPicker(fieldName, slotIndex) {
-    const elements = ensurePickerElements();
-    const slotLabel = Number.isInteger(slotIndex) ? `extraField${getSlotName(slotIndex)}` : 'next extra field';
-
-    activePicker = {
-      fieldName,
-      slotIndex,
-      highlight: elements.highlight,
-      banner: elements.banner,
-    };
-
-    elements.banner.textContent = `Pick element for "${fieldName}" (${slotLabel}). Press Esc to cancel.`;
-    elements.banner.style.display = 'block';
-    elements.highlight.style.display = 'none';
-    document.body.classList.add('rc-field-picker-active');
-    document.addEventListener('mousemove', handlePickerMove, true);
-    document.addEventListener('click', handlePickerClick, true);
-    document.addEventListener('keydown', handlePickerKeydown, true);
-  }
-
-  function cancelElementPicker() {
-    stopElementPicker();
-    console.info('[Ricochet Counters] Element picker cancelled.');
-  }
-
-  function stopElementPicker() {
-    if (!activePicker) return;
-
-    document.removeEventListener('mousemove', handlePickerMove, true);
-    document.removeEventListener('click', handlePickerClick, true);
-    document.removeEventListener('keydown', handlePickerKeydown, true);
-    document.body.classList.remove('rc-field-picker-active');
-
-    if (activePicker.highlight) activePicker.highlight.style.display = 'none';
-    if (activePicker.banner) activePicker.banner.style.display = 'none';
-
-    activePicker = null;
-  }
-
-  function getPickableTarget(target) {
-    if (!target || target.nodeType !== Node.ELEMENT_NODE) return null;
-
-    const element = target;
-    if (element.closest(`#${HOST_ID}, #${PICKER_BANNER_ID}`)) return null;
-    if (element.id === PICKER_HIGHLIGHT_ID) return null;
-    if (element === document.documentElement || element === document.body) return null;
-
-    return element;
-  }
-
-  function updatePickerHighlight(element) {
-    if (!activePicker || !activePicker.highlight) return;
-
-    if (!element) {
-      activePicker.highlight.style.display = 'none';
-      return;
-    }
-
-    const rect = element.getBoundingClientRect();
-    if (!rect.width || !rect.height) {
-      activePicker.highlight.style.display = 'none';
-      return;
-    }
-
-    activePicker.highlight.style.display = 'block';
-    activePicker.highlight.style.left = `${Math.max(0, rect.left)}px`;
-    activePicker.highlight.style.top = `${Math.max(0, rect.top)}px`;
-    activePicker.highlight.style.width = `${rect.width}px`;
-    activePicker.highlight.style.height = `${rect.height}px`;
-  }
-
-  function handlePickerMove(event) {
-    if (!activePicker) return;
-    updatePickerHighlight(getPickableTarget(event.target));
-  }
-
-  function handlePickerClick(event) {
-    if (!activePicker) return;
-
-    const element = getPickableTarget(event.target);
-    if (!element) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-
-    savePickedElement(element);
-    stopElementPicker();
-  }
-
-  function handlePickerKeydown(event) {
-    if (!activePicker || event.key !== 'Escape') return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    cancelElementPicker();
-  }
-
-  function cleanPickedValue(value) {
-    return String(value === null || value === undefined ? '' : value)
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function extractElementValue(element) {
-    if (!element) return '';
-
-    const tagName = element.tagName ? element.tagName.toLowerCase() : '';
-    if (tagName === 'input') {
-      const type = String(element.getAttribute('type') || '').toLowerCase();
-      if (type === 'checkbox' || type === 'radio') {
-        return element.checked ? cleanPickedValue(element.value || 'checked') : '';
-      }
-
-      return cleanPickedValue(element.value);
-    }
-
-    if (tagName === 'select') {
-      const option = element.selectedOptions && element.selectedOptions[0];
-      return cleanPickedValue((option && option.textContent) || element.value);
-    }
-
-    if (tagName === 'textarea') return cleanPickedValue(element.value);
-    if (element.isContentEditable) return cleanPickedValue(element.innerText || element.textContent);
-
-    return cleanPickedValue(
-      element.getAttribute('aria-label') ||
-        element.getAttribute('title') ||
-        element.getAttribute('placeholder') ||
-        element.innerText ||
-        element.textContent
-    );
-  }
-
-  function cssEscape(value) {
-    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
-    return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
-  }
-
-  function escapeAttributeValue(value) {
-    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  }
-
-  function isUniqueSelector(selector) {
-    try {
-      return document.querySelectorAll(selector).length === 1;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function getElementSelector(element) {
-    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
-
-    if (element.id) {
-      const selector = `#${cssEscape(element.id)}`;
-      if (isUniqueSelector(selector)) return selector;
-    }
-
-    const tagName = element.tagName.toLowerCase();
-    const attributes = ['name', 'data-field', 'data-name', 'data-ng-model', 'ng-model', 'aria-label', 'title', 'placeholder'];
-    for (const attribute of attributes) {
-      const value = element.getAttribute(attribute);
-      if (!value) continue;
-
-      const selector = `${tagName}[${attribute}="${escapeAttributeValue(value)}"]`;
-      if (isUniqueSelector(selector)) return selector;
-    }
-
-    const segments = [];
-    let current = element;
-
-    while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
-      let segment = current.tagName.toLowerCase();
-      if (current.id) {
-        segment += `#${cssEscape(current.id)}`;
-        segments.unshift(segment);
-        break;
-      }
-
-      const classes = Array.from(current.classList || [])
-        .filter((className) => !className.startsWith('ng-'))
-        .slice(0, 3)
-        .map((className) => `.${cssEscape(className)}`)
-        .join('');
-
-      segment += classes;
-
-      const parent = current.parentElement;
-      if (parent) {
-        const sameTagSiblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
-        if (sameTagSiblings.length > 1) {
-          segment += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
-        }
-      }
-
-      segments.unshift(segment);
-      const selector = segments.join(' > ');
-      if (isUniqueSelector(selector)) return selector;
-
-      current = parent;
-    }
-
-    return segments.join(' > ');
-  }
-
-  function savePickedElement(element) {
-    if (!activePicker) return;
-
-    const fields = loadExtraFields();
-    const slotIndex = findExtraFieldSlot(fields, activePicker.slotIndex, activePicker.fieldName);
-    const slotName = getSlotName(slotIndex);
-
-    fields[slotIndex] = {
-      name: activePicker.fieldName,
-      selector: getElementSelector(element),
-      value: extractElementValue(element),
-      updatedAtCalifornia: getCaliforniaTimestamp().timestamp,
-    };
-
-    saveExtraFields(fields);
-
-    window.dispatchEvent(
-      new CustomEvent('ricochetCounters:fieldPicked', {
-        detail: {
-          slot: `extraField${slotName}`,
-          field: fields[slotIndex],
-        },
-      })
-    );
-
-    console.info(`[Ricochet Counters] Saved extraField${slotName}.`, fields[slotIndex]);
-  }
-
-  function getExtraFieldPayload() {
-    const fields = loadExtraFields();
-
-    return fields.reduce((payload, field, index) => {
-      const slotName = getSlotName(index);
-      let element = null;
-
-      try {
-        element = field.selector ? document.querySelector(field.selector) : null;
-      } catch (error) {
-        element = null;
-      }
-
-      payload[`extraField${slotName}Name`] = field.name || '';
-      payload[`extraField${slotName}Value`] = element ? extractElementValue(element) : field.value || '';
-
-      return payload;
-    }, {});
   }
 
   function getCountsSnapshot() {
@@ -1010,7 +614,6 @@
       counterDateCalifornia: storageGet(counterDateKey, californiaTime.date),
       counts,
       ...getFlattenedCounts(),
-      ...getExtraFieldPayload(),
       pageUrl: window.location.href,
       pageTitle: document.title,
     };
