@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ricochet Pickup / Hangup Counters
 // @namespace    local.ricochet-counters
-// @version      0.5.1
+// @version      0.5.2
 // @description  Adds Pickup and Hangup counters to Ricochet and sends click/report webhooks.
 // @match        https://giainc.ricochet.me/*
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  const SCRIPT_VERSION = '0.5.1';
+  const SCRIPT_VERSION = '0.5.2';
   const HOST_ID = 'rc-call-counter-host';
   const STYLE_ID = 'rc-call-counter-style';
   const STORAGE_PREFIX = 'rcCallCounter.';
@@ -638,6 +638,10 @@
       scriptVersion: SCRIPT_VERSION,
       clickedBy: actor.name,
       clickedBySource: actor.source,
+      sentBy: actor.name,
+      sentBySource: actor.source,
+      whoSentIt: actor.name,
+      whoSentItSource: actor.source,
       californiaDate: californiaTime.date,
       californiaTime: californiaTime.time,
       californiaTimestamp: californiaTime.timestamp,
@@ -662,8 +666,13 @@
   }
 
   function sendReportWebhook(trigger) {
+    const basePayload = buildBasePayload('counter_report', trigger);
     const payload = {
-      ...buildBasePayload('counter_report', trigger),
+      ...basePayload,
+      submittedBy: basePayload.sentBy,
+      submittedBySource: basePayload.sentBySource,
+      reportSentBy: basePayload.sentBy,
+      reportSentBySource: basePayload.sentBySource,
       reportAtCalifornia: getCaliforniaTimestamp().timestamp,
     };
 
