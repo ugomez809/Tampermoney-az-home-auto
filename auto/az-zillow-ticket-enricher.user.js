@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.3
+// @version      1.3.4
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
 // @match        https://zillow.com/*
+// @exclude      https://app.agencyzoom.com/login*
 // @run-at       document-end
 // @noframes
 // @grant        GM_getValue
@@ -26,16 +27,19 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
+  const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
     tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1',
     customFields: 'tm_az_zillow_ticket_enricher_custom_fields_v1',
-    providerPicker: 'tm_az_zillow_ticket_enricher_provider_picker_v1'
+    providerPicker: 'tm_az_zillow_ticket_enricher_provider_picker_v1',
+    zillowOpenLease: 'tm_az_zillow_ticket_enricher_zillow_open_lease_v1',
+    zillowTabHeartbeat: 'tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
@@ -48,7 +52,9 @@
     running: 'tm_az_zillow_ticket_enricher_running_v1',
     panelPos: 'tm_az_zillow_ticket_enricher_panel_pos_v1',
     lastZillowOpenAt: 'tm_az_zillow_ticket_enricher_last_zillow_open_at_v1',
-    webhookUrl: 'tm_az_zillow_ticket_enricher_webhook_url_v1'
+    webhookUrl: 'tm_az_zillow_ticket_enricher_webhook_url_v1',
+    azTabSlot: 'tm_auto_single_agencyzoom_tab_slot_v1',
+    zillowTabSlot: 'tm_auto_single_zillow_tab_slot_v1'
   };
 
   const SS_KEYS = {
@@ -97,6 +103,9 @@
     zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
     azRefreshIfNoZillowOpenMs: 300000,
+    pageSlotTtlMs: 12000,
+    zillowOpenLeaseMs: 20000,
+    zillowTabHeartbeatStaleMs: 15000,
     maxLogLines: 80,
     panelWidth: 390,
     zIndex: 2147483647
@@ -134,6 +143,7 @@
 
   const state = {
     destroyed: false,
+    tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
     logs: [],
@@ -152,16 +162,21 @@
     zillowSummary: '',
     lastStatus: '',
     mainReadyTicketId: '',
-    lastWrongAzUrl: ''
+    lastWrongAzUrl: '',
+    lastSingletonLog: ''
   };
 
   init();
 
   function init() {
+    window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
+    if (isAgencyZoomLoginPage()) return;
+    if (!claimSingletonPageSlot()) return;
+
     const legacyJobStateCleared = clearLegacyJobState();
     const resumedAfterReload = consumeBootstrapReloadToken();
-    const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
-    const staleJobReset = azJobReset ? '' : resetStaleActiveJobOnBoot();
+    const azJobReset = '';
+    const staleJobReset = resetStaleActiveJobOnBoot();
     if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
     if (isAzOrigin() && !getLastZillowOpenAt()) setLastZillowOpenAt();
 
@@ -196,8 +211,6 @@
       state.tickTimer = setInterval(zillowTick, CFG.tickMs);
       zillowTick();
     }
-
-    window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
   }
 
   function cleanup() {
@@ -222,6 +235,10 @@
 
   function isAzOrigin() {
     return /(^|\.)app\.agencyzoom\.com$/i.test(location.hostname);
+  }
+
+  function isAgencyZoomLoginPage() {
+    return isAzOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
   }
 
   function isZillowOrigin() {
@@ -348,6 +365,136 @@
 
   function deleteGM(key) {
     try { GM_deleteValue(key); } catch {}
+  }
+
+  function getSharedTabId() {
+    try {
+      const existing = sessionStorage.getItem(SHARED_TAB_ID_KEY);
+      if (existing) return existing;
+      const next = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      sessionStorage.setItem(SHARED_TAB_ID_KEY, next);
+      return next;
+    } catch {
+      return `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+  }
+
+  function readLocalJson(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed == null ? fallback : parsed;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeLocalJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function logSingletonOnce(key, message) {
+    const token = `${key}|${message}`;
+    if (state.lastSingletonLog === token) return;
+    state.lastSingletonLog = token;
+    log(message);
+  }
+
+  function closeDuplicateTabSoon() {
+    for (const delay of [150, 1200, 2500, 4000]) {
+      setTimeout(() => {
+        try { window.close(); } catch {}
+        try { window.open('', '_self'); } catch {}
+        try { window.close(); } catch {}
+      }, delay);
+    }
+  }
+
+  function getPageSlotKey() {
+    if (isAzOrigin()) return LS_KEYS.azTabSlot;
+    if (isZillowOrigin()) return LS_KEYS.zillowTabSlot;
+    return '';
+  }
+
+  function claimSingletonPageSlot() {
+    const key = getPageSlotKey();
+    if (!key) return true;
+
+    const now = Date.now();
+    const current = readLocalJson(key, null);
+    const currentTabId = String(current?.tabId || '');
+    const currentTs = Number(current?.ts || 0);
+    if (currentTabId && currentTabId !== state.tabId && currentTs > 0 && (now - currentTs) <= CFG.pageSlotTtlMs) {
+      const kind = isAzOrigin() ? 'AgencyZoom' : 'Zillow';
+      logSingletonOnce(`page-slot-${kind}`, `${kind} tab slot already owned by another tab; suppressing this copy`);
+      closeDuplicateTabSoon();
+      return false;
+    }
+
+    writeLocalJson(key, {
+      tabId: state.tabId,
+      ts: now,
+      url: String(location.href || ''),
+      script: SCRIPT_NAME
+    });
+    return true;
+  }
+
+  function getFreshZillowTabHeartbeat() {
+    const heartbeat = readGM(GM_KEYS.zillowTabHeartbeat, null);
+    if (!isPlainObject(heartbeat)) return null;
+    const ts = Number(heartbeat.ts || 0);
+    if (!ts || (Date.now() - ts) > CFG.zillowTabHeartbeatStaleMs) return null;
+    return heartbeat;
+  }
+
+  function recordZillowTabHeartbeat() {
+    if (!isZillowOrigin()) return;
+    writeGM(GM_KEYS.zillowTabHeartbeat, {
+      tabId: state.tabId,
+      ts: Date.now(),
+      url: String(location.href || ''),
+      script: SCRIPT_NAME
+    });
+  }
+
+  function getFreshZillowOpenLease() {
+    const lease = readGM(GM_KEYS.zillowOpenLease, null);
+    if (!isPlainObject(lease)) return null;
+    const ts = Number(lease.ts || 0);
+    if (!ts || (Date.now() - ts) > CFG.zillowOpenLeaseMs) return null;
+    return lease;
+  }
+
+  function claimZillowOpenSlot(url, reason = '') {
+    const heartbeat = getFreshZillowTabHeartbeat();
+    if (heartbeat) {
+      logSingletonOnce('zillow-heartbeat', `Skipped opening Zillow; an existing Zillow tab is active: ${norm(heartbeat.url || '') || 'unknown URL'}`);
+      return false;
+    }
+
+    const lease = getFreshZillowOpenLease();
+    if (lease) {
+      logSingletonOnce('zillow-open-lease', `Skipped opening Zillow; another open request is still settling: ${norm(lease.url || '') || 'unknown URL'}`);
+      return false;
+    }
+
+    writeGM(GM_KEYS.zillowOpenLease, {
+      tabId: state.tabId,
+      ts: Date.now(),
+      url: norm(url || ''),
+      reason: norm(reason || '')
+    });
+    return true;
+  }
+
+  function clearZillowOpenSlot() {
+    deleteGM(GM_KEYS.zillowOpenLease);
+  }
+
+  function hasFreshZillowOpenBlock() {
+    return !!(getFreshZillowTabHeartbeat() || getFreshZillowOpenLease());
   }
 
   function readTargets(key) {
@@ -2028,6 +2175,7 @@
 
   function promoteJobToFallback(job, reason, overrides = null) {
     if (!isPlainObject(job)) return false;
+    clearZillowOpenSlot();
     job.status = 'result-ready';
     job.updatedAt = nowIso();
     job.resultReadyAt = nowIso();
@@ -2044,9 +2192,13 @@
   }
 
   function closeCurrentTabSoon() {
-    setTimeout(() => {
-      try { window.close(); } catch {}
-    }, 250);
+    for (const delay of [250, 1200, 2500, 5000]) {
+      setTimeout(() => {
+        try { window.close(); } catch {}
+        try { window.open('', '_self'); } catch {}
+        try { window.close(); } catch {}
+      }, delay);
+    }
   }
 
   function getIsoAgeMs(value) {
@@ -2096,6 +2248,14 @@
   function launchZillowSearch(job) {
     if (!isPlainObject(job) || !norm(job.searchUrl || '')) return false;
     const launchUrl = buildScopedZillowUrl(job.searchUrl, job.jobId);
+    if (!claimZillowOpenSlot(launchUrl, `job-${norm(job.jobId || '')}`)) {
+      job.status = 'pending';
+      job.updatedAt = nowIso();
+      job.error = 'Waiting for existing Zillow tab to close';
+      saveJob(job);
+      return false;
+    }
+
     job.status = 'searching';
     job.updatedAt = nowIso();
     job.searchOpenedAt = nowIso();
@@ -2107,11 +2267,11 @@
     job.resultReadyAt = '';
     job.result = null;
     saveJob(job);
-    setLastZillowOpenAt(job.searchOpenedAt);
 
     try {
       if (typeof GM_openInTab === 'function') {
         GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
+        setLastZillowOpenAt(job.searchOpenedAt);
         return true;
       }
     } catch {}
@@ -2122,11 +2282,15 @@
         try { opened.blur(); } catch {}
         setTimeout(() => { try { window.focus(); } catch {} }, 40);
         setTimeout(() => { try { window.focus(); } catch {} }, 220);
+        setLastZillowOpenAt(job.searchOpenedAt);
       }
-      return !!opened;
+      if (opened) return true;
     } catch {
-      return false;
+      // Fall through to clear the lease below.
     }
+
+    clearZillowOpenSlot();
+    return false;
   }
 
   function currentZillowTabMatchesJob(job) {
@@ -2162,6 +2326,29 @@
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
 
+      if (jobStatus === 'pending' && !norm(job.searchOpenedAt || '')) {
+        if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+          return true;
+        }
+
+        const opened = launchZillowSearch(job);
+        if (opened) {
+          setStatus(`Opening Zillow for ${state.activeTicketId}`);
+          log(`Opened Zillow search: ${job.searchUrl}`);
+        } else if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+        } else {
+          job.status = 'failed';
+          job.updatedAt = nowIso();
+          job.error = 'Could not open Zillow tab';
+          saveJob(job);
+          setStatus('Could not open Zillow tab');
+          log('Could not open Zillow tab');
+        }
+        return true;
+      }
+
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
         promoteJobToFallback(job, 'Zillow opened but no property data ever loaded');
@@ -2174,6 +2361,8 @@
         if (reopened) {
           setStatus(`Relaunching Zillow for ${state.activeTicketId}`);
           log(`Relaunching stale Zillow search: ${job.searchUrl}`);
+        } else if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
         } else {
           job.status = 'failed';
           job.updatedAt = nowIso();
@@ -2463,6 +2652,8 @@
 
   async function zillowTick() {
     if (state.destroyed || !isZillowOrigin()) return;
+    if (!claimSingletonPageSlot()) return;
+    recordZillowTabHeartbeat();
 
     if (await maybeHandleProviderPickerOnZillow()) return;
 
@@ -2519,6 +2710,7 @@
         job.result = buildFallbackResult(job, cardResult);
         saveJob(job);
         try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
+        clearZillowOpenSlot();
         closeCurrentTabSoon();
         return;
       }
@@ -2574,6 +2766,7 @@
     saveJob(job);
 
     try { console.log(`[${SCRIPT_NAME}] Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`); } catch {}
+    clearZillowOpenSlot();
     closeCurrentTabSoon();
   }
 
@@ -3240,6 +3433,10 @@
       job = createJob(state.activeTicketId, addressInfo);
       const opened = launchZillowSearch(job);
       if (!opened) {
+        if (hasFreshZillowOpenBlock()) {
+          setStatus('Waiting for existing Zillow tab');
+          return;
+        }
         promoteJobToFallback(job, 'Could not open Zillow tab');
         setStatus('Using fallback Zillow data');
         return;
@@ -3256,6 +3453,8 @@
       if (reopened) {
         setStatus(`Address changed; reopened Zillow for ${state.activeTicketId}`);
         log(`Address changed; reopened Zillow search: ${job.searchUrl}`);
+      } else if (hasFreshZillowOpenBlock()) {
+        setStatus('Waiting for existing Zillow tab');
       } else {
         promoteJobToFallback(job, 'Could not reopen Zillow tab after address change');
         setStatus('Using fallback Zillow data');
@@ -3333,6 +3532,8 @@
 
   async function tick() {
     if (state.destroyed || !isAzOrigin()) return;
+    if (isAgencyZoomLoginPage()) return;
+    if (!claimSingletonPageSlot()) return;
     if (state.picker) {
       renderAll();
       return;
@@ -3503,10 +3704,11 @@
 
   function openProviderCaptureTab(request) {
     if (!isPlainObject(request) || !norm(request.searchUrl || '')) return false;
-    setLastZillowOpenAt();
+    if (!claimZillowOpenSlot(request.searchUrl, `provider-${canonicalFieldLabel(request.label || '')}`)) return false;
     try {
       if (typeof GM_openInTab === 'function') {
         GM_openInTab(request.searchUrl, { active: true, insert: true, setParent: true });
+        setLastZillowOpenAt();
         return true;
       }
     } catch {}
@@ -3515,11 +3717,15 @@
       const opened = window.open(request.searchUrl, '_blank');
       if (opened) {
         try { opened.focus(); } catch {}
+        setLastZillowOpenAt();
       }
-      return !!opened;
+      if (opened) return true;
     } catch {
-      return false;
+      // Fall through to clear the lease below.
     }
+
+    clearZillowOpenSlot();
+    return false;
   }
 
   function requestCustomFieldProviderCapture(fieldConfig) {

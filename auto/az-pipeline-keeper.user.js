@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         14 AUTO AgencyZoom Pipeline Keeper
 // @namespace    autoflow.az-pipeline-keeper
-// @version      1.0.1
+// @version      1.0.2
 // @description  AUTO-profile helper that keeps one exact AgencyZoom pipeline tab alive, closes extra AgencyZoom tabs when a leader exists, redirects stray AgencyZoom pages back to pipeline, and sweeps stale Zillow tabs on a 3-minute cleanup pulse.
 // @match        https://app.agencyzoom.com/*
 // @match        https://www.zillow.com/*
 // @match        https://zillow.com/*
+// @exclude      https://app.agencyzoom.com/login*
 // @run-at       document-end
 // @noframes
 // @grant        GM_getValue
@@ -24,13 +25,19 @@
   try { window.__AZ_PIPELINE_KEEPER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '14 AUTO AgencyZoom Pipeline Keeper';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
+  const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
 
   const GM_KEYS = {
     leader: 'tm_az_pipeline_keeper_leader_v1',
     cleanupPulse: 'tm_az_pipeline_keeper_cleanup_pulse_v1',
     pipelineOpenLease: 'tm_az_pipeline_keeper_pipeline_open_lease_v1'
+  };
+
+  const LS_KEYS = {
+    azTabSlot: 'tm_auto_single_agencyzoom_tab_slot_v1',
+    zillowTabSlot: 'tm_auto_single_zillow_tab_slot_v1'
   };
 
   const CFG = {
@@ -40,7 +47,8 @@
     leaderStaleMs: 20000,
     cleanupEveryMs: 3 * 60 * 1000,
     cleanupPulseTtlMs: 30000,
-    pipelineOpenCooldownMs: 30000,
+    pageSlotTtlMs: 12000,
+    pipelineOpenCooldownMs: 12 * 60 * 60 * 1000,
     minZillowTabAgeBeforeSweepMs: 90 * 1000,
     closeRetryMs: 1200,
     maxCloseAttempts: 6
@@ -48,7 +56,7 @@
 
   const state = {
     destroyed: false,
-    tabId: `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    tabId: getSharedTabId(),
     startedAt: Date.now(),
     tickTimer: 0,
     cleanupPulseListener: null,
@@ -103,6 +111,10 @@
     return /(^|\.)app\.agencyzoom\.com$/i.test(String(location.host || ''));
   }
 
+  function isAgencyZoomLoginPage() {
+    return isAgencyZoomOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
+  }
+
   function isZillowOrigin() {
     return /(^|\.)zillow\.com$/i.test(String(location.host || ''));
   }
@@ -136,8 +148,73 @@
     try { GM_setValue(key, value); } catch {}
   }
 
+  function clearPipelineOpenLease() {
+    writeGM(GM_KEYS.pipelineOpenLease, {
+      tabId: '',
+      ts: 0,
+      url: ''
+    });
+  }
+
+  function getSharedTabId() {
+    try {
+      const existing = sessionStorage.getItem(SHARED_TAB_ID_KEY);
+      if (existing) return existing;
+      const next = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      sessionStorage.setItem(SHARED_TAB_ID_KEY, next);
+      return next;
+    } catch {
+      return `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+  }
+
   function isPlainObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function readLocalJson(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed == null ? fallback : parsed;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeLocalJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function getPageSlotKey() {
+    if (isAgencyZoomOrigin()) return LS_KEYS.azTabSlot;
+    if (isZillowOrigin()) return LS_KEYS.zillowTabSlot;
+    return '';
+  }
+
+  function claimSingletonPageSlot() {
+    const key = getPageSlotKey();
+    if (!key) return true;
+
+    const now = Date.now();
+    const current = readLocalJson(key, null);
+    const currentTabId = String(current?.tabId || '');
+    const currentTs = Number(current?.ts || 0);
+    if (currentTabId && currentTabId !== state.tabId && currentTs > 0 && (now - currentTs) <= CFG.pageSlotTtlMs) {
+      const kind = isAgencyZoomOrigin() ? 'AgencyZoom' : 'Zillow';
+      maybeLogRole(`${kind} tab slot already owned by another tab; suppressing this copy`);
+      scheduleCloseSelf(`${kind.toLowerCase()}-slot-${currentTabId}`);
+      return false;
+    }
+
+    writeLocalJson(key, {
+      tabId: state.tabId,
+      ts: now,
+      url: String(location.href || ''),
+      script: SCRIPT_NAME
+    });
+    return true;
   }
 
   function getLeader() {
@@ -182,6 +259,8 @@
 
   function runTick() {
     if (state.destroyed) return;
+    if (isAgencyZoomLoginPage()) return;
+    if (!claimSingletonPageSlot()) return;
 
     normalizePipelineUrlIfNeeded();
     handleCleanupPulse(readGM(GM_KEYS.cleanupPulse, null));
@@ -237,6 +316,7 @@
   function handleZillowTick() {
     const leader = getLeader();
     if (isFreshLeader(leader)) {
+      clearPipelineOpenLease();
       maybeLogRole('Zillow helper tab waiting for the next cleanup pulse');
       return;
     }
@@ -259,6 +339,7 @@
       ts: now,
       url: PIPELINE_ROOT_URL
     });
+    clearPipelineOpenLease();
     maybeLogRole('This tab is the active pipeline keeper');
   }
 
