@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ricochet Pickup / Hangup Counters
 // @namespace    local.ricochet-counters
-// @version      0.5.3
+// @version      0.5.4
 // @description  Adds Pickup and Hangup counters to Ricochet and sends click/report webhooks.
 // @match        https://giainc.ricochet.me/*
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
@@ -16,14 +16,14 @@
 (function () {
   'use strict';
 
-  const SCRIPT_VERSION = '0.5.3';
+  const SCRIPT_VERSION = '0.5.4';
   const HOST_ID = 'rc-call-counter-host';
   const STYLE_ID = 'rc-call-counter-style';
   const STORAGE_PREFIX = 'rcCallCounter.';
   const ALLOW_NEGATIVE = false;
   const CALIFORNIA_TIME_ZONE = 'America/Los_Angeles';
-  const COUNTER_RESET_HOUR = 15;
-  const COUNTER_RESET_MINUTE = 20;
+  const COUNTER_RESET_HOUR = 23;
+  const COUNTER_RESET_MINUTE = 59;
   const DAILY_REPORT_HOUR = 17;
   const DAILY_REPORT_MINUTE = 25;
   const CLICK_WEBHOOK_URL = 'https://hooks.zapier.com/hooks/catch/20214705/4ygs2a0/';
@@ -159,7 +159,7 @@
     const hour = Number(parts.hour);
     const minute = Number(parts.minute);
     const isResetWindow = hour > COUNTER_RESET_HOUR || (hour === COUNTER_RESET_HOUR && minute >= COUNTER_RESET_MINUTE);
-    const counterDate = isResetWindow ? new Date(date.getTime() + 86400000) : date;
+    const counterDate = isResetWindow ? new Date(date.getTime() + 60000) : date;
 
     return getCaliforniaDateKey(counterDate);
   }
