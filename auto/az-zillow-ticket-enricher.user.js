@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.5
+// @version      1.3.6
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -27,7 +27,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.5';
+  const VERSION = '1.3.6';
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
@@ -103,7 +103,7 @@
     zillowMaxLaunches: 0,
     zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
-    azRefreshIfNoZillowOpenMs: 300000,
+    azRefreshIfNoZillowOpenMs: 60000,
     pageSlotTtlMs: 12000,
     zillowOpenLeaseMs: 20000,
     zillowTabHeartbeatStaleMs: 15000,
@@ -3530,7 +3530,7 @@
     const ageMs = getLastZillowOpenAgeMs();
     if (ageMs < CFG.azRefreshIfNoZillowOpenMs) return false;
 
-    const roundedMinutes = Math.max(5, Math.floor(ageMs / 60000));
+    const roundedMinutes = Math.max(1, Math.floor(ageMs / 60000));
     setLastZillowOpenAt();
     setStatus(`Refreshing after ${roundedMinutes}m without Zillow opens`);
     log(`Refreshing AgencyZoom after ${roundedMinutes} minute(s) without opening a Zillow page`);
