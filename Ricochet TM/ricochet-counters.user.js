@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Ricochet Pickup / Hangup Counters
 // @namespace    local.ricochet-counters
-// @version      0.5.0
+// @version      0.5.1
 // @description  Adds Pickup and Hangup counters to Ricochet and sends click/report webhooks.
 // @match        https://giainc.ricochet.me/*
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
 // @run-at       document-idle
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @connect      hooks.zapier.com
 // ==/UserScript==
@@ -14,7 +16,7 @@
 (function () {
   'use strict';
 
-  const SCRIPT_VERSION = '0.5.0';
+  const SCRIPT_VERSION = '0.5.1';
   const HOST_ID = 'rc-call-counter-host';
   const STYLE_ID = 'rc-call-counter-style';
   const STORAGE_PREFIX = 'rcCallCounter.';
@@ -67,22 +69,52 @@
     timeZoneName: 'short',
   });
 
-  function storageGet(key, fallback = '') {
+  function hasTampermonkeyStorage() {
+    return typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+  }
+
+  function readLegacyPageStorage(key, fallback = null) {
     try {
       const value = window.localStorage.getItem(key);
       return value === null ? fallback : value;
     } catch (error) {
-      console.warn('[Ricochet Counters] Unable to read localStorage.', error);
+      return fallback;
+    }
+  }
+
+  function storageGet(key, fallback = '') {
+    try {
+      if (hasTampermonkeyStorage()) {
+        const value = GM_getValue(key, undefined);
+        if (value !== undefined && value !== null) return String(value);
+
+        const legacyValue = readLegacyPageStorage(key, null);
+        if (legacyValue !== null) {
+          GM_setValue(key, String(legacyValue));
+          return legacyValue;
+        }
+
+        return fallback;
+      }
+
+      return readLegacyPageStorage(key, fallback);
+    } catch (error) {
+      console.warn('[Ricochet Counters] Unable to read Tampermonkey storage.', error);
       return fallback;
     }
   }
 
   function storageSet(key, value) {
     try {
-      window.localStorage.setItem(key, String(value));
+      if (hasTampermonkeyStorage()) {
+        GM_setValue(key, String(value));
+      } else {
+        window.localStorage.setItem(key, String(value));
+      }
+
       return true;
     } catch (error) {
-      console.warn('[Ricochet Counters] Unable to write localStorage.', error);
+      console.warn('[Ricochet Counters] Unable to write Tampermonkey storage.', error);
       return false;
     }
   }
@@ -535,7 +567,7 @@
     if (configuredName) return { name: configuredName, source: 'script override' };
 
     const storedName = cleanUserCandidate(storageGet(clickedByOverrideKey));
-    if (storedName) return { name: storedName, source: 'localStorage override' };
+    if (storedName) return { name: storedName, source: 'script storage override' };
 
     const globalPaths = [
       'currentUser.name',

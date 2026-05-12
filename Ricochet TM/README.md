@@ -9,3 +9,5 @@ https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricoch
 Tampermonkey uses the same raw GitHub URL in `@updateURL` and `@downloadURL`.
 
 Counters roll over at 11:59 PM California time so each day starts from zero.
+
+Counts are stored in Tampermonkey storage, not Ricochet page storage, so clearing Ricochet cache/cookies should not reset them.
