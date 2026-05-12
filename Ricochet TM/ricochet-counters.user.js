@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ricochet Pickup / Hangup Counters
 // @namespace    local.ricochet-counters
-// @version      0.3.0
+// @version      0.3.1
 // @description  Adds Pickup and Hangup counters to Ricochet and sends click/report webhooks.
 // @match        https://giainc.ricochet.me/*
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/Ricochet%20TM/ricochet-counters.user.js
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const SCRIPT_VERSION = '0.3.0';
+  const SCRIPT_VERSION = '0.3.1';
   const HOST_ID = 'rc-call-counter-host';
   const STYLE_ID = 'rc-call-counter-style';
   const STORAGE_PREFIX = 'rcCallCounter.';
@@ -41,7 +41,19 @@
     { id: 'hangup', label: 'Hang Ups', payloadKey: 'hangupCount' },
   ];
 
-  const californiaFormatter = new Intl.DateTimeFormat('en-US', {
+  const californiaDisplayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: CALIFORNIA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  });
+
+  const californiaClockFormatter = new Intl.DateTimeFormat('en-US', {
     timeZone: CALIFORNIA_TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
@@ -77,8 +89,8 @@
     return `${STORAGE_PREFIX}${id}`;
   }
 
-  function getCaliforniaParts(date = new Date()) {
-    const parts = californiaFormatter.formatToParts(date).reduce((result, part) => {
+  function readDateParts(formatter, date = new Date()) {
+    const parts = formatter.formatToParts(date).reduce((result, part) => {
       if (part.type !== 'literal') result[part.type] = part.value;
       return result;
     }, {});
@@ -90,8 +102,17 @@
       hour: parts.hour,
       minute: parts.minute,
       second: parts.second,
+      dayPeriod: parts.dayPeriod || '',
       timeZoneName: parts.timeZoneName || 'PT',
     };
+  }
+
+  function getCaliforniaParts(date = new Date()) {
+    return readDateParts(californiaDisplayFormatter, date);
+  }
+
+  function getCaliforniaClockParts(date = new Date()) {
+    return readDateParts(californiaClockFormatter, date);
   }
 
   function getCaliforniaDateKey(date = new Date()) {
@@ -101,10 +122,12 @@
 
   function getCaliforniaTimestamp(date = new Date()) {
     const parts = getCaliforniaParts(date);
+    const displayTime = `${parts.hour}:${parts.minute}:${parts.second}${parts.dayPeriod ? ` ${parts.dayPeriod}` : ''}`;
+
     return {
       date: `${parts.year}-${parts.month}-${parts.day}`,
-      time: `${parts.hour}:${parts.minute}:${parts.second}`,
-      timestamp: `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`,
+      time: displayTime,
+      timestamp: `${parts.year}-${parts.month}-${parts.day} ${displayTime} ${parts.timeZoneName}`,
       timeZone: CALIFORNIA_TIME_ZONE,
       timeZoneName: parts.timeZoneName,
       parts,
@@ -478,7 +501,7 @@
 
     const text = String(value)
       .replace(/\s+/g, ' ')
-      .replace(/\b(caret|logout|sign out|profile|account)\b/gi, '')
+      .replace(/\b(caret|logout|sign out|profile|account|settings)\b/gi, '')
       .trim();
 
     const ignoredValues = new Set(['', 'Help', 'Eligibility +', 'Busy', 'Ready', 'Lead Assignment']);
@@ -645,7 +668,7 @@
   }
 
   function hasReachedDailyReportTime() {
-    const parts = getCaliforniaParts();
+    const parts = getCaliforniaClockParts();
     const hour = Number(parts.hour);
     const minute = Number(parts.minute);
 
