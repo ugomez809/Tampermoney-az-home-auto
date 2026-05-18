@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.4
+// @version      1.3.8
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -27,7 +27,7 @@
   try { window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '13 AUTO AgencyZoom Zillow Ticket Enricher';
-  const VERSION = '1.3.4';
+  const VERSION = getScriptVersion();
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
@@ -167,6 +167,15 @@
   };
 
   init();
+
+  function getScriptVersion() {
+    try {
+      const info = typeof GM_info !== 'undefined' ? GM_info : null;
+      return String(info?.script?.version || '').trim() || 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
 
   function init() {
     window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
@@ -986,9 +995,18 @@
     try { bootstrapSelect?.parentElement?.querySelectorAll('select:not([disabled])').forEach(add); } catch {}
     try {
       const active = document.activeElement;
+      if (active instanceof Element && active.matches(selectors)) {
+        add(active);
+      }
       if (active instanceof Element && (active === baseEl || baseEl.contains(active) || active.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control') === group)) {
         add(active);
       }
+    } catch {}
+    try {
+      document.querySelectorAll('.editable-container, .editableform, .popover').forEach((container) => {
+        if (!visible(container)) return;
+        container.querySelectorAll(selectors).forEach(add);
+      });
     } catch {}
 
     const score = (el) => {
@@ -1084,10 +1102,58 @@
       lowered === 'select option' ||
       lowered === 'choose' ||
       lowered === 'choose one' ||
-      lowered === 'choose option'
+      lowered === 'choose option' ||
+      lowered === 'empty' ||
+      lowered === 'not set' ||
+      lowered === 'not selected' ||
+      lowered === 'not specified' ||
+      lowered === 'not provided' ||
+      lowered === 'no value' ||
+      lowered === 'add value' ||
+      lowered === 'enter value' ||
+      lowered === 'click to edit' ||
+      lowered === 'click here to edit' ||
+      lowered === 'edit'
     ) return false;
 
     if (/^(select|choose)\b/.test(lowered)) return false;
+    if (/^(add|enter|click)\b.*\b(value|edit)\b/.test(lowered)) return false;
+    return true;
+  }
+
+  function getInlineEditorContainer(target) {
+    if (!(target instanceof Element)) return null;
+    return target.closest('.editable-container, .editableform, .popover') || null;
+  }
+
+  function findInlineEditorSubmitButton(target) {
+    const container = getInlineEditorContainer(target);
+    if (!(container instanceof Element)) return null;
+
+    const candidates = Array.from(container.querySelectorAll(
+      '.editable-submit, button[type="submit"], input[type="submit"], button.btn-primary, a.btn-primary, button, a'
+    )).filter(visible);
+
+    return candidates.find((el) => {
+      const text = lower([
+        el.textContent,
+        el.getAttribute?.('title'),
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('value')
+      ].filter(Boolean).join(' '));
+      const cls = String(el.className || '').toLowerCase();
+      if (cls.includes('editable-cancel') || text.includes('cancel')) return false;
+      if (cls.includes('editable-submit')) return true;
+      if (el.matches?.('button[type="submit"], input[type="submit"]')) return true;
+      return text === 'ok' || text === 'save' || text === 'update' || text === 'apply' || text.includes('check');
+    }) || null;
+  }
+
+  async function maybeCommitInlineEditor(target) {
+    const button = findInlineEditorSubmitButton(target);
+    if (!button) return false;
+    strongClick(button);
+    await sleep(420);
     return true;
   }
 
@@ -1110,7 +1176,7 @@
     return chosen || base;
   }
 
-  async function setFieldValue(record, value) {
+  async function setFieldValue(record, value, label = '') {
     const base = findSavedElement(record);
     if (!base) return { ok: false, reason: 'saved field target not found' };
 
@@ -1133,7 +1199,11 @@
 
       const currentValue = readCurrentFieldValue(target);
       if (hasMeaningfulExistingFieldValue(currentValue)) {
-        return { ok: true, skipped: 'existing-value', currentValue };
+        return {
+          ok: true,
+          skipped: fieldValueMatchesExpected(label, currentValue, nextValue) ? 'existing-value' : 'existing-different-value',
+          currentValue
+        };
       }
 
       if (target instanceof HTMLSelectElement) {
@@ -1159,8 +1229,15 @@
         dispatchFieldEvents(target);
       }
 
-      await sleep(220);
-      if (verifyFieldValue(target, nextValue)) return { ok: true };
+      const committedInlineEditor = await maybeCommitInlineEditor(target);
+      await sleep(committedInlineEditor ? 360 : 220);
+      if (
+        verifyFieldValue(target, nextValue) ||
+        verifyFieldValue(base, nextValue) ||
+        (committedInlineEditor && (!target.isConnected || !visible(target)))
+      ) {
+        return { ok: true };
+      }
     }
 
     return { ok: false, reason: 'editable target not found or value did not stick' };
@@ -1947,7 +2024,7 @@
     const source = norm(text);
     if (!source) return '';
     const labeledMatch = source.match(/\b(?:Home Type|Property Type)\s*:\s*([^|,;\n]+)/i);
-    if (labeledMatch) return norm(labeledMatch[0]);
+    if (labeledMatch) return norm(labeledMatch[1]);
     const match = source.match(/\b(single family(?: residence| home)?|singlefamily|multi family|multifamily|townhouse|townhome|condo|condominium|apartment|duplex|triplex|manufactured(?: home)?|mobile home|mobilemanufactured|co-?op)\b/i);
     return match ? norm(match[1]) : '';
   }
@@ -1983,6 +2060,66 @@
       const cleaned = baseUrl.replace(/#.*$/, '');
       return `${cleaned}#${ZILLOW_JOB_HASH_KEY}=${encodeURIComponent(scopeId)}`;
     }
+  }
+
+  function stripZillowJobHashFromUrl(url) {
+    const baseUrl = norm(url);
+    if (!baseUrl) return '';
+
+    try {
+      const parsed = new URL(baseUrl);
+      const hash = String(parsed.hash || '').replace(/^#/, '');
+      if (!hash) return parsed.toString();
+
+      const segments = hash.split('&');
+      const publicSegments = segments.filter((segment) => {
+        const [rawKey] = segment.split('=');
+        return norm(rawKey) !== ZILLOW_JOB_HASH_KEY;
+      });
+      if (publicSegments.length === segments.length) return parsed.toString();
+
+      parsed.hash = publicSegments.join('&');
+      return parsed.toString();
+    } catch {
+      const hashIndex = baseUrl.indexOf('#');
+      if (hashIndex < 0) return baseUrl;
+
+      const prefix = baseUrl.slice(0, hashIndex);
+      const hash = baseUrl.slice(hashIndex + 1);
+      const segments = hash.split('&');
+      const publicSegments = segments.filter((segment) => {
+        const [rawKey] = segment.split('=');
+        return norm(rawKey) !== ZILLOW_JOB_HASH_KEY;
+      });
+      if (publicSegments.length === segments.length) return baseUrl;
+      return publicSegments.length ? `${prefix}#${publicSegments.join('&')}` : prefix;
+    }
+  }
+
+  function normalizeComparableUrl(value) {
+    const stripped = stripZillowJobHashFromUrl(value);
+    if (!stripped) return '';
+    try {
+      const parsed = new URL(stripped);
+      parsed.hash = '';
+      return parsed.toString().replace(/\/+$/g, '').toLowerCase();
+    } catch {
+      return stripped.replace(/#.*$/g, '').replace(/\/+$/g, '').toLowerCase();
+    }
+  }
+
+  function normalizeComparableFieldValue(label, value) {
+    const cleanLabel = canonicalFieldLabel(label);
+    if (lower(cleanLabel) === 'zillow url') return normalizeComparableUrl(value);
+    if (lower(cleanLabel) === 'bedrooms' || lower(cleanLabel) === 'bathrooms') return lower(normalizeRoomValue(value));
+    if (lower(cleanLabel) === 'home type') return lower(normalizeHomeType(value));
+    return lower(norm(value));
+  }
+
+  function fieldValueMatchesExpected(label, current, expected) {
+    const currentValue = normalizeComparableFieldValue(label, current);
+    const expectedValue = normalizeComparableFieldValue(label, expected);
+    return !!currentValue && !!expectedValue && currentValue === expectedValue;
   }
 
   function createJobId(ticketId) {
@@ -2058,7 +2195,7 @@
       customFields[label] = getFallbackCustomFieldValue(label, extraCustom[label], job);
     }
     return {
-      zillowUrl: firstNonEmpty(extra.zillowUrl, job?.searchUrl),
+      zillowUrl: stripZillowJobHashFromUrl(firstNonEmpty(extra.zillowUrl, job?.searchUrl)),
       bedrooms: getFallbackRoomValue(extra.bedrooms),
       bathrooms: getFallbackRoomValue(extra.bathrooms),
       homeType: getFallbackHomeType(extra.homeType),
@@ -2070,6 +2207,14 @@
     return !!norm(result?.bedrooms) || !!norm(result?.bathrooms);
   }
 
+  function getMissingRequiredZillowFactLabels(result) {
+    const missing = [];
+    if (!norm(result?.bedrooms)) missing.push('Bedrooms');
+    if (!norm(result?.bathrooms)) missing.push('Bathrooms');
+    if (!norm(result?.homeType)) missing.push('Home Type');
+    return missing;
+  }
+
   function buildWebhookPayload(job) {
     const result = isPlainObject(job?.result) ? job.result : {};
     return {
@@ -2079,7 +2224,7 @@
       ticketId: norm(job?.ticketId || state.activeTicketId || ''),
       jobId: norm(job?.jobId || ''),
       address: firstNonEmpty(norm(job?.address || ''), norm(state.currentAddress || '')),
-      zillowUrl: firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || '')),
+      zillowUrl: stripZillowJobHashFromUrl(firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || ''))),
       bedrooms: norm(result?.bedrooms || ''),
       bathrooms: norm(result?.bathrooms || ''),
       homeType: norm(result?.homeType || ''),
@@ -2173,24 +2318,6 @@
     return firstNonEmpty(job?.captchaLastRefreshAt, job?.captchaDetectedAt, job?.updatedAt, job?.createdAt, nowIso());
   }
 
-  function promoteJobToFallback(job, reason, overrides = null) {
-    if (!isPlainObject(job)) return false;
-    clearZillowOpenSlot();
-    job.status = 'result-ready';
-    job.updatedAt = nowIso();
-    job.resultReadyAt = nowIso();
-    job.error = norm(reason || '');
-    job.fallbackReason = job.error;
-    job.result = buildFallbackResult(job, overrides);
-    saveJob(job);
-    if (job.error) {
-      log(`Using fallback Zillow data for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${job.error}`);
-    } else {
-      log(`Using fallback Zillow data for AZ ${norm(job.ticketId || state.activeTicketId || '?')}`);
-    }
-    return true;
-  }
-
   function closeCurrentTabSoon() {
     for (const delay of [250, 1200, 2500, 5000]) {
       setTimeout(() => {
@@ -2199,6 +2326,61 @@
         try { window.close(); } catch {}
       }, delay);
     }
+  }
+
+  function reloadThisPageSoon(reason = '') {
+    const message = norm(reason || 'Reload requested');
+    if (message) {
+      try { console.log(`[${SCRIPT_NAME}] ${message}; reloading page`); } catch {}
+      if (isAzOrigin()) log(`${message}; reloading page`);
+    }
+
+    setTimeout(() => {
+      try {
+        location.reload();
+        return;
+      } catch {}
+      try { location.href = location.href; } catch {}
+    }, 250);
+  }
+
+  function reloadZillowPageForJob(job, reason = '') {
+    if (!isPlainObject(job)) {
+      reloadThisPageSoon(reason || 'Reloading Zillow');
+      return false;
+    }
+
+    job.status = 'searching';
+    job.updatedAt = nowIso();
+    job.error = norm(reason || 'Reloading Zillow for missing data');
+    job.lastLaunchAt = nowIso();
+    if (isZillowListingPage()) job.listingSeenAt = '';
+    else job.listingNavigatedAt = '';
+    saveJob(job);
+    reloadThisPageSoon(job.error);
+    return true;
+  }
+
+  function reloadAgencyZoomForFreshZillowAttempt(job, reason = '') {
+    if (isPlainObject(job)) {
+      job.status = 'pending';
+      job.updatedAt = nowIso();
+      job.error = norm(reason || 'Reloading for fresh Zillow attempt');
+      job.result = null;
+      job.resultReadyAt = '';
+      job.searchOpenedAt = '';
+      job.lastLaunchAt = '';
+      job.listingNavigatedAt = '';
+      job.listingSeenAt = '';
+      saveJob(job);
+    } else {
+      clearJob();
+    }
+
+    clearZillowOpenSlot();
+    setStatus('Reloading page');
+    requestBootstrapReload(reason || 'fresh-zillow-attempt');
+    return true;
   }
 
   function getIsoAgeMs(value) {
@@ -2351,8 +2533,7 @@
 
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
-        promoteJobToFallback(job, 'Zillow opened but no property data ever loaded');
-        setStatus('Using fallback Zillow data');
+        reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow opened but no property data ever loaded');
         return true;
       }
 
@@ -2375,8 +2556,7 @@
       }
 
       if (ageMs > CFG.zillowWaitMs) {
-        promoteJobToFallback(job, 'Zillow scrape timed out');
-        setStatus('Using fallback Zillow data');
+        reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow scrape timed out');
         return true;
       }
 
@@ -2388,9 +2568,7 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
-      if (promoteJobToFallback(job, getZillowJobErrorText(job))) {
-        setStatus('Using fallback Zillow data');
-      }
+      reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
       return true;
     }
 
@@ -2460,39 +2638,138 @@
 
   function extractRegexValue(text, patterns) {
     const source = String(text || '');
-    for (const pattern of patterns) {
-      const match = source.match(pattern);
-      if (match && norm(match[1])) return norm(match[1]);
+    const variants = Array.from(new Set([
+      source,
+      source
+        .replace(/&quot;/g, '"')
+        .replace(/&#34;/g, '"')
+        .replace(/\\u0022/g, '"')
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'")
+        .replace(/\\u002F/g, '/')
+    ]));
+
+    for (const variant of variants) {
+      for (const pattern of patterns) {
+        const match = variant.match(pattern);
+        if (match && norm(match[1])) return norm(match[1]);
+      }
     }
     return '';
+  }
+
+  function isScalarZillowFactValue(value) {
+    return typeof value === 'string' || typeof value === 'number';
+  }
+
+  function maybeSetZillowFactHint(hints, key, value) {
+    if (!isScalarZillowFactValue(value)) return;
+    const cleanKey = String(key || '');
+    const cleanValue = norm(value);
+    if (!cleanValue) return;
+
+    if (!hints.bedrooms && /^(bedrooms?|beds?|numBedrooms|numberOfBedrooms|bedroomsTotal)$/i.test(cleanKey)) {
+      hints.bedrooms = cleanValue;
+      return;
+    }
+
+    if (!hints.bathrooms && /^(bathrooms?|baths?|numBathrooms|numberOfBathrooms|numberOfBathroomsTotal|bathroomsTotal|bathroomsFloat|bathroomsFull)$/i.test(cleanKey)) {
+      hints.bathrooms = cleanValue;
+      return;
+    }
+
+    if (!hints.homeType && /^(homeType|home_type|propertyType|propertyTypeDimension|propertySubType)$/i.test(cleanKey)) {
+      hints.homeType = cleanValue;
+    }
+  }
+
+  function collectZillowFactHints(value, hints, depth = 0) {
+    if (depth > 14 || !value || typeof value !== 'object') return hints;
+    if (hints.bedrooms && hints.bathrooms && hints.homeType) return hints;
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectZillowFactHints(item, hints, depth + 1);
+        if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
+      }
+      return hints;
+    }
+
+    for (const [key, entry] of Object.entries(value)) {
+      maybeSetZillowFactHint(hints, key, entry);
+      if (entry && typeof entry === 'object') collectZillowFactHints(entry, hints, depth + 1);
+      if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
+    }
+
+    return hints;
+  }
+
+  function parseZillowJsonText(text) {
+    const source = norm(text);
+    if (!source) return null;
+    const variants = Array.from(new Set([
+      source,
+      source.replace(/&quot;/g, '"').replace(/&#34;/g, '"')
+    ]));
+
+    for (const variant of variants) {
+      try { return JSON.parse(variant); } catch {}
+    }
+    return null;
+  }
+
+  function readZillowJsonHints() {
+    const hints = { bedrooms: '', bathrooms: '', homeType: '' };
+    const scripts = Array.from(document.scripts || []);
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      if (!text || text.length > 5000000) continue;
+      const type = lower(script.getAttribute('type') || '');
+      const id = lower(script.id || '');
+      if (!type.includes('json') && !id.includes('next') && !id.includes('hdp')) continue;
+
+      const parsed = parseZillowJsonText(text);
+      if (!parsed) continue;
+      collectZillowFactHints(parsed, hints);
+      if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
+    }
+    return hints;
   }
 
   function readZillowScriptHints() {
     const joined = Array.from(document.scripts || [])
       .map((script) => script.textContent || '')
       .join('\n');
+    const jsonHints = readZillowJsonHints();
 
     return {
-      bedrooms: extractRegexValue(joined, [
+      bedrooms: firstNonEmpty(jsonHints.bedrooms, extractRegexValue(joined, [
         /["']?bedrooms?["']?\s*:\s*"?([0-9.]+)"?/i,
         /"bedrooms?"\s*:\s*"?([0-9.]+)"?/i,
         /"beds?"\s*:\s*"?([0-9.]+)"?/i,
-        /"numberOfRooms"\s*:\s*"?([0-9.]+)"?/i
-      ]),
-      bathrooms: extractRegexValue(joined, [
+        /"numberOfRooms"\s*:\s*"?([0-9.]+)"?/i,
+        /"numberOfBedrooms"\s*:\s*"?([0-9.]+)"?/i,
+        /"numBedrooms"\s*:\s*"?([0-9.]+)"?/i,
+        /"bedroomsTotal"\s*:\s*"?([0-9.]+)"?/i
+      ])),
+      bathrooms: firstNonEmpty(jsonHints.bathrooms, extractRegexValue(joined, [
         /["']?bathrooms?["']?\s*:\s*"?([0-9.]+)"?/i,
         /"bathrooms?"\s*:\s*"?([0-9.]+)"?/i,
         /"baths?"\s*:\s*"?([0-9.]+)"?/i,
         /["']?numberOfBathroomsTotal["']?\s*:\s*"?([0-9.]+)"?/i,
+        /["']?numberOfBathrooms["']?\s*:\s*"?([0-9.]+)"?/i,
+        /["']?numBathrooms["']?\s*:\s*"?([0-9.]+)"?/i,
+        /["']?bathroomsTotal["']?\s*:\s*"?([0-9.]+)"?/i,
         /["']?bathroomsFull["']?\s*:\s*"?([0-9.]+)"?/i,
         /["']?bathroomsFloat["']?\s*:\s*"?([0-9.]+)"?/i
-      ]),
-      homeType: extractRegexValue(joined, [
+      ])),
+      homeType: firstNonEmpty(jsonHints.homeType, extractRegexValue(joined, [
         /["']?homeType["']?\s*:\s*"([^"]+)"/i,
         /"homeType"\s*:\s*"([^"]+)"/i,
         /"home_type"\s*:\s*"([^"]+)"/i,
-        /"propertyType(?:Dimension)?"\s*:\s*"([^"]+)"/i
-      ])
+        /"propertyType(?:Dimension)?"\s*:\s*"([^"]+)"/i,
+        /"propertySubType"\s*:\s*"([^"]+)"/i
+      ]))
     };
   }
 
@@ -2551,7 +2828,7 @@
     if (!norm(bedrooms) && !norm(bathrooms) && !norm(homeType)) return null;
 
     return {
-      zillowUrl: anchor.href,
+      zillowUrl: stripZillowJobHashFromUrl(anchor.href),
       bedrooms,
       bathrooms,
       homeType,
@@ -2642,7 +2919,7 @@
     const customFields = buildScrapedCustomFieldValues();
 
     return {
-      zillowUrl: location.href,
+      zillowUrl: stripZillowJobHashFromUrl(location.href),
       bedrooms,
       bathrooms,
       homeType,
@@ -2704,6 +2981,12 @@
       }
 
       if (cardResult && cardHasAnyFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
+        const missingCardFacts = getMissingRequiredZillowFactLabels(cardResult);
+        if (missingCardFacts.length) {
+          reloadZillowPageForJob(job, `Zillow search result missing ${missingCardFacts.join(', ')}`);
+          return;
+        }
+
         job.status = 'result-ready';
         job.updatedAt = nowIso();
         job.resultReadyAt = nowIso();
@@ -2717,9 +3000,7 @@
 
       if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowDeadPageMs) {
         const reason = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
-        promoteJobToFallback(job, reason);
-        try { console.log(`[${SCRIPT_NAME}] Using fallback Zillow data for ${job.ticketId}: ${reason}`); } catch {}
-        closeCurrentTabSoon();
+        reloadZillowPageForJob(job, reason);
         return;
       }
 
@@ -2733,26 +3014,15 @@
     }
 
     const scraped = scrapeZillowResult();
-    const hasBedrooms = !!norm(scraped.bedrooms);
-    const hasBathrooms = !!norm(scraped.bathrooms);
-    const hasHomeType = !!norm(scraped.homeType);
-    const hasCustomFieldData = hasAnyCustomFieldValues(scraped);
-    const hasRoomFacts = hasBedrooms || hasBathrooms;
+    const missingRequiredFacts = getMissingRequiredZillowFactLabels(scraped);
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
 
-    if (!hasRoomFacts && !hasHomeType && !hasCustomFieldData) {
+    if (missingRequiredFacts.length) {
       if (listingAgeMs >= CFG.zillowFactSettleMs) {
-        const reason = `Zillow listing loaded but no room facts appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
-        promoteJobToFallback(job, reason, {
-          zillowUrl: location.href
-        });
-        closeCurrentTabSoon();
+        const reason = `Zillow listing missing ${missingRequiredFacts.join(', ')} (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
+        reloadZillowPageForJob(job, reason);
       }
-      return;
-    }
-
-    if (!hasRoomFacts && listingAgeMs < CFG.zillowFactSettleMs) {
       return;
     }
 
@@ -2760,8 +3030,7 @@
     job.updatedAt = nowIso();
     job.resultReadyAt = nowIso();
     job.result = buildFallbackResult(job, {
-      ...scraped,
-      zillowUrl: location.href
+      ...scraped
     });
     saveJob(job);
 
@@ -3263,9 +3532,23 @@
       return false;
     }
 
+    const missingRequiredFacts = getMissingRequiredZillowFactLabels(job?.result);
+    if (missingRequiredFacts.length) {
+      if (!norm(job?.noDataReportedAt || '')) {
+        log(`Zillow result missing ${missingRequiredFacts.join(', ')} for AZ ${norm(job?.ticketId || state.activeTicketId || '?')}; reloading page`);
+      }
+      if (isPlainObject(job)) {
+        job.noDataReportedAt = nowIso();
+        job.updatedAt = nowIso();
+        saveJob(job);
+      }
+      reloadAgencyZoomForFreshZillowAttempt(job, `Missing Zillow facts: ${missingRequiredFacts.join(', ')}`);
+      return false;
+    }
+
     const targets = getFieldTargets();
     const baseFields = {
-      'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
+      'Zillow URL': stripZillowJobHashFromUrl(firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl)),
       'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
       'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
       'Home Type': getFallbackHomeType(job?.result?.homeType)
@@ -3281,6 +3564,10 @@
     let changed = false;
     let appliedCount = 0;
     let skippedExistingCount = 0;
+    let missingTargetCount = 0;
+    let failedCount = 0;
+    let blockedExistingCount = 0;
+    let valueCount = 0;
 
     for (const label of labels) {
       const value = norm(isBaseFieldLabel(label) ? baseFields[label] : customFields[label]);
@@ -3288,27 +3575,66 @@
         log(`Skipped blank Zillow field: ${label}`);
         continue;
       }
+      valueCount += 1;
 
       const targetRecord = targets[label];
       if (!isPlainObject(targetRecord) || !norm(targetRecord.selector)) {
+        missingTargetCount += 1;
         log(`Skipped unsaved field target: ${label}`);
         continue;
       }
 
-      const result = await setFieldValue(targetRecord, value);
+      const result = await setFieldValue(targetRecord, value, label);
       if (result.ok) {
         if (result.skipped === 'existing-value') {
           skippedExistingCount += 1;
           log(`Skipped filled ticket field: ${label} already has ${result.currentValue}`);
+        } else if (result.skipped === 'existing-different-value') {
+          blockedExistingCount += 1;
+          log(`Field blocked: ${label} already has ${result.currentValue}; expected ${value}`);
         } else {
           changed = true;
           appliedCount += 1;
           log(`Filled field: ${label} = ${value}`);
         }
       } else {
+        failedCount += 1;
         log(`Field failed: ${label} | ${result.reason}`);
       }
       await sleep(250);
+    }
+
+    if (blockedExistingCount) {
+      if (changed) {
+        const updated = await clickUpdateButton();
+        if (!updated) {
+          setStatus('Ticket update failed');
+          return false;
+        }
+      }
+      stopAutomation(`${blockedExistingCount} Zillow field(s) already had different values; tag replacement skipped`);
+      return false;
+    }
+
+    if (failedCount || (valueCount && !changed && !skippedExistingCount && missingTargetCount)) {
+      if (changed) {
+        const updated = await clickUpdateButton();
+        if (!updated) {
+          setStatus('Ticket update failed');
+          return false;
+        }
+      }
+      const reason = failedCount
+        ? `${failedCount} Zillow field write(s) failed`
+        : `${missingTargetCount} Zillow field target(s) missing`;
+      log(`${reason}; reloading page`);
+      requestBootstrapReload(reason);
+      return false;
+    }
+
+    if (!changed && !skippedExistingCount) {
+      stopAutomation('No Zillow field data was written or confirmed; tag replacement skipped');
+      return false;
     }
 
     if (changed) {
@@ -3437,8 +3763,7 @@
           setStatus('Waiting for existing Zillow tab');
           return;
         }
-        promoteJobToFallback(job, 'Could not open Zillow tab');
-        setStatus('Using fallback Zillow data');
+        reloadAgencyZoomForFreshZillowAttempt(job, 'Could not open Zillow tab');
         return;
       }
 
@@ -3456,8 +3781,7 @@
       } else if (hasFreshZillowOpenBlock()) {
         setStatus('Waiting for existing Zillow tab');
       } else {
-        promoteJobToFallback(job, 'Could not reopen Zillow tab after address change');
-        setStatus('Using fallback Zillow data');
+        reloadAgencyZoomForFreshZillowAttempt(job, 'Could not reopen Zillow tab after address change');
       }
       return;
     }
@@ -3499,16 +3823,13 @@
     }
 
     if (norm(job.status) === 'failed') {
-      if (promoteJobToFallback(job, getZillowJobErrorText(job))) {
-        setStatus('Using fallback Zillow data');
-      }
+      reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
       return;
     }
 
     const ageMs = getJobActiveAgeMs(job);
     if (ageMs > CFG.zillowWaitMs) {
-      promoteJobToFallback(job, 'Zillow scrape timed out');
-      setStatus('Using fallback Zillow data');
+      reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow scrape timed out');
       return;
     }
 
