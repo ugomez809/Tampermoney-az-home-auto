@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.0
+// @version      1.4.1
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -103,6 +103,7 @@
     zillowMaxLaunches: 0,
     zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
+    zillowMissingFactsReloadMax: 2,
     azRefreshIfNoZillowOpenMs: 300000,
     pageSlotTtlMs: 12000,
     zillowOpenLeaseMs: 20000,
@@ -2502,6 +2503,28 @@
     return true;
   }
 
+  function getJobCounter(job, key) {
+    const raw = Number(job?.[key] || 0);
+    if (!Number.isFinite(raw) || raw < 0) return 0;
+    return Math.floor(raw);
+  }
+
+  function isTerminalZillowFailure(job) {
+    return !!norm(job?.terminalFailureAt || '');
+  }
+
+  function markTerminalZillowFailure(job, reason) {
+    if (!isPlainObject(job)) return false;
+    clearZillowOpenSlot();
+    job.status = 'failed';
+    job.updatedAt = nowIso();
+    job.error = norm(reason || 'Zillow could not provide required data');
+    job.terminalFailureAt = nowIso();
+    saveJob(job);
+    log(`Terminal Zillow failure for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${job.error}`);
+    return true;
+  }
+
   function getIsoAgeMs(value) {
     return Math.max(0, Date.now() - Date.parse(norm(value || nowIso())));
   }
@@ -2702,6 +2725,10 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
+      if (isTerminalZillowFailure(job)) {
+        stopAutomation(`Zillow failed for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${getZillowJobErrorText(job)}. Tag replacement skipped. Click CLEAR JOB before retrying this ticket.`);
+        return true;
+      }
       reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
       return true;
     }
@@ -3170,6 +3197,19 @@
     if (missingRequiredFacts.length) {
       if (listingAgeMs >= CFG.zillowFactSettleMs) {
         const reason = `Zillow listing missing ${missingRequiredFacts.join(', ')} (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
+        const reloadCount = getJobCounter(job, 'missingFactsReloadCount');
+        if (reloadCount >= CFG.zillowMissingFactsReloadMax) {
+          markTerminalZillowFailure(
+            job,
+            `${reason}; stopped after ${reloadCount} reload attempt(s). Required facts were not available on Zillow.`
+          );
+          closeCurrentTabSoon();
+          return;
+        }
+        job.missingFactsReloadCount = reloadCount + 1;
+        job.updatedAt = nowIso();
+        saveJob(job);
+        log(`Zillow missing required facts; reload attempt ${job.missingFactsReloadCount}/${CFG.zillowMissingFactsReloadMax}`);
         reloadZillowPageForJob(job, reason);
       } else {
         logProgress(
@@ -3989,6 +4029,10 @@
     }
 
     if (norm(job.status) === 'failed') {
+      if (isTerminalZillowFailure(job)) {
+        stopAutomation(`Zillow failed for AZ ${norm(job.ticketId || state.activeTicketId || '?')}: ${getZillowJobErrorText(job)}. Tag replacement skipped. Click CLEAR JOB before retrying this ticket.`);
+        return;
+      }
       reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
       return;
     }
