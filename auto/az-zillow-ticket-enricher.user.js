@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.2
+// @version      1.4.3
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -1321,7 +1321,7 @@
       if (hasMeaningfulExistingFieldValue(currentValue)) {
         return {
           ok: true,
-          skipped: fieldValueMatchesExpected(label, currentValue, nextValue) ? 'existing-value' : 'existing-different-value',
+          skipped: 'existing-value',
           currentValue
         };
       }
@@ -2214,32 +2214,6 @@
       if (publicSegments.length === segments.length) return baseUrl;
       return publicSegments.length ? `${prefix}#${publicSegments.join('&')}` : prefix;
     }
-  }
-
-  function normalizeComparableUrl(value) {
-    const stripped = stripZillowJobHashFromUrl(value);
-    if (!stripped) return '';
-    try {
-      const parsed = new URL(stripped);
-      parsed.hash = '';
-      return parsed.toString().replace(/\/+$/g, '').toLowerCase();
-    } catch {
-      return stripped.replace(/#.*$/g, '').replace(/\/+$/g, '').toLowerCase();
-    }
-  }
-
-  function normalizeComparableFieldValue(label, value) {
-    const cleanLabel = canonicalFieldLabel(label);
-    if (lower(cleanLabel) === 'zillow url') return normalizeComparableUrl(value);
-    if (lower(cleanLabel) === 'bedrooms' || lower(cleanLabel) === 'bathrooms') return lower(normalizeRoomValue(value));
-    if (lower(cleanLabel) === 'home type') return lower(normalizeHomeType(value));
-    return lower(norm(value));
-  }
-
-  function fieldValueMatchesExpected(label, current, expected) {
-    const currentValue = normalizeComparableFieldValue(label, current);
-    const expectedValue = normalizeComparableFieldValue(label, expected);
-    return !!currentValue && !!expectedValue && currentValue === expectedValue;
   }
 
   function createJobId(ticketId) {
@@ -3718,7 +3692,6 @@
     let skippedExistingCount = 0;
     let missingTargetCount = 0;
     let failedCount = 0;
-    let blockedExistingCount = 0;
     let valueCount = 0;
 
     for (const label of labels) {
@@ -3741,10 +3714,7 @@
       if (result.ok) {
         if (result.skipped === 'existing-value') {
           skippedExistingCount += 1;
-          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}`);
-        } else if (result.skipped === 'existing-different-value') {
-          blockedExistingCount += 1;
-          log(`Field blocked: ${label} already has ${result.currentValue}; expected ${value}`);
+          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}; Zillow value was ${value}`);
         } else {
           changed = true;
           appliedCount += 1;
@@ -3755,18 +3725,6 @@
         log(`Field failed: ${label} | ${result.reason}`);
       }
       await sleep(250);
-    }
-
-    if (blockedExistingCount) {
-      if (changed) {
-        const updated = await clickUpdateButton();
-        if (!updated) {
-          setStatus('Ticket update failed');
-          return false;
-        }
-      }
-      stopAutomation(`${blockedExistingCount} Zillow field(s) already had different values; tag replacement skipped`);
-      return false;
     }
 
     if (failedCount || (valueCount && !changed && !skippedExistingCount && missingTargetCount)) {
@@ -3786,8 +3744,7 @@
     }
 
     if (!changed && !skippedExistingCount) {
-      stopAutomation('No Zillow field data was written or confirmed; tag replacement skipped');
-      return false;
+      log('No Zillow field values were written or confirmed; continuing to tag replacement');
     }
 
     if (changed) {
