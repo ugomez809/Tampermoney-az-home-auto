@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.9
+// @version      1.4.0
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -109,7 +109,7 @@
     zillowTabHeartbeatStaleMs: 15000,
     maxLogLines: 1000,
     statusLogHeartbeatMs: 15000,
-    progressLogMs: 7000,
+    progressLogMs: 15000,
     panelWidth: 390,
     zIndex: 2147483647
   };
@@ -165,6 +165,7 @@
     zillowSummary: '',
     lastStatus: '',
     lastLoggedStatus: '',
+    lastStatusLogKey: '',
     lastStatusLoggedAt: 0,
     mainReadyTicketId: '',
     lastWrongAzUrl: '',
@@ -391,11 +392,28 @@
       .slice(-CFG.maxLogLines);
   }
 
+  function mergeLogLines(...groups) {
+    const seen = new Set();
+    const merged = [];
+    for (const group of groups) {
+      if (!Array.isArray(group)) continue;
+      for (const line of group) {
+        const clean = norm(line);
+        if (!clean || seen.has(clean)) continue;
+        seen.add(clean);
+        merged.push(clean);
+      }
+    }
+    return merged.slice(-CFG.maxLogLines);
+  }
+
   function savePersistedLogs() {
-    writeGM(GM_KEYS.logs, state.logs.slice(-CFG.maxLogLines));
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
+    writeGM(GM_KEYS.logs, state.logs);
   }
 
   function getLogText() {
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
     const lines = state.logs.slice(-CFG.maxLogLines);
     if (state.lastStatus) {
       lines.push(`[${timeNow()}] Current status: ${state.lastStatus}`);
@@ -810,14 +828,13 @@
   }
 
   function log(message) {
-    const line = `[${timeNow()}] ${norm(message)}`;
-    state.logs.push(line);
-    if (state.logs.length > CFG.maxLogLines) {
-      state.logs.splice(0, state.logs.length - CFG.maxLogLines);
-    }
+    const cleanMessage = norm(message);
+    if (!cleanMessage) return;
+    const line = `[${timeNow()}] ${cleanMessage}`;
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs, [line]);
     savePersistedLogs();
     renderLogs();
-    try { console.log(`[${SCRIPT_NAME}] ${message}`); } catch {}
+    try { console.log(`[${SCRIPT_NAME}] ${cleanMessage}`); } catch {}
   }
 
   function logProgress(key, message, intervalMs = CFG.progressLogMs) {
@@ -833,6 +850,12 @@
     log(cleanMessage);
   }
 
+  function getStatusLogKey(status) {
+    const text = norm(status);
+    if (/^Waiting for Zillow \(\d+s\)$/i.test(text)) return 'Waiting for Zillow';
+    return text;
+  }
+
   function setStatus(text, options = null) {
     const nextStatus = norm(text || '');
     state.lastStatus = nextStatus;
@@ -843,11 +866,13 @@
 
     const now = Date.now();
     const allowHeartbeat = nextStatus !== 'Stopped';
+    const statusLogKey = getStatusLogKey(nextStatus);
     if (
-      state.lastLoggedStatus !== nextStatus ||
+      state.lastStatusLogKey !== statusLogKey ||
       (allowHeartbeat && (now - Number(state.lastStatusLoggedAt || 0)) >= CFG.statusLogHeartbeatMs)
     ) {
       state.lastLoggedStatus = nextStatus;
+      state.lastStatusLogKey = statusLogKey;
       state.lastStatusLoggedAt = now;
       log(`Status: ${nextStatus}`);
     }
@@ -855,6 +880,7 @@
 
   function renderLogs() {
     if (!state.ui.logs) return;
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
     state.ui.logs.value = state.logs.join('\n');
     state.ui.logs.scrollTop = state.ui.logs.scrollHeight;
   }
@@ -2654,6 +2680,21 @@
       }
 
       const remaining = Math.max(1, Math.ceil((CFG.zillowWaitMs - ageMs) / 1000));
+      const heartbeat = getFreshZillowTabHeartbeat();
+      logProgress(
+        `az-zillow-wait-${norm(job.jobId || '')}`,
+        [
+          `Waiting for Zillow job ${norm(job.ticketId || state.activeTicketId || '?')}`,
+          `status=${jobStatus || 'blank'}`,
+          `launches=${getJobLaunchCount(job)}`,
+          `age=${Math.ceil(ageMs / 1000)}s`,
+          `lastError=${norm(job.error || '') || 'none'}`,
+          `listingNavigated=${norm(job.listingNavigatedAt || '') || 'no'}`,
+          `listingSeen=${norm(job.listingSeenAt || '') || 'no'}`,
+          `zillowTab=${heartbeat ? stripZillowJobHashFromUrl(norm(heartbeat.url || '')) || 'fresh heartbeat' : 'no fresh heartbeat'}`
+        ].join(' | '),
+        10000
+      );
       setStatus(`Waiting for Zillow (${remaining}s)`);
       return true;
     }
@@ -3786,13 +3827,13 @@
 
   async function runAzWorkflow() {
     if (!CFG.openTicketOnly) {
-      setStatus('Checking field target setup');
+      setStatus('Checking field target setup', { log: false });
       if (!hasAllFieldTargets()) {
         setStatus('Field target setup required');
         return;
       }
 
-      setStatus('Checking tag target setup');
+      setStatus('Checking tag target setup', { log: false });
       if (!hasAllTagTargets()) {
         setStatus('Tag target setup required');
         return;
@@ -3800,7 +3841,7 @@
     }
 
     if (isPipelinePage()) {
-      setStatus(`Ensuring ${CFG.savedQueryName} filter`);
+      setStatus(`Ensuring ${CFG.savedQueryName} filter`, { log: false });
       const filterReady = await ensureIgnoredV2Filter();
       if (!filterReady) {
         setStatus('Ingored v2 filter failed');
@@ -4018,7 +4059,7 @@
     }
 
     state.busy = true;
-    logProgress('az-workflow-tick', 'Starting AgencyZoom workflow tick', 12000);
+    logProgress('az-workflow-tick', `AgencyZoom workflow tick running; current status is ${state.lastStatus || 'starting'}`, 30000);
     renderAll();
 
     try {
