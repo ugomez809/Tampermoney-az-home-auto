@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.2
+// @version      1.9.3
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.2';
+  const VERSION = '1.9.3';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -47,8 +47,9 @@
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
-    afterAltaCheckboxInternalMs: 700,
+    afterAltaCheckboxInternalMs: 1000,
     afterPolicyCenterRadioInternalMs: 250,
+    policyCenterRadioRevealTimeoutMs: 5000,
     afterResidenceBeforeContinueMs: 6000,
     afterContinueClickMs: 1200,
     afterContinueBeforeCloseMs: 5000,
@@ -981,17 +982,32 @@
     return !!(el && el instanceof Element && !isDisabled(el) && isVisible(el) && !hasHiddenAncestor(el));
   }
 
-  function getAltaIneligibleCheckbox() {
-    const scope = getQuoteModal() || document;
+  function deepQueryAllUnique(selector, scopes) {
+    const out = [];
+    const seen = new WeakSet();
 
-    const candidates = deepQueryAll([
+    for (const scope of scopes) {
+      if (!scope) continue;
+      for (const el of deepQueryAll(selector, scope)) {
+        if (!el || seen.has(el)) continue;
+        seen.add(el);
+        out.push(el);
+      }
+    }
+
+    return out;
+  }
+
+  function getAltaIneligibleCheckbox() {
+    const modal = getQuoteModal();
+    const candidates = deepQueryAllUnique([
       'input[type="checkbox"][data-name="vehiclesChkbx"]',
       'input[type="checkbox"]'
-    ].join(','), scope);
+    ].join(','), [modal, document]);
 
     const matches = [];
     for (const el of candidates) {
-      if (!isAvailableInput(el)) continue;
+      if (isDisabled(el) || hasHiddenAncestor(el)) continue;
 
       const dataName = norm(el.getAttribute('data-name'));
       const label = lower([
@@ -1009,7 +1025,8 @@
       const score =
         (dataName === 'vehiclesChkbx' ? 1000 : 0) +
         (label.includes('quote not eligible') ? 300 : 0) +
-        (label.includes('alta') ? 300 : 0);
+        (label.includes('alta') ? 300 : 0) +
+        (isVisible(el) ? 100 : 0);
 
       matches.push({ el, score });
     }
@@ -1024,9 +1041,11 @@
     const doc = checkbox.ownerDocument || document;
     const view = doc.defaultView || window;
 
-    try {
-      checkbox.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    } catch {}
+    if (isVisible(checkbox)) {
+      try {
+        checkbox.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      } catch {}
+    }
 
     try {
       checkbox.focus?.({ preventScroll: true });
@@ -1035,12 +1054,16 @@
     }
 
     if (!checkbox.checked) {
+      manualLikeClickOnce(checkbox, 'Alta ineligible checkbox', { allowRepeat: true });
+    }
+
+    if (!checkbox.checked) {
       try {
         checkbox.click?.();
       } catch {}
     }
 
-    if (!checkbox.checked) {
+    if (!checkbox.checked && isVisible(checkbox)) {
       try {
         checkbox.dispatchEvent(new view.MouseEvent('click', {
           bubbles: true,
@@ -1049,6 +1072,19 @@
           view
         }));
       } catch {}
+    }
+
+    if (!checkbox.checked) {
+      const wrapper = findAncestorAcrossRoots(checkbox, el => {
+        if (!(el instanceof Element)) return false;
+        if (el === checkbox) return false;
+        const text = lower(el.textContent || '');
+        return text.includes('quote not eligible') && text.includes('alta');
+      });
+
+      if (wrapper && isVisible(wrapper)) {
+        manualLikeClickOnce(wrapper, 'Alta ineligible checkbox wrapper', { allowRepeat: true });
+      }
     }
 
     if (!checkbox.checked) {
@@ -1102,15 +1138,14 @@
   }
 
   function getPolicyCenterHomeRadio() {
-    const scope = getQuoteModal() || document;
-
-    const candidates = deepQueryAll([
+    const modal = getQuoteModal();
+    const candidates = deepQueryAllUnique([
       'input[type="radio"][data-name="pcHomeRadio"][name="footerHomeRadio"][value="pcRadio"]',
       'input[type="radio"][data-name="pcHomeRadio"]',
       'input[type="radio"][name="footerHomeRadio"][value="pcRadio"]',
       'input[type="radio"][title="Policy Center"][value="pcRadio"]',
       'input[type="radio"][data-name="pcRadio"][value="pcRadio"]'
-    ].join(','), scope);
+    ].join(','), [modal, document]);
 
     const matches = [];
     for (const el of candidates) {
@@ -1139,6 +1174,20 @@
 
     matches.sort((a, b) => b.score - a.score);
     return matches[0]?.el || null;
+  }
+
+  async function waitForPolicyCenterHomeRadio() {
+    const startedAt = now();
+
+    while (now() - startedAt < CFG.policyCenterRadioRevealTimeoutMs) {
+      const radio = getPolicyCenterHomeRadio();
+      if (radio) return radio;
+
+      logWait('Waiting for visible PolicyCenter home radio...', 1500);
+      await sleep(CFG.waitIntervalMs);
+    }
+
+    return getPolicyCenterHomeRadio();
   }
 
   function getPolicyCenterHomeRadioLabel(radio) {
@@ -1239,7 +1288,7 @@
   }
 
   async function ensurePolicyCenterHomeRadioSelected() {
-    const radio = getPolicyCenterHomeRadio();
+    const radio = await waitForPolicyCenterHomeRadio();
     if (!radio) {
       log('Visible PolicyCenter home radio not present; continuing.');
       return true;
@@ -1279,17 +1328,18 @@
     for (const el of clickableCandidates) {
       if (!isVisible(el) || isDisabled(el)) continue;
       const label = getLabel(el);
-      if (!/\bContinue New Quote\b/i.test(label)) continue;
+      if (!/\bContinue(?: New Quote)?\b/i.test(label)) continue;
 
       const rect = el.getBoundingClientRect();
-      const exact = /^Continue New Quote$/i.test(label) ? 1000 : 0;
+      const exact = /^Continue New Quote$/i.test(label) ? 1000 : /^Continue$/i.test(label) ? 900 : 0;
       const isButton = el.matches('button, input[type="button"], input[type="submit"]') ? 300 : 0;
       const isRoleButton = el.getAttribute('role') === 'button' ? 200 : 0;
       const hasSldsButton = el.classList?.contains('slds-button') ? 100 : 0;
+      const hasBrandButton = el.classList?.contains('slds-button_brand') ? 100 : 0;
       const areaPenalty = Math.min(250, Math.round((rect.width * rect.height) / 1000));
       matches.push({
         el,
-        score: exact + isButton + isRoleButton + hasSldsButton - areaPenalty
+        score: exact + isButton + isRoleButton + hasSldsButton + hasBrandButton - areaPenalty
       });
     }
 
