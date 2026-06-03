@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.8.11
+// @version      1.8.12
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, select Residence Address, wait for Continue New Quote readiness, and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.8.11';
+  const VERSION = '1.8.12';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   // NOTE: @grant stays `none` so this script runs in the page's JS context.
@@ -45,6 +45,7 @@
 
     afterHomeClickMs: 2000,
     afterResidenceRadioInternalMs: 250,
+    afterPolicyCenterRadioInternalMs: 250,
     afterResidenceBeforeContinueMs: 6000,
     afterContinueClickMs: 1200,
     afterContinueBeforeCloseMs: 5000,
@@ -55,6 +56,7 @@
     continueClickAttempts: 3,
 
     residenceRadioAttempts: 3,
+    policyCenterRadioAttempts: 3,
     maxLogLines: 16,
     panelRight: 12,
     panelBottom: 12,
@@ -863,6 +865,173 @@
     return false;
   }
 
+  function getPolicyCenterHomeRadio() {
+    const scope = getQuoteModal() || document;
+
+    const candidates = deepQueryAll([
+      'input[type="radio"][data-name="pcHomeRadio"][name="footerHomeRadio"][value="pcRadio"]',
+      'input[type="radio"][data-name="pcHomeRadio"]',
+      'input[type="radio"][name="footerHomeRadio"][value="pcRadio"]',
+      'input[type="radio"][title="Policy Center"][value="pcRadio"]',
+      'input[type="radio"][data-name="pcRadio"][value="pcRadio"]'
+    ].join(','), scope);
+
+    const matches = [];
+    for (const el of candidates) {
+      if (isDisabled(el)) continue;
+
+      const dataName = norm(el.getAttribute('data-name'));
+      const name = norm(el.getAttribute('name'));
+      const value = norm(el.getAttribute('value'));
+      const title = norm(el.getAttribute('title'));
+
+      const isTarget =
+        dataName === 'pcHomeRadio' ||
+        (name === 'footerHomeRadio' && value === 'pcRadio') ||
+        (title === 'Policy Center' && value === 'pcRadio') ||
+        (dataName === 'pcRadio' && value === 'pcRadio');
+
+      if (!isTarget) continue;
+
+      const score =
+        (dataName === 'pcHomeRadio' ? 1000 : 0) +
+        (name === 'footerHomeRadio' ? 500 : 0) +
+        (title === 'Policy Center' ? 200 : 0) +
+        (isVisible(el) ? 100 : 0);
+
+      matches.push({ el, score });
+    }
+
+    matches.sort((a, b) => b.score - a.score);
+    return matches[0]?.el || null;
+  }
+
+  function getPolicyCenterHomeRadioLabel(radio) {
+    const scope = getQuoteModal() || document;
+
+    const direct = findAncestorAcrossRoots(radio, el => el.tagName === 'LABEL');
+    if (direct) return direct;
+
+    const wrappers = [];
+    let cur = radio;
+    while (cur && cur instanceof Element && wrappers.length < 4) {
+      wrappers.push(cur);
+      cur = cur.parentElement;
+    }
+
+    for (const wrapper of wrappers) {
+      const spans = deepQueryAll('span', wrapper);
+      for (const span of spans) {
+        if (/\bPolicyCenter\b/i.test(norm(span.textContent))) return span;
+      }
+    }
+
+    const labels = deepQueryAll('label, span', scope);
+    for (const label of labels) {
+      if (!isVisible(label)) continue;
+      if (label.contains(radio)) return label;
+      if (/\bPolicyCenter\b/i.test(norm(label.textContent))) return label;
+    }
+
+    return null;
+  }
+
+  function forceSelectPolicyCenterHomeRadio(radio) {
+    if (!radio) return false;
+
+    const doc = radio.ownerDocument || document;
+    const view = doc.defaultView || window;
+
+    if (isVisible(radio)) {
+      try {
+        radio.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      } catch {}
+
+      try {
+        radio.focus?.({ preventScroll: true });
+      } catch {
+        try { radio.focus?.(); } catch {}
+      }
+    }
+
+    if (!radio.checked) {
+      setCheckedProperty(radio, true);
+    }
+
+    try {
+      radio.dispatchEvent(new view.Event('input', {
+        bubbles: true,
+        composed: true
+      }));
+    } catch {}
+
+    try {
+      radio.dispatchEvent(new view.Event('change', {
+        bubbles: true,
+        composed: true
+      }));
+    } catch {}
+
+    try {
+      radio.click?.();
+    } catch {}
+
+    try {
+      radio.dispatchEvent(new view.MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view
+      }));
+    } catch {}
+
+    if (radio.checked) return true;
+
+    const label = getPolicyCenterHomeRadioLabel(radio);
+    if (label) {
+      try { label.click?.(); } catch {}
+      try {
+        label.dispatchEvent(new view.MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view
+        }));
+      } catch {}
+    }
+
+    return !!radio.checked;
+  }
+
+  async function ensurePolicyCenterHomeRadioSelected() {
+    const radio = getPolicyCenterHomeRadio();
+    if (!radio) {
+      log('PolicyCenter home radio not present; continuing.');
+      return true;
+    }
+
+    if (radio.checked) {
+      log('PolicyCenter home radio already selected.');
+      return true;
+    }
+
+    for (let attempt = 1; attempt <= CFG.policyCenterRadioAttempts; attempt++) {
+      log(`Selecting PolicyCenter home radio (${attempt}/${CFG.policyCenterRadioAttempts})`);
+
+      const ok = forceSelectPolicyCenterHomeRadio(radio);
+      await sleep(CFG.afterPolicyCenterRadioInternalMs);
+
+      const fresh = getPolicyCenterHomeRadio();
+      if (ok || fresh?.checked) {
+        log('PolicyCenter home radio selected.');
+        return true;
+      }
+    }
+
+    log('PolicyCenter home radio could not be selected.');
+    return false;
+  }
+
   function getContinueButton() {
     const scope = getQuoteModal() || document;
 
@@ -1291,6 +1460,12 @@
 
       log(`Waiting ${Math.ceil(CFG.afterResidenceBeforeContinueMs / 1000)} seconds before Continue New Quote readiness check...`);
       await sleep(CFG.afterResidenceBeforeContinueMs);
+
+      const policyCenterHomeSelected = await ensurePolicyCenterHomeRadioSelected();
+      if (!policyCenterHomeSelected) {
+        setStatus('Running');
+        return;
+      }
 
       const continueClicked = await clickContinueNewQuote(quoteKey);
 
