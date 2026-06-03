@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.3
+// @version      1.9.4
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.3';
+  const VERSION = '1.9.4';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1883,6 +1883,12 @@
         log('Risk Address was already prepared by APEX Address Repair; skipping Home click.');
       }
 
+      const altaCheckboxReady = await ensureAltaIneligibleCheckboxCheckedIfAvailable();
+      if (!altaCheckboxReady) {
+        setStatus('Running');
+        return;
+      }
+
       const repairDecision = await waitForAddressRepairDecision(quoteKey);
       if (!repairDecision.ready) {
         return;
@@ -1900,12 +1906,6 @@
 
       log(`Waiting ${Math.ceil(CFG.afterResidenceBeforeContinueMs / 1000)} seconds before Continue New Quote readiness check...`);
       await sleep(CFG.afterResidenceBeforeContinueMs);
-
-      const altaCheckboxReady = await ensureAltaIneligibleCheckboxCheckedIfAvailable();
-      if (!altaCheckboxReady) {
-        setStatus('Running');
-        return;
-      }
 
       const policyCenterHomeSelected = await ensurePolicyCenterHomeRadioSelected();
       if (!policyCenterHomeSelected) {
