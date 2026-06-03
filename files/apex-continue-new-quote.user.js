@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.6
+// @version      1.9.7
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.6';
+  const VERSION = '1.9.7';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1388,7 +1388,8 @@
       await sleep(CFG.waitIntervalMs);
     }
 
-    return getContinueButton();
+    const btn = getContinueButton();
+    return isContinueButtonReady(btn) ? btn : null;
   }
 
   function getCenterHitElement(el) {
@@ -1480,27 +1481,28 @@
     const startUrl = location.href;
 
     for (let attempt = 1; attempt <= CFG.continueClickAttempts; attempt++) {
-      const continueBtn = await waitForContinueButtonReady();
-      if (!continueBtn) {
-        log('Continue New Quote button missing.');
-        return false;
-      }
-
       const altaCheckboxReady = await ensureAltaIneligibleCheckboxCheckedIfAvailable('before Continue', CFG.altaCheckboxAttempts);
       if (!altaCheckboxReady) {
         log('Alta ineligible checkbox is not stable before Continue; retrying later.');
         return false;
       }
 
+      const continueBtn = await waitForContinueButtonReady();
+      if (!continueBtn) {
+        log('Continue New Quote button missing or not ready after Alta check.');
+        return false;
+      }
+
       const targets = getContinueClickTargets(continueBtn);
-      const target = targets[Math.min(attempt - 1, Math.max(0, targets.length - 1))] || continueBtn;
+      const fallbackTarget = targets[Math.min(attempt - 2, Math.max(0, targets.length - 1))] || continueBtn;
+      const target = attempt === 1 ? continueBtn : fallbackTarget;
       const reason = `Continue New Quote attempt ${attempt}/${CFG.continueClickAttempts}`;
 
       log(`Clicking ${reason}: ${describeClickTarget(target)}`);
       const clickStartedAt = now();
 
       const clicked =
-        attempt === CFG.continueClickAttempts
+        attempt <= 2
           ? nativeClickOnce(target, reason, { allowRepeat: true })
           : manualLikeClickOnce(target, reason, { allowRepeat: true });
 
