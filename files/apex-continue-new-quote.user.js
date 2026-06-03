@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.5
+// @version      1.9.6
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.5';
+  const VERSION = '1.9.6';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1040,9 +1040,6 @@
   function forceCheckAltaIneligibleCheckbox(checkbox) {
     if (!checkbox) return false;
 
-    const doc = checkbox.ownerDocument || document;
-    const view = doc.defaultView || window;
-
     log(`Attempting Alta checkbox click: ${describeClickTarget(checkbox)}`);
 
     if (isVisible(checkbox)) {
@@ -1057,93 +1054,63 @@
       try { checkbox.focus?.(); } catch {}
     }
 
+    if (checkbox.checked) return true;
+
     if (!checkbox.checked) {
       try {
         checkbox.click?.();
-      } catch {}
-    }
-
-    if (!checkbox.checked) {
-      manualLikeClickOnce(checkbox, 'Alta ineligible checkbox', { allowRepeat: true });
-    }
-
-    if (!checkbox.checked && isVisible(checkbox)) {
-      try {
-        checkbox.dispatchEvent(new view.MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view
-        }));
-      } catch {}
-    }
-
-    if (!checkbox.checked) {
-      const wrapper = findAncestorAcrossRoots(checkbox, el => {
-        if (!(el instanceof Element)) return false;
-        if (el === checkbox) return false;
-        const text = lower(el.textContent || '');
-        return text.includes('quote not eligible') && text.includes('alta');
-      });
-
-      if (wrapper && isVisible(wrapper)) {
-        manualLikeClickOnce(wrapper, 'Alta ineligible checkbox wrapper', { allowRepeat: true });
+        return true;
+      } catch (err) {
+        log(`Alta checkbox click failed: ${err?.message || err}`);
       }
     }
 
-    if (!checkbox.checked) {
-      setCheckedProperty(checkbox, true);
-    }
-
-    try {
-      checkbox.dispatchEvent(new view.Event('input', {
-        bubbles: true,
-        composed: true
-      }));
-    } catch {}
-
-    try {
-      checkbox.dispatchEvent(new view.Event('change', {
-        bubbles: true,
-        composed: true
-      }));
-    } catch {}
-
-    if (!checkbox.checked) {
-      try {
-        checkbox.setAttribute('checked', 'checked');
-      } catch {}
-    }
-
-    return !!checkbox.checked;
+    return false;
   }
 
-  async function ensureAltaIneligibleCheckboxCheckedIfAvailable() {
-    const checkbox = getAltaIneligibleCheckbox();
-    if (!checkbox) {
-      log('Alta ineligible checkbox not present; continuing.');
-      return true;
-    }
+  async function ensureAltaIneligibleCheckboxCheckedIfAvailable(context = '', attempts = CFG.altaCheckboxAttempts) {
+    const totalAttempts = Math.max(1, Number(attempts || CFG.altaCheckboxAttempts));
+    const contextLabel = context ? ` (${context})` : '';
 
-    if (checkbox.checked) {
-      log('Alta ineligible checkbox already checked.');
-      return true;
-    }
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      const checkbox = getAltaIneligibleCheckbox();
+      if (!checkbox) {
+        log(`Alta ineligible checkbox not present${contextLabel}; continuing.`);
+        return true;
+      }
 
-    for (let attempt = 1; attempt <= CFG.altaCheckboxAttempts; attempt++) {
-      log(`Checking Alta ineligible checkbox (${attempt}/${CFG.altaCheckboxAttempts})`);
+      if (checkbox.checked) {
+        await sleep(CFG.afterAltaCheckboxInternalMs);
 
-      const ok = forceCheckAltaIneligibleCheckbox(checkbox);
+        const freshChecked = getAltaIneligibleCheckbox();
+        if (!freshChecked || freshChecked.checked) {
+          log(`Alta ineligible checkbox checked${contextLabel}.`);
+          return true;
+        }
+
+        log(`Alta ineligible checkbox was unchecked by the page${contextLabel}; retrying.`);
+        continue;
+      }
+
+      log(`Checking Alta ineligible checkbox${contextLabel} (${attempt}/${totalAttempts})`);
+      forceCheckAltaIneligibleCheckbox(checkbox);
       await sleep(CFG.afterAltaCheckboxInternalMs);
 
       const fresh = getAltaIneligibleCheckbox();
-      if (ok || fresh?.checked) {
-        log('Alta ineligible checkbox checked.');
+      if (!fresh) {
+        log(`Alta ineligible checkbox no longer present${contextLabel}; continuing.`);
         return true;
       }
+
+      if (fresh.checked) {
+        log(`Alta ineligible checkbox checked${contextLabel}.`);
+        return true;
+      }
+
+      log(`Alta ineligible checkbox is still unchecked${contextLabel}; retrying.`);
     }
 
-    log('Alta ineligible checkbox could not be checked.');
+    log(`Alta ineligible checkbox could not stay checked${contextLabel}.`);
     return false;
   }
 
@@ -1519,6 +1486,12 @@
         return false;
       }
 
+      const altaCheckboxReady = await ensureAltaIneligibleCheckboxCheckedIfAvailable('before Continue', CFG.altaCheckboxAttempts);
+      if (!altaCheckboxReady) {
+        log('Alta ineligible checkbox is not stable before Continue; retrying later.');
+        return false;
+      }
+
       const targets = getContinueClickTargets(continueBtn);
       const target = targets[Math.min(attempt - 1, Math.max(0, targets.length - 1))] || continueBtn;
       const reason = `Continue New Quote attempt ${attempt}/${CFG.continueClickAttempts}`;
@@ -1860,11 +1833,7 @@
     log(`Quote detected: ${quoteKey}`);
 
     try {
-      const altaCheckboxReadyEarly = await ensureAltaIneligibleCheckboxCheckedIfAvailable();
-      if (!altaCheckboxReadyEarly) {
-        setStatus('Running');
-        return;
-      }
+      await ensureAltaIneligibleCheckboxCheckedIfAvailable('initial', 1);
 
       if (shouldPauseBeforeHomeForAddressRepair(quoteKey)) {
         return;
@@ -1897,6 +1866,11 @@
         await sleep(CFG.afterHomeClickMs);
       } else {
         log('Risk Address was already prepared by APEX Address Repair; skipping Home click.');
+      }
+
+      const altaCheckboxReadyAfterHome = await ensureAltaIneligibleCheckboxCheckedIfAvailable('after Home', 2);
+      if (!altaCheckboxReadyAfterHome) {
+        log('Alta ineligible checkbox did not stay checked after Home; will retry before Continue.');
       }
 
       const repairDecision = await waitForAddressRepairDecision(quoteKey);
