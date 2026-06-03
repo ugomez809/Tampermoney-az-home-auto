@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.7
+// @version      1.9.8
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.7';
+  const VERSION = '1.9.8';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -179,6 +179,47 @@
     return request;
   }
 
+  function buildWindowOpenStub(url) {
+    const stub = {
+      closed: false,
+      opener: window,
+      location: {
+        href: resolveOpenUrl(url),
+        assign(nextUrl) {
+          this.href = resolveOpenUrl(nextUrl);
+        },
+        replace(nextUrl) {
+          this.href = resolveOpenUrl(nextUrl);
+        },
+        toString() {
+          return this.href;
+        }
+      },
+      blur() {},
+      close() {
+        this.closed = true;
+      },
+      focus() {},
+      postMessage() {}
+    };
+
+    return stub;
+  }
+
+  function findRecentSupervisorOpenRequest(url, withinMs = 15000) {
+    const cleanUrl = resolveOpenUrl(url);
+    const cutoff = now() - withinMs;
+
+    for (let i = state.windowOpenCalls.length - 1; i >= 0; i--) {
+      const call = state.windowOpenCalls[i];
+      if (!call || call.at < cutoff) continue;
+      if (resolveOpenUrl(call.url || '') !== cleanUrl) continue;
+      if (call.supervisorRequestId) return call;
+    }
+
+    return null;
+  }
+
   async function waitForSharedOpenRequestResult(requestId, timeoutMs) {
     const startedAt = now();
     const safeTimeoutMs = Math.max(CFG.waitIntervalMs, Number(timeoutMs || 0));
@@ -213,28 +254,47 @@
         const resolvedUrl = resolveOpenUrl(url);
         let opened = null;
         let threw = null;
+        let supervisorRequest = null;
 
         try {
           opened = originalOpen.apply(this, arguments);
-          return opened;
         } catch (err) {
           threw = err;
           throw err;
         } finally {
-          state.windowOpenCalls.push({
+          if (!opened && !threw && isLikelyGwpcUrl(resolvedUrl)) {
+            const recent = findRecentSupervisorOpenRequest(resolvedUrl);
+            supervisorRequest = recent?.supervisorRequestId
+              ? { requestId: recent.supervisorRequestId }
+              : requestSupervisorGwpcOpen({ url: resolvedUrl });
+
+            if (supervisorRequest?.requestId) {
+              log(`GWPC popup blocked during window.open; supervisor request ${supervisorRequest.requestId}: ${resolvedUrl}`);
+            }
+          }
+
+          const call = {
             url: resolvedUrl,
             rawUrl: String(url || ''),
             target: String(target || ''),
             features: String(features || ''),
             blocked: !opened,
             error: threw ? String(threw?.message || threw) : '',
+            supervisorRequestId: supervisorRequest?.requestId || '',
             at: now()
-          });
+          };
+          state.windowOpenCalls.push(call);
 
           if (state.windowOpenCalls.length > 20) {
             state.windowOpenCalls.splice(0, state.windowOpenCalls.length - 20);
           }
         }
+
+        if (!opened && !threw && isLikelyGwpcUrl(resolvedUrl)) {
+          return buildWindowOpenStub(resolvedUrl);
+        }
+
+        return opened;
       };
 
       log('window.open handoff monitor installed');
@@ -1449,7 +1509,9 @@
       const blockedGwpc = getRecentBlockedGwpcOpen(clickStartedAt || startedAt);
       if (blockedGwpc && !blockedPopupHandled) {
         blockedPopupHandled = true;
-        const request = requestSupervisorGwpcOpen(blockedGwpc);
+        const request = blockedGwpc.supervisorRequestId
+          ? { requestId: blockedGwpc.supervisorRequestId }
+          : requestSupervisorGwpcOpen(blockedGwpc);
         log(`GWPC popup was blocked on this PC; requested supervisor open instead: ${blockedGwpc.url}`);
 
         const result = await waitForSharedOpenRequestResult(
