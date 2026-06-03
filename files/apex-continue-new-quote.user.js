@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.4
+// @version      1.9.5
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.4';
+  const VERSION = '1.9.5';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1000,10 +1000,12 @@
 
   function getAltaIneligibleCheckbox() {
     const modal = getQuoteModal();
-    const candidates = deepQueryAllUnique([
-      'input[type="checkbox"][data-name="vehiclesChkbx"]',
-      'input[type="checkbox"]'
-    ].join(','), [modal, document]);
+    const exact = deepQueryAllUnique('input[type="checkbox"][data-name="vehiclesChkbx"]', [modal, document])
+      .find(el => !isDisabled(el) && !hasHiddenAncestor(el));
+
+    if (exact) return exact;
+
+    const candidates = deepQueryAllUnique('input[type="checkbox"]', [modal, document]);
 
     const matches = [];
     for (const el of candidates) {
@@ -1041,6 +1043,8 @@
     const doc = checkbox.ownerDocument || document;
     const view = doc.defaultView || window;
 
+    log(`Attempting Alta checkbox click: ${describeClickTarget(checkbox)}`);
+
     if (isVisible(checkbox)) {
       try {
         checkbox.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -1054,13 +1058,13 @@
     }
 
     if (!checkbox.checked) {
-      manualLikeClickOnce(checkbox, 'Alta ineligible checkbox', { allowRepeat: true });
-    }
-
-    if (!checkbox.checked) {
       try {
         checkbox.click?.();
       } catch {}
+    }
+
+    if (!checkbox.checked) {
+      manualLikeClickOnce(checkbox, 'Alta ineligible checkbox', { allowRepeat: true });
     }
 
     if (!checkbox.checked && isVisible(checkbox)) {
@@ -1104,6 +1108,12 @@
         composed: true
       }));
     } catch {}
+
+    if (!checkbox.checked) {
+      try {
+        checkbox.setAttribute('checked', 'checked');
+      } catch {}
+    }
 
     return !!checkbox.checked;
   }
@@ -1850,6 +1860,12 @@
     log(`Quote detected: ${quoteKey}`);
 
     try {
+      const altaCheckboxReadyEarly = await ensureAltaIneligibleCheckboxCheckedIfAvailable();
+      if (!altaCheckboxReadyEarly) {
+        setStatus('Running');
+        return;
+      }
+
       if (shouldPauseBeforeHomeForAddressRepair(quoteKey)) {
         return;
       }
@@ -1881,12 +1897,6 @@
         await sleep(CFG.afterHomeClickMs);
       } else {
         log('Risk Address was already prepared by APEX Address Repair; skipping Home click.');
-      }
-
-      const altaCheckboxReady = await ensureAltaIneligibleCheckboxCheckedIfAvailable();
-      if (!altaCheckboxReady) {
-        setStatus('Running');
-        return;
       }
 
       const repairDecision = await waitForAddressRepairDecision(quoteKey);
