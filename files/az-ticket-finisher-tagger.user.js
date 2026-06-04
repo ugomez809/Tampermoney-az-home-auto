@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.58
+// @version      1.0.59
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.58';
+  const VERSION = '1.0.59';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -1538,10 +1538,9 @@
     return `https://policycenter-2.farmersinsurance.com/pc/AccountFile.do?AccountNumber=${encodeURIComponent(cleanAccount)}`;
   }
 
-  function buildWorkflowNoteData({ homeSubmission = '', accountNumber = '', cfpValue = '', doneValue = '' } = {}) {
+  function buildWorkflowNoteData({ homeSubmission = '', accountNumber = '', doneValue = '' } = {}) {
     const cleanSubmission = norm(homeSubmission || '');
     const cleanAccount = norm(accountNumber || '');
-    const cleanCfp = norm(cfpValue || '') || '(blank)';
     const cleanDone = norm(doneValue || '');
     const accountLinkUrl = buildGwpcAccountUrl(cleanAccount);
     const linkText = cleanAccount ? `Account Link: ${cleanAccount}` : '';
@@ -1552,16 +1551,12 @@
 
     const lines = [
       `Home Submission Number: ${cleanSubmission}`,
-      accountDisplayLine,
-      `CFP?: ${cleanCfp}`,
-      `Done?: ${cleanDone}`
+      accountDisplayLine
     ];
 
     const fallbackLines = [
       `Home Submission Number: ${cleanSubmission}`,
-      fallbackAccountLine,
-      `CFP?: ${cleanCfp}`,
-      `Done?: ${cleanDone}`
+      fallbackAccountLine
     ];
 
     return {
