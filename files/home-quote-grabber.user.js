@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.18
+// @version      4.1.19
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.18';
+  const VERSION = '4.1.19';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1220,6 +1220,40 @@
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
   }
 
+  function isNativeInput(el) {
+    return String(el?.tagName || '').toUpperCase() === 'INPUT';
+  }
+
+  function isSelectedChoiceControl(el) {
+    if (!el) return false;
+    if (isNativeInput(el) && el.checked === true) return true;
+    if (el.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
+        .some(input => input.checked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  function getChoiceClickTarget(el) {
+    if (!el) return null;
+    if (el.getAttribute?.('role') === 'checkbox' || el.getAttribute?.('role') === 'radio') return el;
+    if (/\bgw-checkboxDiv\b|\bgw-radioDiv\b/.test(String(el.className || ''))) return el;
+    return el.closest?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || el;
+  }
+
+  function clickChoiceControl(el) {
+    const target = getChoiceClickTarget(el);
+    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+
+    strongClick(target);
+    dispatchValueEvents(target);
+    if (target !== el) dispatchValueEvents(el);
+
+    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
+  }
+
   function gatherContextText(el) {
     const parts = [];
     let cur = el;
@@ -1729,23 +1763,21 @@
 
   async function ensureCheckboxVerified(selector, expectedLabels, label) {
     const el = await waitForField(selector, expectedLabels, label);
-    if (el.checked) {
+    if (isSelectedChoiceControl(el)) {
       log(`${label}: already checked`);
       return;
     }
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-    strongClick(el);
-    await sleep(CFG.afterFieldMs);
-    if (!el.checked) {
+    if (!clickChoiceControl(el) && isNativeInput(el) && isVisibleEl(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchValueEvents(el);
+    }
+    await sleep(CFG.afterFieldMs);
+    if (!isSelectedChoiceControl(el)) {
+      clickChoiceControl(el);
       await sleep(CFG.afterFieldMs);
     }
-    if (!el.checked) {
-      strongClick(el);
-      await sleep(CFG.afterFieldMs);
-    }
-    if (!el.checked) throw new Error(`${label}: failed to stay checked`);
+    if (!isSelectedChoiceControl(el)) throw new Error(`${label}: failed to stay checked`);
     log(`${label}: checked`);
   }
 
@@ -2790,7 +2822,7 @@
   function isAutoDiscountApplied() {
     const control = findAutoDiscountControl();
     if (!control) return false;
-    return control.checked === true || control.getAttribute('checked') != null || control.getAttribute('aria-checked') === 'true';
+    return isSelectedChoiceControl(control);
   }
 
   async function applyAutoDiscount() {
@@ -2815,12 +2847,7 @@
       }
 
       log(`Selecting auto discount, attempt ${attempt}/3`);
-      const clickTarget = isVisibleEl(control) ? control : control.closest('label') || control.parentElement || control;
-      strongClick(clickTarget);
-
-      try { control.checked = true; } catch {}
-      try { control.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
-      try { control.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+      clickChoiceControl(control);
 
       const ok = await waitFor(() => isAutoDiscountApplied(), CFG.waitTimeoutMs, 'auto discount selection');
       if (ok) {

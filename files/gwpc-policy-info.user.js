@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Policy Info Prefill
 // @namespace    homebot.gwpc-policy-info
-// @version      2.3.5
+// @version      2.3.6
 // @description  HOME-only Policy Info flow. Keeps the Home Bot Policy Info actions without clicking Home Auto discount, switches Gender to Male if the Non-Binary/Flex error appears, uses DT2 Next retry if stuck, and hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Policy Info Prefill';
-  const VERSION = '2.3.5';
+  const VERSION = '2.3.6';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_policy_info_logs_v1';
@@ -302,41 +302,79 @@
     try { el.blur?.(); } catch {}
   }
 
+  function isNativeInput(el) {
+    return String(el?.tagName || '').toUpperCase() === 'INPUT';
+  }
+
+  function isSelectedChoiceControl(el) {
+    if (!el) return false;
+    if (isNativeInput(el) && el.checked === true) return true;
+    if (el.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
+        .some(input => input.checked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  function getChoiceClickTarget(el) {
+    if (!el) return null;
+    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return el;
+    if (/\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''))) return el;
+    return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
+  }
+
+  function clickChoiceControl(el) {
+    const target = getChoiceClickTarget(el);
+    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+
+    clickLikeUser(target);
+    dispatchAll(target);
+    if (target !== el) dispatchAll(el);
+
+    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
+  }
+
   function safeCheck(el) {
     if (!el || el.disabled) return false;
-    if (!el.checked) {
-      try { el.click(); } catch {}
-      if (!el.checked) {
+    if (!isSelectedChoiceControl(el)) {
+      if (clickChoiceControl(el)) return true;
+      if (isNativeInput(el) && isVisible(el) && !el.checked) {
         try { el.checked = true; } catch {}
+        dispatchAll(el);
       }
-      dispatchAll(el);
-      return true;
+      return isSelectedChoiceControl(el);
     }
     return false;
   }
 
   function safeUncheck(el) {
     if (!el || el.disabled) return false;
-    if (el.checked) {
-      try { el.click(); } catch {}
-      if (el.checked) {
+    if (isSelectedChoiceControl(el)) {
+      const target = getChoiceClickTarget(el);
+      clickLikeUser(target);
+      dispatchAll(target);
+      if (target !== el) dispatchAll(el);
+      if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) return true;
+      if (isNativeInput(el) && isVisible(el) && el.checked) {
         try { el.checked = false; } catch {}
+        dispatchAll(el);
       }
-      dispatchAll(el);
-      return true;
+      return !isSelectedChoiceControl(el);
     }
     return false;
   }
 
   function safeRadio(el) {
     if (!el || el.disabled) return false;
-    if (!el.checked) {
-      try { el.click(); } catch {}
-      if (!el.checked) {
+    if (!isSelectedChoiceControl(el)) {
+      if (clickChoiceControl(el)) return true;
+      if (isNativeInput(el) && isVisible(el) && !el.checked) {
         try { el.checked = true; } catch {}
+        dispatchAll(el);
       }
-      dispatchAll(el);
-      return true;
+      return isSelectedChoiceControl(el);
     }
     return false;
   }
