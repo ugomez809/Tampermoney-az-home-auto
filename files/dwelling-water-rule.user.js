@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.11
+// @version      3.9.12
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.11';
+  const VERSION = '3.9.12';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -397,6 +397,28 @@
     return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
   }
 
+  function getChoiceClickTargets(el) {
+    const primary = getChoiceClickTarget(el);
+    const targets = [];
+    const add = target => {
+      if (target && !targets.includes(target)) targets.push(target);
+    };
+
+    add(primary);
+    for (const selector of [
+      '.gw-radioDiv--inner, .gw-checkboxDiv--inner',
+      '.gw-radioDiv--label, .gw-checkboxDiv--label',
+      '.gw-label',
+      'label',
+      'input[type="radio"], input[type="checkbox"]'
+    ]) {
+      try { add(primary?.querySelector?.(selector)); } catch {}
+    }
+    add(el);
+
+    return targets;
+  }
+
   function isChoiceControl(el) {
     if (!el) return false;
     if (isNativeInput(el) && /^(radio|checkbox)$/i.test(String(el.type || ''))) return true;
@@ -456,15 +478,27 @@
     return null;
   }
 
-  function clickChoiceControl(el) {
-    const target = getChoiceClickTarget(el);
-    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+  async function clickChoiceControl(el) {
+    const primary = getChoiceClickTarget(el);
 
-    strongClick(target);
-    dispatchChange(target);
-    if (target !== el) dispatchChange(el);
+    for (const target of getChoiceClickTargets(el)) {
+      if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') continue;
 
-    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
+      strongClick(target);
+      dispatchChange(target);
+      if (target !== el) dispatchChange(el);
+      await sleep(CFG.clickPauseMs);
+
+      if (
+        isSelectedChoiceControl(target) ||
+        isSelectedChoiceControl(primary) ||
+        isSelectedChoiceControl(el)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async function waitFor(fn, timeoutMs, label) {
@@ -599,7 +633,7 @@
       return;
     }
 
-    if (!clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
+    if (!await clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchChange(el);
     }
@@ -622,7 +656,7 @@
       return true;
     }
 
-    if (!clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
+    if (!await clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchChange(el);
     }
