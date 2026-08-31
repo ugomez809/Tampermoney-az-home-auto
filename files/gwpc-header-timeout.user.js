@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Header Timeout Monitor
 // @namespace    homebot.gwpc-header-timeout
-// @version      2.3.23
+// @version      2.3.24
 // @description  Fresh HOME-only GWPC timeout gatherer. Watches the live Guidewire Home header, starts timeout actions ON at page load, clears stale saved-selector artifacts on boot, and raises the shared webhook send signal without closing tabs.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -24,7 +24,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'GWPC Header Timeout Monitor';
-  const VERSION = '2.3.23';
+  const VERSION = '2.3.24';
   const UI_MARKER_ATTR = 'data-tm-timeout-ui';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -1298,6 +1298,21 @@
     const hasHome = hasLabelExactAnyDoc('Homeowners');
     if (hasHome) return { product: 'home', label: 'Homeowners' };
     return { product: '', label: '' };
+  }
+
+  function isHeaderTimeoutSuppressedHeader(header = '') {
+    const clean = normalizeText(header).toLowerCase();
+    return [
+      'disclosure & qualification',
+      'policy info',
+      'dwelling',
+      'coverages',
+      'risk analysis',
+      'pay plan selection',
+      'quote',
+      'forms',
+      'billing setup & payment'
+    ].includes(clean);
   }
 
   function getAccountNameFromPage() {
@@ -2656,6 +2671,14 @@
     }
 
     clearWaitLog();
+
+    if (isHeaderTimeoutSuppressedHeader(context.header)) {
+      logWait(
+        `timeout-suppressed:${context.header}`,
+        `Header timeout suppressed on ${context.header}; page-specific script owns this step`
+      );
+      return;
+    }
 
     const ageMs = Date.now() - Number(context.headerSinceMs || Date.now());
     if (ageMs < CFG.timeoutMs) return;
