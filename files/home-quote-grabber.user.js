@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.19
+// @version      4.1.22
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -1205,12 +1205,22 @@
   function strongClick(el) {
     if (!el) return false;
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    try { el.focus?.({ preventScroll: true }); } catch {}
-    try { el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })); } catch {}
-    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {
+      try { el.focus?.(); } catch {}
+    }
+
+    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        }));
+      } catch {}
+    }
+
     try { el.click?.(); } catch {}
-    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
-    try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
     return true;
   }
 
@@ -1781,10 +1791,21 @@
     log(`${label}: checked`);
   }
 
+  function getEnhancedSplitWaterDesiredTexts() {
+    const warningText = getCoveragesRetryWarningText().toLowerCase();
+    if (warningText.includes('split water deductible must be greater than the all perils deductible')) {
+      return ['1.5%'];
+    }
+    if (warningText.includes('minimum 1%') && warningText.includes('split water')) {
+      return ['1.5%'];
+    }
+    return ['$10,000', '10000'];
+  }
+
   async function applyCoverageSelections() {
     await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
     await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
-    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], ['$10,000', '10000'], 'Enhanced / Split Water');
+    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], getEnhancedSplitWaterDesiredTexts(), 'Enhanced / Split Water');
     await setSelectVerified(SEL.enhSeparateStructures, ['Separate Structures'], ['5%'], 'Enhanced / Separate Structures');
     await setSelectVerified(SEL.enhPersonalPropertyLimit, ['Personal Property', 'Limit'], ['40%'], 'Enhanced / Personal Property Limit');
     await setSelectVerified(SEL.enhPersonalLiability, ['Personal Liability'], ['$1,000,000', '1000000'], 'Enhanced / Personal Liability');

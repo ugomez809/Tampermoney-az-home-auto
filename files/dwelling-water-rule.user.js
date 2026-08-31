@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.6
+// @version      3.9.7
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -302,18 +302,26 @@
   }
 
   function strongClick(el) {
-    try {
-      el.scrollIntoView?.({ block: 'center', inline: 'center' });
-      el.focus?.({ preventScroll: true });
-      el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      el.click?.();
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
-      return true;
-    } catch {
-      return false;
+    if (!el) return false;
+
+    try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {
+      try { el.focus?.(); } catch {}
     }
+
+    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        }));
+      } catch {}
+    }
+
+    try { el.click?.(); } catch {}
+    return true;
   }
 
   function findActionByText(text) {
