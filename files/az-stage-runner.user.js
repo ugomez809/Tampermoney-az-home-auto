@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.43
+// @version      2.5.42
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -20,7 +20,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.43';
+  const VERSION = '2.5.42';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -52,7 +52,6 @@
     ticketClosePollMs: 1200,
     ticketCloseLogEveryMs: 8000,
     payloadMismatchFailMs: 20 * 1000,
-    activeGwpcPayloadGuardMs: 4 * 60 * 1000,
     missingPayloadFinisherMaxWaitMs: 90 * 1000,
     maxMainPayloadFailureAttempts: 1,
     nextRunAfterCloseMs: 3000,
@@ -1236,16 +1235,6 @@
     return true;
   }
 
-  function hasSameTicketGwpcJobActive(ticketId, waitStartedAt = 0) {
-    const wantedId = norm(ticketId || '');
-    if (!wantedId) return false;
-    if (waitStartedAt && (Date.now() - waitStartedAt) > CFG.activeGwpcPayloadGuardMs) return false;
-
-    const job = readSharedJson(KEYS.CURRENT_JOB, null);
-    const jobId = norm(job?.['AZ ID'] || job?.azId || job?.ticketId || '');
-    return !!jobId && jobId === wantedId;
-  }
-
   function consumeFinisherWakeTrigger(ticketId) {
     if (consumeFinisherCloseSignal(ticketId)) return true;
     if (consumeWorkflowCleanupRequest(ticketId)) return true;
@@ -2130,16 +2119,6 @@
       }
 
       if (!finalPayloadReadyLogged && !mismatchFallbackSent && (Date.now() - waitStartedAt) >= CFG.payloadMismatchFailMs) {
-        if (hasSameTicketGwpcJobActive(ticketId, waitStartedAt)) {
-          const now = Date.now();
-          if (!lastLogAt || (now - lastLogAt) >= CFG.ticketCloseLogEveryMs) {
-            log(`Final Home payload not ready yet; same GWPC job still active for ${ticketId}`, 'warn');
-            lastLogAt = now;
-          }
-          await waitForWakeOrTimeout(CFG.ticketClosePollMs);
-          continue;
-        }
-
         mismatchFallbackSent = true;
         clearFinisherCloseSignal();
         clearMissingPayloadTrigger();
