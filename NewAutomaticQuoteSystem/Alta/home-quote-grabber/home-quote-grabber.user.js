@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.25
+// @version      4.1.26
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.25';
+  const VERSION = '4.1.26';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1342,21 +1342,24 @@
   }
 
   function findClickableOwnerByLabel(labelText) {
-    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
-    for (const label of direct) {
-      const owner = getClickableOwner(label);
-      if (owner && isVisibleEl(owner)) return owner;
-    }
-    const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
-    for (const el of generic) {
-      const aria = normalizeText(el.getAttribute?.('aria-label') || '');
-      const txt = normalizeText(el.textContent || '');
-      if ((aria === labelText || txt === labelText) && isVisibleEl(el)) {
-        const owner = getClickableOwner(el);
+    return findInDocs((doc) => {
+      const direct = Array.from(doc.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
+      for (const label of direct) {
+        const owner = getClickableOwner(label);
         if (owner && isVisibleEl(owner)) return owner;
       }
-    }
-    return null;
+
+      const generic = Array.from(doc.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
+      for (const el of generic) {
+        const aria = normalizeText(el.getAttribute?.('aria-label') || '');
+        const txt = normalizeText(el.textContent || '');
+        if ((aria === labelText || txt === labelText) && isVisibleEl(el)) {
+          const owner = getClickableOwner(el);
+          if (owner && isVisibleEl(owner)) return owner;
+        }
+      }
+      return null;
+    });
   }
 
   function findEditAllTarget() {
@@ -1364,7 +1367,13 @@
   }
 
   function hasEditableCoverageControls() {
-    return !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox);
+    return !!queryFirstVisible(SEL.stdAllPerils) ||
+      !!queryFirstVisible(SEL.personalInjuryCheckbox) ||
+      !!queryFirstVisible(
+        '.gw-ValueWidget.gw-editable, ' +
+        'select[name*="lineLevelCoverages"][name*="SideBySideRangeCovTermValue"], ' +
+        '.gw-checkboxDiv[id*="HOCoverageInputSet"][role="checkbox"]'
+      );
   }
 
   function hasCoverageEditToolbar() {
@@ -1730,6 +1739,9 @@
       await sleep(CFG.afterEditAllMs);
     } else if (hasEditableCoverageControls()) {
       log('Edit All not visible. Controls already editable.');
+      return;
+    } else if (hasCoverageEditToolbar()) {
+      log('Edit All not visible. Edit toolbar already available.');
       return;
     } else {
       throw new Error('Edit All not found');
