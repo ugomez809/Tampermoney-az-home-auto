@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.25
+// @version      4.1.29
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.25';
+  const VERSION = '4.1.29';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1359,8 +1359,37 @@
     return null;
   }
 
+  function findToolbarButtonOuterByLabel(labelText) {
+    const labels = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
+    for (const label of labels) {
+      let cur = label;
+      let depth = 0;
+      while (cur && depth < 8) {
+        const className = String(cur.className || '');
+        if (
+          className.includes('gw-ToolbarButtonWidget') &&
+          className.includes('gw-action--outer') &&
+          normalizeText(cur.textContent || '').includes(labelText) &&
+          isVisibleEl(cur)
+        ) {
+          return cur;
+        }
+        cur = cur.parentElement;
+        depth++;
+      }
+    }
+
+    const buttons = Array.from(document.querySelectorAll('.gw-ToolbarButtonWidget, .gw-action--outer')).filter(isVisibleEl);
+    for (const button of buttons) {
+      const className = String(button.className || '');
+      const text = normalizeText(button.textContent || '');
+      if (className.includes('gw-ToolbarButtonWidget') && text.includes(labelText)) return button;
+    }
+    return null;
+  }
+
   function findEditAllTarget() {
-    return findClickableOwnerByLabel('Edit All');
+    return findToolbarButtonOuterByLabel('Edit All') || findClickableOwnerByLabel('Edit All');
   }
 
   function hasEditableCoverageControls() {
