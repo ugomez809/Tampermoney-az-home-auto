@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.27
+// @version      4.1.25
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.27';
+  const VERSION = '4.1.25';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1341,62 +1341,30 @@
     return el;
   }
 
-  function findClickableOwnersByLabel(labelText) {
-    const targets = [];
-    const add = (el) => {
-      if (!el || targets.includes(el)) return;
-      if (!isVisibleEl(el)) return;
-      if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') return;
-      targets.push(el);
-    };
-    const addActionTargets = (el) => {
-      const owner = getClickableOwner(el);
-      add(el);
-      add(owner);
-      add(el?.parentElement);
-      add(owner?.parentElement);
-      add(el?.parentElement?.parentElement);
-    };
-
-    for (const doc of getAccessibleDocs()) {
-      try {
-        const direct = Array.from(doc.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`));
-        for (const label of direct) {
-          if (isVisibleEl(label)) addActionTargets(label);
-        }
-
-        const generic = Array.from(doc.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
-        for (const el of generic) {
-          const aria = normalizeText(el.getAttribute?.('aria-label') || '');
-          const txt = normalizeText(el.textContent || '');
-          if ((aria === labelText || txt === labelText) && isVisibleEl(el)) addActionTargets(el);
-        }
-      } catch {}
-    }
-
-    return targets;
-  }
-
   function findClickableOwnerByLabel(labelText) {
-    return findClickableOwnersByLabel(labelText)[0] || null;
+    const direct = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
+    for (const label of direct) {
+      const owner = getClickableOwner(label);
+      if (owner && isVisibleEl(owner)) return owner;
+    }
+    const generic = Array.from(document.querySelectorAll('.gw-label, [aria-label], [role="button"], [role="tab"], .gw-action--inner, a, button, div'));
+    for (const el of generic) {
+      const aria = normalizeText(el.getAttribute?.('aria-label') || '');
+      const txt = normalizeText(el.textContent || '');
+      if ((aria === labelText || txt === labelText) && isVisibleEl(el)) {
+        const owner = getClickableOwner(el);
+        if (owner && isVisibleEl(owner)) return owner;
+      }
+    }
+    return null;
   }
 
   function findEditAllTarget() {
     return findClickableOwnerByLabel('Edit All');
   }
 
-  function findSaveDraftTarget() {
-    return findClickableOwnerByLabel('Save Draft');
-  }
-
   function hasEditableCoverageControls() {
-    return !!queryFirstVisible(SEL.stdAllPerils) ||
-      !!queryFirstVisible(SEL.personalInjuryCheckbox) ||
-      !!queryFirstVisible(
-        '[id*="SideBySideNewTableLayoutDV-lineLevelCoverages"].gw-ValueWidget.gw-editable, ' +
-        'select[name*="lineLevelCoverages"][name*="SideBySideRangeCovTermValue"], ' +
-        '.gw-checkboxDiv[id*="HOCoverageInputSet"][role="checkbox"]'
-      );
+    return !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox);
   }
 
   function hasCoverageEditToolbar() {
@@ -1408,30 +1376,6 @@
 
   function quoteRecentlyClicked() {
     return Date.now() - state.lastQuoteClickAt < 1500;
-  }
-
-  async function waitForEditAllToOpen() {
-    const start = Date.now();
-    while (Date.now() - start < CFG.afterEditAllMs * 3) {
-      if (hasEditableCoverageControls()) return true;
-      if (!findEditAllTarget() && findSaveDraftTarget()) return true;
-      await sleep(CFG.waitPollMs);
-    }
-    return false;
-  }
-
-  async function clickEditAllUntilOpen() {
-    const targets = findClickableOwnersByLabel('Edit All');
-    if (!targets.length) return false;
-
-    for (let index = 0; index < targets.length; index += 1) {
-      const target = targets[index];
-      log(index === 0 ? 'Clicking Edit All' : `Trying Edit All target ${index + 1}/${targets.length}`);
-      strongClick(target);
-      if (await waitForEditAllToOpen()) return true;
-    }
-
-    return false;
   }
 
   function markQuoteClicked() {
@@ -1779,23 +1723,21 @@
   }
 
   async function ensureEditMode() {
-    if (hasEditableCoverageControls()) {
+    const editTarget = findEditAllTarget();
+    if (editTarget) {
+      log('Clicking Edit All');
+      strongClick(editTarget);
+      await sleep(CFG.afterEditAllMs);
+    } else if (hasEditableCoverageControls()) {
       log('Edit All not visible. Controls already editable.');
       return;
-    }
-
-    if (!findEditAllTarget()) {
+    } else {
       throw new Error('Edit All not found');
     }
-
-    if (!await clickEditAllUntilOpen()) {
-      throw new Error('Edit All click did not open edit mode');
-    }
-
     const ok = await waitFor(
       () => {
         if (hasEditableCoverageControls()) return true;
-        return false;
+        return hasCoverageEditToolbar();
       },
       CFG.waitTimeoutMs,
       'editable coverage controls'
