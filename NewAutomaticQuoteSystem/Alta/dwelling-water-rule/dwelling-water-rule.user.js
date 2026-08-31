@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.8
+// @version      3.9.9
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.8';
+  const VERSION = '3.9.9';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -87,6 +87,12 @@
 
     garageType:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-GarageType'
+  };
+
+  const QUESTIONS = {
+    poolNo: ['Is there a pool located on the premises?'],
+    solarNo: ['Are there solar panels at the premises?'],
+    trampolineNo: ['Is there a trampoline on the premises?']
   };
 
   const state = {
@@ -390,6 +396,65 @@
     return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
   }
 
+  function isChoiceControl(el) {
+    if (!el) return false;
+    if (isNativeInput(el) && /^(radio|checkbox)$/i.test(String(el.type || ''))) return true;
+    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return true;
+    return /\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''));
+  }
+
+  function isNoChoiceControl(el) {
+    if (!isChoiceControl(el)) return false;
+    if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') return false;
+
+    const text = normalizeText(
+      el.getAttribute?.('aria-label') ||
+      el.getAttribute?.('title') ||
+      el.value ||
+      el.textContent ||
+      ''
+    ).toLowerCase();
+
+    if (text === 'no') return true;
+    if (text.length <= 20 && /\bno\b/.test(text)) return true;
+    return /_1$/.test(String(el.id || ''));
+  }
+
+  function findNoChoiceInside(container) {
+    if (!container) return null;
+    const candidates = Array.from(container.querySelectorAll?.(
+      '[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, input[type="radio"], input[type="checkbox"]'
+    ) || []);
+
+    return candidates.find(isNoChoiceControl) || null;
+  }
+
+  function findNoChoiceForDwellingQuestion(questionTexts = []) {
+    const wanted = (Array.isArray(questionTexts) ? questionTexts : [questionTexts])
+      .map(text => normalizeText(text).toLowerCase())
+      .filter(Boolean);
+    if (!wanted.length) return null;
+
+    const labels = Array.from(document.querySelectorAll(
+      '.gw-InputWidget, .gw-LabelWidget, .gw-label, label, div, span, td, tr'
+    ));
+
+    for (const label of labels) {
+      if (!isVisible(label)) continue;
+      const labelText = normalizeText(label.textContent || '').toLowerCase();
+      if (!wanted.some(text => labelText.includes(text))) continue;
+
+      let container = label;
+      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
+        if (!isVisible(container)) continue;
+        const choice = findNoChoiceInside(container);
+        if (choice) return choice;
+      }
+    }
+
+    return null;
+  }
+
   function clickChoiceControl(el) {
     const target = getChoiceClickTarget(el);
     if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
@@ -425,9 +490,9 @@
 
   function fieldsReady() {
     return !!(
-      byId(IDS.poolNo) &&
-      byId(IDS.solarNo) &&
-      byId(IDS.trampolineNo) &&
+      (byId(IDS.poolNo) || findNoChoiceForDwellingQuestion(QUESTIONS.poolNo)) &&
+      (byId(IDS.solarNo) || findNoChoiceForDwellingQuestion(QUESTIONS.solarNo)) &&
+      (byId(IDS.trampolineNo) || findNoChoiceForDwellingQuestion(QUESTIONS.trampolineNo)) &&
       byName(NAMES.plumbing, 'select') &&
       byName(NAMES.yearBuilt, 'input')
     );
@@ -524,8 +589,8 @@
     return true;
   }
 
-  async function ensureRadioChecked(id, label) {
-    const el = await waitFor(() => byId(id), CFG.fieldWaitMs, label);
+  async function ensureRadioChecked(id, label, questionTexts = []) {
+    const el = await waitFor(() => byId(id) || findNoChoiceForDwellingQuestion(questionTexts), CFG.fieldWaitMs, label);
 
     if (isSelectedChoiceControl(el)) {
       log(`${label} already set`);
@@ -846,9 +911,9 @@
   }
 
   async function fillDwellingFields() {
-    await ensureRadioChecked(IDS.poolNo, 'Swimming Pool = No');
-    await ensureRadioChecked(IDS.solarNo, 'Solar Panels = No');
-    await ensureRadioChecked(IDS.trampolineNo, 'Trampoline = No');
+    await ensureRadioChecked(IDS.poolNo, 'Swimming Pool = No', QUESTIONS.poolNo);
+    await ensureRadioChecked(IDS.solarNo, 'Solar Panels = No', QUESTIONS.solarNo);
+    await ensureRadioChecked(IDS.trampolineNo, 'Trampoline = No', QUESTIONS.trampolineNo);
     await ensureSelectValue(NAMES.plumbing, 'copper', 'Plumbing System = Copper');
 
     await ensureRadioCheckedOptional(
