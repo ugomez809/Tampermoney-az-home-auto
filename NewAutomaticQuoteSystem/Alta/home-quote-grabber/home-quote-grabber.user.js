@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.18
+// @version      4.1.23
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -11,8 +11,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/home-quote-grabber/home-quote-grabber.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/home-quote-grabber/home-quote-grabber.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
 // ==/UserScript==
 
 (function () {
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.18';
+  const VERSION = '4.1.23';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1205,12 +1205,22 @@
   function strongClick(el) {
     if (!el) return false;
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    try { el.focus?.({ preventScroll: true }); } catch {}
-    try { el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })); } catch {}
-    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {
+      try { el.focus?.(); } catch {}
+    }
+
+    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        }));
+      } catch {}
+    }
+
     try { el.click?.(); } catch {}
-    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
-    try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
     return true;
   }
 
@@ -1218,6 +1228,40 @@
     try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
+  }
+
+  function isNativeInput(el) {
+    return String(el?.tagName || '').toUpperCase() === 'INPUT';
+  }
+
+  function isSelectedChoiceControl(el) {
+    if (!el) return false;
+    if (isNativeInput(el) && el.checked === true) return true;
+    if (el.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
+        .some(input => input.checked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  function getChoiceClickTarget(el) {
+    if (!el) return null;
+    if (el.getAttribute?.('role') === 'checkbox' || el.getAttribute?.('role') === 'radio') return el;
+    if (/\bgw-checkboxDiv\b|\bgw-radioDiv\b/.test(String(el.className || ''))) return el;
+    return el.closest?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || el;
+  }
+
+  function clickChoiceControl(el) {
+    const target = getChoiceClickTarget(el);
+    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+
+    strongClick(target);
+    dispatchValueEvents(target);
+    if (target !== el) dispatchValueEvents(el);
+
+    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
   }
 
   function gatherContextText(el) {
@@ -1729,30 +1773,39 @@
 
   async function ensureCheckboxVerified(selector, expectedLabels, label) {
     const el = await waitForField(selector, expectedLabels, label);
-    if (el.checked) {
+    if (isSelectedChoiceControl(el)) {
       log(`${label}: already checked`);
       return;
     }
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-    strongClick(el);
-    await sleep(CFG.afterFieldMs);
-    if (!el.checked) {
+    if (!clickChoiceControl(el) && isNativeInput(el) && isVisibleEl(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchValueEvents(el);
+    }
+    await sleep(CFG.afterFieldMs);
+    if (!isSelectedChoiceControl(el)) {
+      clickChoiceControl(el);
       await sleep(CFG.afterFieldMs);
     }
-    if (!el.checked) {
-      strongClick(el);
-      await sleep(CFG.afterFieldMs);
-    }
-    if (!el.checked) throw new Error(`${label}: failed to stay checked`);
+    if (!isSelectedChoiceControl(el)) throw new Error(`${label}: failed to stay checked`);
     log(`${label}: checked`);
+  }
+
+  function getEnhancedSplitWaterDesiredTexts() {
+    const warningText = getCoveragesRetryWarningText().toLowerCase();
+    if (warningText.includes('split water deductible must be greater than the all perils deductible')) {
+      return ['1.5%'];
+    }
+    if (warningText.includes('minimum 1%') && warningText.includes('split water')) {
+      return ['1.5%'];
+    }
+    return ['$10,000', '10000'];
   }
 
   async function applyCoverageSelections() {
     await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
     await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
-    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], ['$10,000', '10000'], 'Enhanced / Split Water');
+    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], getEnhancedSplitWaterDesiredTexts(), 'Enhanced / Split Water');
     await setSelectVerified(SEL.enhSeparateStructures, ['Separate Structures'], ['5%'], 'Enhanced / Separate Structures');
     await setSelectVerified(SEL.enhPersonalPropertyLimit, ['Personal Property', 'Limit'], ['40%'], 'Enhanced / Personal Property Limit');
     await setSelectVerified(SEL.enhPersonalLiability, ['Personal Liability'], ['$1,000,000', '1000000'], 'Enhanced / Personal Liability');
@@ -2790,7 +2843,7 @@
   function isAutoDiscountApplied() {
     const control = findAutoDiscountControl();
     if (!control) return false;
-    return control.checked === true || control.getAttribute('checked') != null || control.getAttribute('aria-checked') === 'true';
+    return isSelectedChoiceControl(control);
   }
 
   async function applyAutoDiscount() {
@@ -2815,12 +2868,7 @@
       }
 
       log(`Selecting auto discount, attempt ${attempt}/3`);
-      const clickTarget = isVisibleEl(control) ? control : control.closest('label') || control.parentElement || control;
-      strongClick(clickTarget);
-
-      try { control.checked = true; } catch {}
-      try { control.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
-      try { control.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+      clickChoiceControl(control);
 
       const ok = await waitFor(() => isAutoDiscountApplied(), CFG.waitTimeoutMs, 'auto discount selection');
       if (ok) {

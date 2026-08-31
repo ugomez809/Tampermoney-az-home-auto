@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Disclosure Qualification
 // @namespace    homebot.gwpc-disclosure-qualification
-// @version      2.3.5
+// @version      2.4.8
 // @description  HOME-only Disclosure & Qualification flow. On Submission (Draft) + Disclosure & Qualification, click Yes if present, accept readonly Yes if already answered, then use DT2 Next click with retry if stuck. Hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -9,8 +9,8 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/gwpc-disclosure-qualification/gwpc-disclosure-qualification.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/gwpc-disclosure-qualification/gwpc-disclosure-qualification.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-disclosure-qualification.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-disclosure-qualification.user.js
 // ==/UserScript==
 
 (function () {
@@ -19,7 +19,7 @@
   try { window.__HB_GW_DISCLOSURE_QUAL_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Disclosure Qualification';
-  const VERSION = '2.3.5';
+  const VERSION = '2.4.8';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_disclosure_qualification_logs_v1';
@@ -243,23 +243,70 @@
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
   }
 
+  function isSelectedRadioControl(el) {
+    if (!el) return false;
+    if (String(el.tagName || '').toUpperCase() === 'INPUT' && el.checked === true) return true;
+    if (el.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      return Array.from(el.querySelectorAll?.('input[type="radio"]') || [])
+        .some(input => input.checked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  function clickRadioTarget(el) {
+    const target =
+      el?.getAttribute?.('role') === 'radio' || /\bgw-radioDiv\b/.test(String(el?.className || ''))
+        ? el
+        : el?.closest?.('[role="radio"], .gw-radioDiv') || el;
+
+    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+
+    try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    try { target.focus({ preventScroll: true }); } catch {
+      try { target.focus(); } catch {}
+    }
+
+    fireMouse(target, 'pointerover');
+    fireMouse(target, 'mouseover');
+    fireMouse(target, 'pointerdown');
+    fireMouse(target, 'mousedown');
+    fireMouse(target, 'pointerup');
+    fireMouse(target, 'mouseup');
+    fireMouse(target, 'click');
+
+    try { target.click(); } catch {}
+    dispatchAll(target);
+    if (target !== el) dispatchAll(el);
+
+    return isSelectedRadioControl(target) || isSelectedRadioControl(el);
+  }
+
   function strongRadioClick(el) {
     if (!el || el.disabled) return false;
+
+    if (el.getAttribute?.('role') === 'radio' || /\bgw-radioDiv\b/.test(String(el.className || ''))) {
+      return clickRadioTarget(el);
+    }
+
+    if (el.closest?.('[role="radio"], .gw-radioDiv')) {
+      return clickRadioTarget(el);
+    }
 
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {
       try { el.focus(); } catch {}
     }
-
     try { el.click(); } catch {}
     dispatchAll(el);
 
-    if (!el.checked) {
+    if (String(el.tagName || '').toUpperCase() === 'INPUT' && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchAll(el);
     }
 
-    return !!el.checked;
+    return isSelectedRadioControl(el);
   }
 
   function makeReadonlyIdsFromInputId(inputId) {

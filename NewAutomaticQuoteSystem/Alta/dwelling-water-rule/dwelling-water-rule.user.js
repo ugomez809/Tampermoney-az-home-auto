@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.5
+// @version      3.9.8
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
 // @match        https://policycenter-3.farmersinsurance.com/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/dwelling-water-rule/dwelling-water-rule.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/NewAutomaticQuoteSystem/Alta/dwelling-water-rule/dwelling-water-rule.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.5';
+  const VERSION = '3.9.8';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -302,18 +302,26 @@
   }
 
   function strongClick(el) {
-    try {
-      el.scrollIntoView?.({ block: 'center', inline: 'center' });
-      el.focus?.({ preventScroll: true });
-      el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      el.click?.();
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
-      return true;
-    } catch {
-      return false;
+    if (!el) return false;
+
+    try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch {
+      try { el.focus?.(); } catch {}
     }
+
+    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        }));
+      } catch {}
+    }
+
+    try { el.click?.(); } catch {}
+    return true;
   }
 
   function findActionByText(text) {
@@ -357,6 +365,40 @@
     try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
+  }
+
+  function isNativeInput(el) {
+    return String(el?.tagName || '').toUpperCase() === 'INPUT';
+  }
+
+  function isSelectedChoiceControl(el) {
+    if (!el) return false;
+    if (isNativeInput(el) && el.checked === true) return true;
+    if (el.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
+        .some(input => input.checked === true);
+    } catch {
+      return false;
+    }
+  }
+
+  function getChoiceClickTarget(el) {
+    if (!el) return null;
+    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return el;
+    if (/\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''))) return el;
+    return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
+  }
+
+  function clickChoiceControl(el) {
+    const target = getChoiceClickTarget(el);
+    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
+
+    strongClick(target);
+    dispatchChange(target);
+    if (target !== el) dispatchChange(el);
+
+    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
   }
 
   async function waitFor(fn, timeoutMs, label) {
@@ -485,21 +527,18 @@
   async function ensureRadioChecked(id, label) {
     const el = await waitFor(() => byId(id), CFG.fieldWaitMs, label);
 
-    if (el.checked) {
+    if (isSelectedChoiceControl(el)) {
       log(`${label} already set`);
       return;
     }
 
-    strongClick(el);
-    await sleep(CFG.clickPauseMs);
-
-    if (!el.checked) {
+    if (!clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchChange(el);
-      await sleep(CFG.clickPauseMs);
     }
+    await sleep(CFG.clickPauseMs);
 
-    if (!el.checked) throw new Error(`Could not set ${label}`);
+    if (!isSelectedChoiceControl(el)) throw new Error(`Could not set ${label}`);
     log(`${label} set`);
   }
 
@@ -511,21 +550,18 @@
       return false;
     }
 
-    if (el.checked) {
+    if (isSelectedChoiceControl(el)) {
       log(`${label} already set`);
       return true;
     }
 
-    strongClick(el);
-    await sleep(CFG.clickPauseMs);
-
-    if (!el.checked) {
+    if (!clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchChange(el);
-      await sleep(CFG.clickPauseMs);
     }
+    await sleep(CFG.clickPauseMs);
 
-    if (!el.checked) {
+    if (!isSelectedChoiceControl(el)) {
       log(`${label} found but not set. Continuing`);
       return false;
     }
