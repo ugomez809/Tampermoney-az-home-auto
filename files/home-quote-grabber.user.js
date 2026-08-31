@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.23
+// @version      4.1.24
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.23';
+  const VERSION = '4.1.24';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -54,6 +54,7 @@
     afterClickMs: 800,
     maxLogLines: 24,
     afterEditAllMs: 1200,
+    editAllRetryMs: 2500,
     afterFieldMs: 250,
     afterQuoteWaitMs: 800,
     maxQuoteAttempts: 6,
@@ -1359,6 +1360,10 @@
     return findClickableOwnerByLabel('Edit All');
   }
 
+  function hasEditableCoverageControls() {
+    return !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox);
+  }
+
   function quoteRecentlyClicked() {
     return Date.now() - state.lastQuoteClickAt < 1500;
   }
@@ -1713,14 +1718,26 @@
       log('Clicking Edit All');
       strongClick(editTarget);
       await sleep(CFG.afterEditAllMs);
-    } else if (queryFirstVisible(SEL.stdAllPerils)) {
+    } else if (hasEditableCoverageControls()) {
       log('Edit All not visible. Controls already editable.');
       return;
     } else {
       throw new Error('Edit All not found');
     }
+    let lastEditAllClickAt = Date.now();
     const ok = await waitFor(
-      () => !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox),
+      () => {
+        if (hasEditableCoverageControls()) return true;
+        if (Date.now() - lastEditAllClickAt < CFG.editAllRetryMs) return false;
+
+        const retryTarget = findEditAllTarget();
+        if (!retryTarget) return false;
+
+        log('Editable controls still missing; retrying Edit All');
+        strongClick(retryTarget);
+        lastEditAllClickAt = Date.now();
+        return false;
+      },
       CFG.waitTimeoutMs,
       'editable coverage controls'
     );
