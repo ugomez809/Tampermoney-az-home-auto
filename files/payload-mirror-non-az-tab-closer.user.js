@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.28
+// @version      1.0.27
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -25,7 +25,7 @@
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.28';
+  const VERSION = '1.0.27';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -982,21 +982,6 @@
     return '';
   }
 
-  function isGuidewireWorkflowHeaderCloseProtected(header = '') {
-    const clean = norm(header).toLowerCase();
-    return [
-      'disclosure & qualification',
-      'policy info',
-      'dwelling',
-      'coverages',
-      'risk analysis',
-      'pay plan selection',
-      'quote',
-      'forms',
-      'billing setup & payment'
-    ].includes(clean);
-  }
-
   function readCurrentAzIdForCloseFallback() {
     const keys = [
       'tm_pc_current_job_v1',
@@ -1428,12 +1413,6 @@
     if (getActiveIgnoreCloseLease()) return;
     if (state.countdownEndsAt || state.closeAttempted || state.samePageCloseAttempted) return;
 
-    const header = getVisibleGuidewireHeader();
-    if (isGuidewireWorkflowHeaderCloseProtected(header)) {
-      resetSamePageWatch('');
-      return;
-    }
-
     const signature = getSamePageSignature();
     if (!signature) {
       resetSamePageWatch('');
@@ -1465,7 +1444,7 @@
     state.samePageCloseAttempted = true;
     state.activeSignal = signal;
     state.activeSignalKey = buildSignalKey(signal);
-    log(`GWPC same-page watchdog reached 5m; closing tab | header="${header || '(unknown)'}" | AZ ${signal.azId}`);
+    log(`GWPC same-page watchdog reached 5m; closing tab | header="${getVisibleGuidewireHeader() || '(unknown)'}" | AZ ${signal.azId}`);
     attemptClose(signal);
   }
 
