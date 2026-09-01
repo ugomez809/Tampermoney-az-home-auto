@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.13
+// @version      3.9.14
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.13';
+  const VERSION = '3.9.14';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -313,26 +313,154 @@
     }
   }
 
+  function getElementClickPoint(el) {
+    if (!el || !(el instanceof Element)) return null;
+    try {
+      const rect = el.getBoundingClientRect();
+      const width = Number.isFinite(rect?.width) ? rect.width : 0;
+      const height = Number.isFinite(rect?.height) ? rect.height : 0;
+      if (!rect || width <= 0 || height <= 0) return null;
+      const left = Number.isFinite(rect.left) ? rect.left : 0;
+      const top = Number.isFinite(rect.top) ? rect.top : 0;
+      const xOffset = Math.min(Math.max(width / 2, 1), width - 1);
+      const yOffset = Math.min(Math.max(height / 2, 1), height - 1);
+      return {
+        clientX: left + xOffset,
+        clientY: top + yOffset
+      };
+    } catch {}
+    return null;
+  }
+
+  function getPointerEventTarget(el) {
+    if (!el || !(el instanceof Element)) return el;
+
+    try {
+      const point = getElementClickPoint(el);
+      if (!point) return el;
+
+      const doc = el.ownerDocument || document;
+      const pointTarget = doc.elementFromPoint?.(point.clientX, point.clientY);
+
+      if (pointTarget && (pointTarget === el || el.contains(pointTarget))) {
+        return pointTarget;
+      }
+    } catch {}
+
+    return el;
+  }
+
+  function getActionInnerTarget(el) {
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 8) {
+      if (cur instanceof Element) {
+        const className = String(cur.className || '');
+        const tagName = String(cur.tagName || '').toUpperCase();
+        if (
+          className.includes('gw-action--inner') ||
+          cur.getAttribute?.('role') === 'button' ||
+          tagName === 'BUTTON' ||
+          tagName === 'A'
+        ) {
+          return cur;
+        }
+      }
+      cur = cur?.parentElement;
+      depth++;
+    }
+    return null;
+  }
+
+  function getActionOuterTarget(el) {
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 8) {
+      if (cur instanceof Element) {
+        const className = String(cur.className || '');
+        if (className.includes('gw-ButtonValueWidget') || className.includes('gw-ToolbarButtonWidget') || className.includes('gw-action--outer')) {
+          return cur;
+        }
+      }
+      cur = cur?.parentElement;
+      depth++;
+    }
+    return null;
+  }
+
+  function addUniqueClickTarget(targets, target) {
+    if (target && !targets.includes(target)) targets.push(target);
+  }
+
+  function getStrongClickTargets(el) {
+    const targets = [];
+    const pointTarget = getPointerEventTarget(el);
+    addUniqueClickTarget(targets, pointTarget);
+
+    if (pointTarget instanceof Element) {
+      addUniqueClickTarget(targets, getActionInnerTarget(pointTarget));
+      addUniqueClickTarget(targets, getActionOuterTarget(pointTarget));
+    }
+
+    addUniqueClickTarget(targets, el);
+    return targets;
+  }
+
+  function makeClickEvent(target, type, point) {
+    const doc = target?.ownerDocument || document;
+    const view = doc?.defaultView || window;
+    const isPointer = type.startsWith('pointer');
+    const buttons = type === 'pointerdown' || type === 'mousedown' ? 1 : 0;
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view,
+      clientX: point?.clientX || 0,
+      clientY: point?.clientY || 0,
+      screenX: point?.clientX || 0,
+      screenY: point?.clientY || 0,
+      button: 0,
+      buttons
+    };
+    if (isPointer) {
+      init.pointerId = 1;
+      init.pointerType = 'mouse';
+      init.isPrimary = true;
+    }
+
+    try {
+      const Ctor = isPointer && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+      return new Ctor(type, init);
+    } catch {}
+
+    try {
+      return new Event(type, { bubbles: true, cancelable: true, composed: true });
+    } catch {}
+
+    return null;
+  }
+
   function strongClick(el) {
     if (!el) return false;
-
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    try { el.focus?.({ preventScroll: true }); } catch {
-      try { el.focus?.(); } catch {}
-    }
+    const point = getElementClickPoint(el);
 
-    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-      try {
-        el.dispatchEvent(new MouseEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window
-        }));
-      } catch {}
-    }
+    for (const target of getStrongClickTargets(el)) {
+      try { target.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+      try { target.focus?.({ preventScroll: true }); } catch {
+        try { target.focus?.(); } catch {}
+      }
 
-    try { el.click?.(); } catch {}
+      for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        const event = makeClickEvent(target, type, point);
+        if (event) {
+          try { target.dispatchEvent(event); } catch {}
+        }
+      }
+
+      try { target.click?.(); } catch {}
+    }
     return true;
   }
 
@@ -551,7 +679,7 @@
     const inner = wrap.querySelector('div.gw-action--inner.gw-hasDivider');
     const label = wrap.querySelector('[aria-label="Create Valuation"], .gw-label');
 
-    return [exactRoleBtn, roleBtn, inner, label, textFallback, wrap].filter(Boolean);
+    return [wrap, exactRoleBtn, roleBtn, inner, label, textFallback].filter(Boolean);
   }
 
   function getBestCreateTarget() {
