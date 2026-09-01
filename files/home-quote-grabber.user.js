@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.32
+// @version      4.1.33
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.32';
+  const VERSION = '4.1.33';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -42,6 +42,7 @@
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
+    tabCurrentJob: 'tm_pc_home_quote_grab_tab_current_job_v1',
     panelPos: 'tm_pc_home_quote_grab_panel_pos_v1',
     customFieldRules: 'tm_pc_home_quote_grab_custom_field_rules_v1'
   };
@@ -356,7 +357,20 @@
     return out;
   }
 
-  function readCurrentJob() {
+  function mergeCurrentJobValues(base, update) {
+    const current = normalizeCurrentJob(base);
+    const incoming = normalizeCurrentJob(update);
+    const next = { ...current };
+    for (const key of Object.keys(next)) {
+      const value = normalizeText(incoming[key] || '');
+      if (value) next[key] = value;
+    }
+    next['AZ ID'] = normalizeText(incoming['AZ ID'] || current['AZ ID'] || '');
+    next.updatedAt = normalizeText(incoming.updatedAt || current.updatedAt || '');
+    return next;
+  }
+
+  function readSharedCurrentJob() {
     let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
     let job = normalizeCurrentJob(raw);
     if (job['AZ ID']) return job;
@@ -366,9 +380,40 @@
     return job;
   }
 
+  function readTabCurrentJob() {
+    try {
+      return normalizeCurrentJob(safeJsonParse(sessionStorage.getItem(KEYS.tabCurrentJob), null));
+    } catch {
+      return normalizeCurrentJob(null);
+    }
+  }
+
+  function writeTabCurrentJob(job) {
+    const incoming = normalizeCurrentJob(job);
+    if (!incoming['AZ ID']) return incoming;
+    const next = mergeCurrentJobValues(readTabCurrentJob(), incoming);
+    next.updatedAt = normalizeText(next.updatedAt || '') || new Date().toISOString();
+    try { sessionStorage.setItem(KEYS.tabCurrentJob, JSON.stringify(next, null, 2)); } catch {}
+    return next;
+  }
+
+  function readCurrentJob() {
+    const tabJob = readTabCurrentJob();
+    if (tabJob['AZ ID']) {
+      const sharedJob = readSharedCurrentJob();
+      if (sharedJob['AZ ID'] === tabJob['AZ ID']) {
+        return mergeCurrentJobValues(tabJob, sharedJob);
+      }
+      return tabJob;
+    }
+
+    return readSharedCurrentJob();
+  }
+
   function writeCurrentJob(job) {
     const next = normalizeCurrentJob(job);
     next.updatedAt = next.updatedAt || new Date().toISOString();
+    writeTabCurrentJob(next);
     try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
     return next;
   }
@@ -789,6 +834,7 @@
         title: document.title
       };
 
+    writeTabCurrentJob(next.currentJob);
     localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
 
     const bundleSave = saveBundleSection('home', next, next.currentJob, {
