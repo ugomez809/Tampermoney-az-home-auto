@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.29
+// @version      4.1.30
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.29';
+  const VERSION = '4.1.30';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -67,7 +67,7 @@
     afterRequoteSettleMs: 4000,
     afterAutoDiscountBeforeQuoteMs: 5000,
     navigationMoveTimeoutMs: 3500,
-    coveragesWarningStallMs: 60000
+    coveragesWarningStallMs: 0
   };
 
   const SEL = {
@@ -1206,16 +1206,38 @@
     return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
-  function strongClick(el) {
+  function getPointerEventTarget(el) {
+    if (!el || !(el instanceof Element)) return el;
+
+    try {
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return el;
+
+      const doc = el.ownerDocument || document;
+      const pointTarget = doc.elementFromPoint?.(
+        rect.left + Math.min(Math.max(rect.width / 2, 1), rect.width - 1),
+        rect.top + Math.min(Math.max(rect.height / 2, 1), rect.height - 1)
+      );
+
+      if (pointTarget && (pointTarget === el || el.contains(pointTarget))) {
+        return pointTarget;
+      }
+    } catch {}
+
+    return el;
+  }
+
+  function strongClick(el, options = {}) {
     if (!el) return false;
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    try { el.focus?.({ preventScroll: true }); } catch {
-      try { el.focus?.(); } catch {}
+    const target = options.directTarget ? el : getPointerEventTarget(el);
+    try { target.focus?.({ preventScroll: true }); } catch {
+      try { target.focus?.(); } catch {}
     }
 
     for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
       try {
-        el.dispatchEvent(new MouseEvent(type, {
+        target.dispatchEvent(new MouseEvent(type, {
           bubbles: true,
           cancelable: true,
           composed: true,
@@ -1224,7 +1246,7 @@
       } catch {}
     }
 
-    try { el.click?.(); } catch {}
+    try { target.click?.(); } catch {}
     return true;
   }
 
@@ -1390,6 +1412,11 @@
 
   function findEditAllTarget() {
     return findToolbarButtonOuterByLabel('Edit All') || findClickableOwnerByLabel('Edit All');
+  }
+
+  function editModeReady() {
+    if (hasEditableCoverageControls()) return true;
+    return hasCoverageEditToolbar();
   }
 
   function hasEditableCoverageControls() {
@@ -1636,8 +1663,8 @@
   function armCoveragesWarningRetryBlock(context, reason = '') {
     if (!context?.active) return;
     syncCoveragesWarningWatch(context);
-    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
-    log(`Coverages retry blocked for 60s after stalled warning${reason ? `: ${reason}` : ''}`);
+    state.coveragesRetryBlockedUntilMs = 0;
+    log(`Coverages warning recovery armed${reason ? `: ${reason}` : ''}`);
   }
 
   function maybeHandleCoveragesWarningRecovery(currentJob, homeState) {
@@ -1649,19 +1676,9 @@
 
     syncCoveragesWarningWatch(context);
 
-    if (state.coveragesRetryBlockedUntilMs > Date.now()) {
-      setWaiting('Deductible warning stalled on Coverages; waiting 60s before re-running Edit All -> Quote');
-      announceSkipReason('coverages warning retry blocked');
-      return true;
-    }
-
-    if (Date.now() - state.coveragesWarningSinceMs < CFG.coveragesWarningStallMs) {
-      return false;
-    }
-
     state.coveragesWarningSinceMs = Date.now();
-    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
-    log(`Coverages warning unchanged for 60s; re-running Edit All -> Quote | ${context.warningText}`);
+    state.coveragesRetryBlockedUntilMs = 0;
+    log(`Coverages warning visible; re-running Edit All -> Quote | ${context.warningText}`);
     startHomeFlow(currentJob, 'coverages warning recovery');
     return true;
   }
@@ -1756,7 +1773,14 @@
     if (editTarget) {
       log('Clicking Edit All');
       strongClick(editTarget);
-      await sleep(CFG.afterEditAllMs);
+      if (!editModeReady()) {
+        await sleep(CFG.afterEditAllMs);
+      }
+      if (!editModeReady()) {
+        log('Edit All did not open edit mode from pointer target; trying toolbar wrapper');
+        strongClick(editTarget, { directTarget: true });
+        await sleep(CFG.afterEditAllMs);
+      }
     } else if (hasEditableCoverageControls()) {
       log('Edit All not visible. Controls already editable.');
       return;
