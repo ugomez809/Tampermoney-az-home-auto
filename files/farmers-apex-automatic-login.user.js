@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.13
+// @version      1.0.14
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -31,8 +31,6 @@
     request: 'farmersApexLogin.v1.mfaRequest',
     response: 'farmersApexLogin.v1.mfaResponse',
     status: 'farmersApexLogin.v1.status',
-    apexCredentials: 'farmersApexLogin.v1.apexCredentials',
-    agencyZoomCredentials: 'farmersApexLogin.v1.agencyZoomCredentials',
     helperOpenLease: 'farmersApexLogin.v1.agencyZoomHelperOpenLease',
   });
   const CONFIG = Object.freeze({
@@ -86,14 +84,16 @@
     removePanel();
   }
 
-  function clearLegacyCredentials() {}
+  function clearLegacyCredentials() {
+    GM_deleteValue(KEYS.legacyCredentials);
+  }
 
   function safeStatus(state, message) {
     const allowed = new Set(['idle', 'setup_required', 'logging_in', 'mfa_waiting', 'authenticated', 'blocked']);
     const safeState = allowed.has(state) ? state : 'blocked';
     const safeMessage = normalize(message).slice(0, 180);
     GM_setValue(KEYS.status, { state: safeState, message: safeMessage, updatedAt: new Date().toISOString() });
-    if (safeState === 'blocked' || safeState === 'setup_required') showPanel(safeState, safeMessage);
+    if (safeState === 'blocked') showPanel(safeState, safeMessage);
     else removePanel();
   }
 
@@ -131,10 +131,6 @@
       safeStatus('idle', 'Automatic login resumed.');
       scheduleScan(0);
     });
-    GM_registerMenuCommand('Save Apex Login Locally', () => saveStoredLogin('Apex'));
-    GM_registerMenuCommand('Save AgencyZoom Login Locally', () => saveStoredLogin('AgencyZoom'));
-    GM_registerMenuCommand('Clear Apex Local Login', () => clearStoredLogin('Apex'));
-    GM_registerMenuCommand('Clear AgencyZoom Local Login', () => clearStoredLogin('AgencyZoom'));
     GM_registerMenuCommand('Clear Automatic Login State', () => {
       if (globalThis.confirm?.('Clear automatic-login status and MFA state?')) clearAllStoredState();
     });
@@ -177,79 +173,6 @@
 
   function inputHasValue(input) {
     return Boolean(input && String(input.value || '').trim());
-  }
-
-  function readStringField(record, names) {
-    if (!isPlainObject(record)) return '';
-    for (const name of names) {
-      const value = normalize(record[name]);
-      if (value) return value;
-    }
-    return '';
-  }
-
-  function credentialPair(record) {
-    if (!isPlainObject(record)) return null;
-    const username = readStringField(record, ['username', 'user', 'email', 'login']);
-    const password = readStringField(record, ['password', 'pass']);
-    return username && password ? { username, password } : null;
-  }
-
-  function nestedCredentialPair(record, serviceName) {
-    if (!isPlainObject(record)) return null;
-    const service = serviceName === 'AgencyZoom' ? 'agencyZoom' : 'apex';
-    const candidates = [
-      record[service],
-      record[service.toLowerCase()],
-      record[serviceName],
-      record[serviceName.toLowerCase()],
-      record.farmers,
-      record.Farmers,
-      isPlainObject(record.logins) ? record.logins[service] : null,
-    ];
-    for (const candidate of candidates) {
-      const pair = credentialPair(candidate);
-      if (pair) return pair;
-    }
-    return null;
-  }
-
-  function readStoredLogin(serviceName) {
-    const key = serviceName === 'AgencyZoom' ? KEYS.agencyZoomCredentials : KEYS.apexCredentials;
-    const specific = credentialPair(GM_getValue(key, null));
-    if (specific) return specific;
-    const legacy = GM_getValue(KEYS.legacyCredentials, null);
-    return nestedCredentialPair(legacy, serviceName)
-      || (serviceName === 'Apex' ? credentialPair(legacy) : null);
-  }
-
-  function saveStoredLogin(serviceName) {
-    const key = serviceName === 'AgencyZoom' ? KEYS.agencyZoomCredentials : KEYS.apexCredentials;
-    const existing = readStoredLogin(serviceName) || {};
-    const username = globalThis.prompt?.(`${serviceName} username/email`, existing.username || '');
-    if (username === null || username === undefined) return;
-    const password = globalThis.prompt?.(`${serviceName} password (saved locally in Tampermonkey)`, '');
-    if (password === null || password === undefined) return;
-    const pair = credentialPair({ username, password });
-    if (!pair) return safeStatus('blocked', `${serviceName} username and password are required.`);
-    GM_setValue(key, pair);
-    safeStatus('idle', `${serviceName} login saved locally.`);
-    stopped = false;
-    scheduleScan(0);
-  }
-
-  function clearStoredLogin(serviceName) {
-    const key = serviceName === 'AgencyZoom' ? KEYS.agencyZoomCredentials : KEYS.apexCredentials;
-    GM_deleteValue(key);
-    safeStatus('idle', `${serviceName} local login cleared.`);
-  }
-
-  function fillStoredLogin(serviceName, user, password) {
-    const stored = readStoredLogin(serviceName);
-    if (!stored || !user || !password) return false;
-    setNativeInputValue(user, stored.username);
-    setNativeInputValue(password, stored.password);
-    return true;
   }
 
   function primeBrowserSavedLogin(user, password) {
@@ -391,21 +314,7 @@
     const password = passwordInput();
     const target = password || user;
     if (!target) throw new Error(`${serviceName} login fields were not recognized.`);
-    if (fillStoredLogin(serviceName, user, password)) {
-      if (!submitLoginForm(target)) throw new Error(`${serviceName} login control was not recognized.`);
-      safeStatus(submittedState, submittedMessage);
-      return true;
-    }
-    if (user && !inputHasValue(user)) {
-      primeBrowserSavedLogin(user, password);
-      safeStatus('setup_required', `Select the saved ${serviceName} login in this tab, or use the Tampermonkey menu to save it locally.`);
-      return false;
-    }
-    if (password && !inputHasValue(password)) {
-      primeBrowserSavedLogin(user, password);
-      safeStatus('setup_required', `Select the saved ${serviceName} login in this tab, or use the Tampermonkey menu to save it locally.`);
-      return false;
-    }
+    primeBrowserSavedLogin(user, password);
     if (!submitLoginForm(target)) throw new Error(`${serviceName} login control was not recognized.`);
     safeStatus(submittedState, submittedMessage);
     return true;
