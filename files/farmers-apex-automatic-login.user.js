@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.14
+// @version      1.0.15
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -217,9 +217,10 @@
       if (/conversations|service request|pipeline|customer/i.test(text)) return 'agencyzoom_authenticated';
       return 'unknown';
     }
-    if (codeInput()) return 'apex_code';
     if (/select authentication factor|sms authentication|text message authentication|choose.*factor/i.test(text)
-      || needsFactorDropdownFallback(text)) return 'apex_factor';
+      || needsFactorDropdownFallback(text)
+      || (/sms authentication|text message authentication/i.test(text) && hasSendCodeControl())) return 'apex_factor';
+    if (codeInput()) return 'apex_code';
     if (controlsByText(/^finish logging in$/i).length) return 'apex_finish';
     if (passwordInput()) return 'apex_password';
     if (usernameInput()) return 'apex_username';
@@ -260,6 +261,10 @@
     const form = input?.closest('form');
     if (form?.requestSubmit) { form.requestSubmit(); return true; }
     return false;
+  }
+
+  function hasSendCodeControl() {
+    return controlsByText(/send(?:\s+\w+)?\s+code|^(continue|next)$/i).length > 0;
   }
 
   function needsFactorDropdownFallback(text) {
@@ -486,7 +491,7 @@
     if (!request || request.state !== 'baseline_ready') return;
     const kind = classifyPage();
     const pageText = bodyText();
-    const hasSendControl = controlsByText(/send(?:\s+\w+)?\s+code|^(continue|next)$/i).length > 0;
+    const hasSendControl = hasSendCodeControl();
     if (kind !== 'apex_factor' && !hasSendControl && !codeInput()) return;
     if (!request.factorSelectedAt) {
       if (isSmsFactorReady(pageText)) {
@@ -511,11 +516,11 @@
         }
       }
     }
-    if (codeInput()) {
+    if (clickFirst(/send(?:\s+\w+)?\s+code|^(continue|next)$/i)) {
       transitionMfaRequest(request.runId, 'code_requested', { requestedAt: now() });
       return;
     }
-    if (clickFirst(/send(?:\s+\w+)?\s+code|^(continue|next)$/i)) {
+    if (codeInput()) {
       transitionMfaRequest(request.runId, 'code_requested', { requestedAt: now() });
       return;
     }
