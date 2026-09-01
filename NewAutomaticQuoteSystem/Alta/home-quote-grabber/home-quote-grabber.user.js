@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.34
+// @version      4.1.35
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.34';
+  const VERSION = '4.1.35';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -392,23 +392,76 @@
   function writeTabCurrentJob(job) {
     const incoming = normalizeCurrentJob(job);
     if (!incoming['AZ ID']) return incoming;
-    const next = mergeCurrentJobValues(readTabCurrentJob(), incoming);
+    const tabJob = readTabCurrentJob();
+    const base = tabJob['AZ ID'] && tabJob['AZ ID'] !== incoming['AZ ID']
+      ? normalizeCurrentJob(null)
+      : tabJob;
+    const next = mergeCurrentJobValues(base, incoming);
     next.updatedAt = normalizeText(next.updatedAt || '') || new Date().toISOString();
     try { sessionStorage.setItem(KEYS.tabCurrentJob, JSON.stringify(next, null, 2)); } catch {}
     return next;
   }
 
+  function getVisibleJobMatchText() {
+    try {
+      const root = document.querySelector?.('#gw-body') || document.querySelector?.('#gw-center-panel') || document.body;
+      return normalizeText(root?.innerText || root?.textContent || '').toLowerCase();
+    } catch {
+      return '';
+    }
+  }
+
+  function jobVisibleMatchScore(job) {
+    const current = normalizeCurrentJob(job);
+    const visibleText = getVisibleJobMatchText();
+    if (!visibleText) return 0;
+
+    let score = 0;
+    const visibleSubmission = normalizeText(extractSubmissionNumber());
+    if (visibleSubmission && current['SubmissionNumber'] && visibleSubmission === current['SubmissionNumber']) score += 4;
+
+    const name = normalizeText(current['Name']).toLowerCase();
+    if (name && name.length >= 3 && visibleText.includes(name)) score += 3;
+
+    const street = normalizeText(current['Street Address'] || current['Mailing Address']).toLowerCase();
+    const streetNumber = street.match(/\b\d{2,}\b/)?.[0] || '';
+    if (streetNumber && visibleText.includes(streetNumber)) score += 1;
+
+    return score;
+  }
+
+  function shouldPreferSharedCurrentJob(tabJob, sharedJob) {
+    if (!sharedJob['AZ ID']) return false;
+    if (!tabJob['AZ ID']) return true;
+    if (sharedJob['AZ ID'] === tabJob['AZ ID']) return true;
+
+    const sharedScore = jobVisibleMatchScore(sharedJob);
+    const tabScore = jobVisibleMatchScore(tabJob);
+    if (sharedScore > 0 && sharedScore > tabScore) return true;
+    if (tabScore > 0 && tabScore >= sharedScore) return false;
+
+    const tabUpdatedAtMs = parseTimeMs(tabJob.updatedAt);
+    const sharedUpdatedAtMs = parseTimeMs(sharedJob.updatedAt);
+    const tabIsFromPreviousLoad = tabUpdatedAtMs > 0 && tabUpdatedAtMs < state.pageLoadedAtMs - 1000;
+    const sharedIsFreshForThisLoad = sharedUpdatedAtMs > 0 && sharedUpdatedAtMs >= state.pageLoadedAtMs - 10000;
+    return tabIsFromPreviousLoad && sharedIsFreshForThisLoad && sharedUpdatedAtMs >= tabUpdatedAtMs;
+  }
+
   function readCurrentJob() {
     const tabJob = readTabCurrentJob();
+    const sharedJob = readSharedCurrentJob();
+
     if (tabJob['AZ ID']) {
-      const sharedJob = readSharedCurrentJob();
       if (sharedJob['AZ ID'] === tabJob['AZ ID']) {
         return mergeCurrentJobValues(tabJob, sharedJob);
+      }
+      if (shouldPreferSharedCurrentJob(tabJob, sharedJob)) {
+        return writeTabCurrentJob(sharedJob);
       }
       return tabJob;
     }
 
-    return readSharedCurrentJob();
+    return sharedJob;
   }
 
   function writeCurrentJob(job) {
