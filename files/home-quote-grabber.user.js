@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.30
+// @version      4.1.31
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.30';
+  const VERSION = '4.1.31';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1206,18 +1206,34 @@
     return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
+  function getElementClickPoint(el) {
+    if (!el || !(el instanceof Element)) return null;
+    try {
+      const rect = el.getBoundingClientRect();
+      const width = Number.isFinite(rect?.width) ? rect.width : 0;
+      const height = Number.isFinite(rect?.height) ? rect.height : 0;
+      if (!rect || width <= 0 || height <= 0) return null;
+      const left = Number.isFinite(rect.left) ? rect.left : 0;
+      const top = Number.isFinite(rect.top) ? rect.top : 0;
+      const xOffset = Math.min(Math.max(width / 2, 1), width - 1);
+      const yOffset = Math.min(Math.max(height / 2, 1), height - 1);
+      return {
+        clientX: left + xOffset,
+        clientY: top + yOffset
+      };
+    } catch {}
+    return null;
+  }
+
   function getPointerEventTarget(el) {
     if (!el || !(el instanceof Element)) return el;
 
     try {
-      const rect = el.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) return el;
+      const point = getElementClickPoint(el);
+      if (!point) return el;
 
       const doc = el.ownerDocument || document;
-      const pointTarget = doc.elementFromPoint?.(
-        rect.left + Math.min(Math.max(rect.width / 2, 1), rect.width - 1),
-        rect.top + Math.min(Math.max(rect.height / 2, 1), rect.height - 1)
-      );
+      const pointTarget = doc.elementFromPoint?.(point.clientX, point.clientY);
 
       if (pointTarget && (pointTarget === el || el.contains(pointTarget))) {
         return pointTarget;
@@ -1227,26 +1243,118 @@
     return el;
   }
 
+  function getActionInnerTarget(el) {
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 8) {
+      if (cur instanceof Element) {
+        const className = String(cur.className || '');
+        const tagName = String(cur.tagName || '').toUpperCase();
+        if (
+          className.includes('gw-action--inner') ||
+          cur.getAttribute?.('role') === 'button' ||
+          tagName === 'BUTTON' ||
+          tagName === 'A'
+        ) {
+          return cur;
+        }
+      }
+      cur = cur?.parentElement;
+      depth++;
+    }
+    return null;
+  }
+
+  function getActionOuterTarget(el) {
+    let cur = el;
+    let depth = 0;
+    while (cur && depth < 8) {
+      if (cur instanceof Element) {
+        const className = String(cur.className || '');
+        if (className.includes('gw-ToolbarButtonWidget') || className.includes('gw-action--outer')) {
+          return cur;
+        }
+      }
+      cur = cur?.parentElement;
+      depth++;
+    }
+    return null;
+  }
+
+  function addUniqueClickTarget(targets, target) {
+    if (target && !targets.includes(target)) targets.push(target);
+  }
+
+  function getStrongClickTargets(el, options = {}) {
+    const targets = [];
+    const pointTarget = options.directTarget ? el : getPointerEventTarget(el);
+    addUniqueClickTarget(targets, pointTarget);
+
+    if (!options.directTarget && pointTarget instanceof Element) {
+      addUniqueClickTarget(targets, getActionInnerTarget(pointTarget));
+      addUniqueClickTarget(targets, getActionOuterTarget(pointTarget));
+    }
+
+    addUniqueClickTarget(targets, el);
+    return targets;
+  }
+
+  function makeClickEvent(target, type, point) {
+    const doc = target?.ownerDocument || document;
+    const view = doc?.defaultView || window;
+    const isPointer = type.startsWith('pointer');
+    const buttons = type === 'pointerdown' || type === 'mousedown' ? 1 : 0;
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view,
+      clientX: point?.clientX || 0,
+      clientY: point?.clientY || 0,
+      screenX: point?.clientX || 0,
+      screenY: point?.clientY || 0,
+      button: 0,
+      buttons
+    };
+    if (isPointer) {
+      init.pointerId = 1;
+      init.pointerType = 'mouse';
+      init.isPrimary = true;
+    }
+
+    try {
+      const Ctor = isPointer && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+      return new Ctor(type, init);
+    } catch {}
+
+    try {
+      return new Event(type, { bubbles: true, cancelable: true, composed: true });
+    } catch {}
+
+    return null;
+  }
+
   function strongClick(el, options = {}) {
     if (!el) return false;
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    const target = options.directTarget ? el : getPointerEventTarget(el);
-    try { target.focus?.({ preventScroll: true }); } catch {
-      try { target.focus?.(); } catch {}
-    }
+    const point = getElementClickPoint(el);
+    const targets = getStrongClickTargets(el, options);
 
-    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-      try {
-        target.dispatchEvent(new MouseEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window
-        }));
-      } catch {}
-    }
+    for (const target of targets) {
+      try { target.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+      try { target.focus?.({ preventScroll: true }); } catch {
+        try { target.focus?.(); } catch {}
+      }
 
-    try { target.click?.(); } catch {}
+      for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        const event = makeClickEvent(target, type, point);
+        if (event) {
+          try { target.dispatchEvent(event); } catch {}
+        }
+      }
+
+      try { target.click?.(); } catch {}
+    }
     return true;
   }
 
