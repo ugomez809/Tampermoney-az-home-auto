@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.7
+// @version      1.3.8
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -31,6 +31,7 @@
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
+  const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
@@ -181,6 +182,7 @@
   function init() {
     window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
     if (isAgencyZoomLoginPage()) return;
+    if (isAgencyZoomMfaHelperPage()) return;
     if (!claimSingletonPageSlot()) return;
 
     const legacyJobStateCleared = clearLegacyJobState();
@@ -249,6 +251,13 @@
 
   function isAgencyZoomLoginPage() {
     return isAzOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
+  }
+
+  function isAgencyZoomMfaHelperPage() {
+    if (!isAzOrigin()) return false;
+    if (String(location.hash || '') === '#tm-apex-mfa') return true;
+    try { return sessionStorage.getItem(AGENCY_ZOOM_HELPER_SESSION_KEY) === '1'; } catch {}
+    return false;
   }
 
   function isZillowOrigin() {
@@ -3778,6 +3787,7 @@
   async function tick() {
     if (state.destroyed || !isAzOrigin()) return;
     if (isAgencyZoomLoginPage()) return;
+    if (isAgencyZoomMfaHelperPage()) return;
     if (!claimSingletonPageSlot()) return;
     if (state.picker) {
       renderAll();

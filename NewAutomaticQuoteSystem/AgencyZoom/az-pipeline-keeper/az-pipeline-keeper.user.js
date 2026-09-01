@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         14 AUTO AgencyZoom Pipeline Keeper
 // @namespace    autoflow.az-pipeline-keeper
-// @version      1.0.2
+// @version      1.0.3
 // @description  AUTO-profile helper that keeps one exact AgencyZoom pipeline tab alive, closes extra AgencyZoom tabs when a leader exists, redirects stray AgencyZoom pages back to pipeline, and sweeps stale Zillow tabs on a 3-minute cleanup pulse.
 // @match        https://app.agencyzoom.com/*
 // @match        https://www.zillow.com/*
@@ -25,9 +25,10 @@
   try { window.__AZ_PIPELINE_KEEPER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = '14 AUTO AgencyZoom Pipeline Keeper';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
+  const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
 
   const GM_KEYS = {
     leader: 'tm_az_pipeline_keeper_leader_v1',
@@ -113,6 +114,13 @@
 
   function isAgencyZoomLoginPage() {
     return isAgencyZoomOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
+  }
+
+  function isAgencyZoomMfaHelperPage() {
+    if (!isAgencyZoomOrigin()) return false;
+    if (String(location.hash || '') === '#tm-apex-mfa') return true;
+    try { return sessionStorage.getItem(AGENCY_ZOOM_HELPER_SESSION_KEY) === '1'; } catch {}
+    return false;
   }
 
   function isZillowOrigin() {
@@ -260,6 +268,10 @@
   function runTick() {
     if (state.destroyed) return;
     if (isAgencyZoomLoginPage()) return;
+    if (isAgencyZoomMfaHelperPage()) {
+      maybeLogRole('AgencyZoom MFA helper detected; pipeline keeper standing down');
+      return;
+    }
     if (!claimSingletonPageSlot()) return;
 
     normalizePipelineUrlIfNeeded();
