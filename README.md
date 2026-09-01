@@ -58,6 +58,7 @@ webhook (Pabbly) for downstream processing.
 
 | File | Purpose |
 |---|---|
+| `farmers-apex-automatic-login.user.js` | Logs into Farmers Apex and reads SMS MFA through an AgencyZoom helper page. |
 | `apex-quote-new-account.user.js` | **Dormant.** Reads `tm_apex_home_bot_payload_v1` (not currently populated by any script in this repo). Kept installed for when webhook-seeded APEX form-fill is wired up. |
 | `apex-duplicates-continue.user.js` | Handles the Duplicates Found modal: selects first match, waits for Continue to enable, clicks it. |
 | `apex-continue-new-quote.user.js` | Handles the Personal Lines Quote modal: clicks Home, picks Residence Address, clicks Continue New Quote once. |

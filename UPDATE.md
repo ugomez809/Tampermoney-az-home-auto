@@ -48,6 +48,7 @@ For one-by-one installs instead of the bundle:
 
 | Script | Install |
 | --- | --- |
+| Farmers Apex Automatic Login | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js) |
 | APEX Duplicate Check Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js) |
 | APEX Home Quote Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js) |
 | APEX Multi-Agency Continue | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-multi-agency-continue.user.js) |
