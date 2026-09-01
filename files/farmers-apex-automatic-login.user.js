@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.15
+// @version      1.0.16
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -27,6 +27,7 @@
   'use strict';
 
   const KEYS = Object.freeze({
+    apexCredentials: 'farmersApexLogin.v2.apexCredentials',
     legacyCredentials: 'farmersApexLogin.v1.credentials',
     request: 'farmersApexLogin.v1.mfaRequest',
     response: 'farmersApexLogin.v1.mfaResponse',
@@ -80,12 +81,37 @@
   }
 
   function clearAllStoredState() {
-    Object.values(KEYS).forEach((key) => GM_deleteValue(key));
+    [KEYS.legacyCredentials, KEYS.request, KEYS.response, KEYS.status, KEYS.helperOpenLease]
+      .forEach((key) => GM_deleteValue(key));
     removePanel();
   }
 
   function clearLegacyCredentials() {
     GM_deleteValue(KEYS.legacyCredentials);
+  }
+
+  function readApexCredentials() {
+    const credentials = GM_getValue(KEYS.apexCredentials, null);
+    if (!isPlainObject(credentials)) return null;
+    const username = normalize(credentials.username);
+    const password = String(credentials.password || '');
+    if (!username || !password) return null;
+    return { username, password };
+  }
+
+  function saveApexLoginInfo(username, password) {
+    const cleanUsername = normalize(username);
+    const cleanPassword = String(password || '');
+    if (!cleanUsername || !cleanPassword) throw new Error('Apex username and password are required.');
+    GM_setValue(KEYS.apexCredentials, {
+      username: cleanUsername,
+      password: cleanPassword,
+      savedAt: new Date().toISOString(),
+    });
+  }
+
+  function clearApexCredentials() {
+    GM_deleteValue(KEYS.apexCredentials);
   }
 
   function safeStatus(state, message) {
@@ -103,6 +129,12 @@
         padding:12px 14px; border-radius:8px; background:#172033; color:#fff; box-shadow:0 5px 24px #0006;
         font:13px/1.4 Arial,sans-serif; }
       #tm-apex-login-panel strong { display:block; margin-bottom:4px; }
+      #tm-apex-login-panel label { display:block; margin-top:8px; font-size:12px; }
+      #tm-apex-login-panel input { width:100%; box-sizing:border-box; margin-top:3px; border:1px solid #4d5870;
+        border-radius:4px; padding:7px 8px; background:#fff; color:#111; font:13px Arial,sans-serif; }
+      #tm-apex-login-panel button { margin-top:10px; border:0; border-radius:4px; padding:7px 10px;
+        background:#9bd14b; color:#132000; font-weight:700; cursor:pointer; }
+      #tm-apex-login-panel .tm-apex-login-error { margin-top:8px; color:#ffb4a8; }
     `);
   }
 
@@ -124,7 +156,69 @@
 
   function removePanel() { document.getElementById('tm-apex-login-panel')?.remove(); }
 
+  function showApexCredentialSetupPanel(message = 'Enter Apex login info once. It will be saved in Tampermonkey storage.') {
+    if (!document.body) return;
+    let panel = document.getElementById('tm-apex-login-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'tm-apex-login-panel';
+      document.body.appendChild(panel);
+    }
+    panel.replaceChildren();
+
+    const title = document.createElement('strong');
+    title.textContent = 'Farmers automatic login';
+    const detail = document.createElement('div');
+    detail.textContent = message;
+
+    const usernameLabel = document.createElement('label');
+    usernameLabel.textContent = 'Apex username';
+    const username = document.createElement('input');
+    username.type = 'text';
+    username.autocomplete = 'username';
+    username.value = readApexCredentials()?.username || '';
+    usernameLabel.appendChild(username);
+
+    const passwordLabel = document.createElement('label');
+    passwordLabel.textContent = 'Apex password';
+    const password = document.createElement('input');
+    password.type = 'password';
+    password.autocomplete = 'current-password';
+    passwordLabel.appendChild(password);
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save Login Info';
+
+    const errorLine = document.createElement('div');
+    errorLine.className = 'tm-apex-login-error';
+
+    save.onclick = () => {
+      try {
+        saveApexLoginInfo(username.value, password.value);
+        removePanel();
+        stopped = false;
+        safeStatus('idle', 'Apex login info saved.');
+        scheduleScan(0);
+      } catch (error) {
+        errorLine.textContent = error?.message || 'Apex login info could not be saved.';
+      }
+    };
+
+    panel.append(title, detail, usernameLabel, passwordLabel, save, errorLine);
+  }
+
   function registerMenus() {
+    GM_registerMenuCommand('Save Apex Login Info', () => {
+      showApexCredentialSetupPanel();
+    });
+    GM_registerMenuCommand('Clear Saved Apex Login Info', () => {
+      if (globalThis.confirm?.('Clear saved Apex login info?')) {
+        clearApexCredentials();
+        safeStatus('setup_required', 'Saved Apex login info cleared.');
+        showApexCredentialSetupPanel('Saved Apex login info cleared. Enter it again to continue.');
+      }
+    });
     GM_registerMenuCommand('Resume Automatic Login', () => {
       stopped = false;
       cleanupExpiredState();
@@ -325,8 +419,26 @@
     return true;
   }
 
+  function submitSavedApexLogin(credentials) {
+    const user = usernameInput();
+    const password = passwordInput();
+    const target = password || user;
+    if (!target) throw new Error('Apex login fields were not recognized.');
+    if (user && user.value !== credentials.username) setNativeInputValue(user, credentials.username);
+    if (password && password.value !== credentials.password) setNativeInputValue(password, credentials.password);
+    if (!submitLoginForm(target)) throw new Error('Apex login control was not recognized.');
+    safeStatus('logging_in', 'Saved Apex login submitted.');
+    return true;
+  }
+
   function fillApexLogin() {
-    return submitBrowserSavedLogin('Apex', 'logging_in', 'Browser-saved Apex login submitted.');
+    const credentials = readApexCredentials();
+    if (!credentials) {
+      safeStatus('setup_required', 'Save Apex login info once to continue.');
+      showApexCredentialSetupPanel();
+      return false;
+    }
+    return submitSavedApexLogin(credentials);
   }
 
   function fillAgencyZoomLogin() {
@@ -571,7 +683,7 @@
       else if (kind === 'apex_finish') clickFirst(/^finish logging in$/i);
       else if (kind === 'apex_factor' || kind === 'apex_code') beginOrContinueMfa(kind);
     } catch {
-      block('The Apex login page changed or the browser-saved login is unavailable.');
+      block('The Apex login page changed or the saved Apex login info could not be used.');
     }
   }
 
@@ -746,9 +858,10 @@
   if (TEST_MODE) {
     globalThis.__FARMERS_APEX_LOGIN_TEST_API__ = {
       KEYS, CONFIG, clearAllStoredState, clearLegacyCredentials,
+      readApexCredentials, saveApexLoginInfo, clearApexCredentials, showApexCredentialSetupPanel,
       setNativeInputValue, classifyPage, selectFreshFarmersMfa, createMfaRequest,
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
-      requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText,
+      requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText,
       needsFactorDropdownFallback, isSmsFactorReady,
     };
   } else {
