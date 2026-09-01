@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.12
+// @version      3.9.13
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.12';
+  const VERSION = '3.9.13';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -81,6 +81,12 @@
 
     water:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoWaterProtectionDevice',
+
+    theft:
+      'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoTheftProtectionDevice',
+
+    fire:
+      'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoFireProtectionDevice',
 
     yearBuilt:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-YearBuilt',
@@ -841,6 +847,16 @@
     });
   }
 
+  function hasProfessionalAlarmRequiredMessage() {
+    const nodes = Array.from(document.querySelectorAll('.gw-message, .gw-message-and-suffix'))
+      .filter(isVisible);
+
+    return nodes.some(el => {
+      const txt = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return txt.includes('professionally installed and monitored central burglar and fire alarm');
+    });
+  }
+
   async function waitForGarageError(timeoutMs) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -923,6 +939,26 @@
     return false;
   }
 
+  async function fixProfessionalAlarmIfNeeded() {
+    if (!hasProfessionalAlarmRequiredMessage()) return false;
+
+    log('Professional alarm requirement detected');
+    setStatus('Fixing alarm protection');
+
+    const theftOK = await ensureSelectValueOptional(
+      NAMES.theft,
+      'P',
+      'Theft Protection = Professionally Monitored'
+    );
+    const fireOK = await ensureSelectValueOptional(
+      NAMES.fire,
+      'P',
+      'Fire Protection = Professionally Monitored'
+    );
+
+    return theftOK && fireOK;
+  }
+
   async function waitForQuoteTransition() {
     const start = Date.now();
     while (Date.now() - start < CFG.afterQuoteWaitMs) {
@@ -994,6 +1030,10 @@
       await fixGarageTypeIfNeeded();
     }
 
+    if (hasProfessionalAlarmRequiredMessage()) {
+      await fixProfessionalAlarmIfNeeded();
+    }
+
     setStatus('Repeating Dwelling one more time');
     await fillDwellingFields();
     return clickQuoteAndWaitForTransition();
@@ -1007,6 +1047,7 @@
     let quoteOK = await clickQuoteAndWaitForTransition();
     if (!quoteOK) {
       await fixGarageTypeIfNeeded();
+      await fixProfessionalAlarmIfNeeded();
       quoteOK = await rerunAfterStuckQuote();
     }
     if (!quoteOK) throw new Error('Quote click did not move off Dwelling');
