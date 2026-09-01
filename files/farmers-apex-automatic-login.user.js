@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.16
+// @version      1.0.17
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -304,7 +304,10 @@
       return 'unsupported_challenge';
     }
     if (isAgencyZoomHost()) {
-      if (codeInput() || /verification code|authentication factor|multi-factor|\bmfa\b|one-time code/i.test(text)) {
+      if (/\/integration\/messages\/index/i.test(location.pathname)) {
+        return 'agencyzoom_authenticated';
+      }
+      if (codeInput() || /authentication factor|multi-factor|\bmfa\b|one-time code/i.test(text)) {
         return 'unsupported_challenge';
       }
       if (passwordInput() || (/login|sign in/i.test(text) && usernameInput())) return 'agencyzoom_login';
