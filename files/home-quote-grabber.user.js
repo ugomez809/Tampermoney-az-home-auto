@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.31
+// @version      4.1.32
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.31';
+  const VERSION = '4.1.32';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -1100,6 +1100,15 @@
     });
   }
 
+  function queryAllInDocs(selector) {
+    const out = [];
+    const docs = getAccessibleDocs();
+    for (const doc of docs) {
+      try { out.push(...Array.from(doc.querySelectorAll(selector))); } catch {}
+    }
+    return out;
+  }
+
   function findVisibleNodeInDocs(selector) {
     return findInDocs((doc) => {
       const nodes = doc.querySelectorAll(selector);
@@ -1385,6 +1394,48 @@
     if (el.getAttribute?.('role') === 'checkbox' || el.getAttribute?.('role') === 'radio') return el;
     if (/\bgw-checkboxDiv\b|\bgw-radioDiv\b/.test(String(el.className || ''))) return el;
     return el.closest?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || el;
+  }
+
+  function findVisibleChoiceWidgetForInput(input) {
+    if (!input || !(input instanceof Element)) return null;
+    if (isVisibleEl(input)) return getChoiceClickTarget(input);
+
+    const doc = input.ownerDocument || document;
+    const keys = [
+      input.id,
+      input.name,
+      input.getAttribute?.('name')
+    ].filter(Boolean);
+    for (const key of keys) {
+      for (const suffix of ['_checkboxDiv', '_radioDiv']) {
+        const byGeneratedId = doc.getElementById?.(`${key}${suffix}`);
+        if (byGeneratedId && isVisibleEl(byGeneratedId)) return byGeneratedId;
+      }
+    }
+
+    let cur = input.parentElement;
+    let depth = 0;
+    while (cur && depth < 5) {
+      const peers = cur.querySelectorAll?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || [];
+      for (const peer of peers) {
+        if (peer !== input && isVisibleEl(peer)) return getChoiceClickTarget(peer);
+      }
+      cur = cur.parentElement;
+      depth++;
+    }
+
+    return null;
+  }
+
+  function findChoiceField(selector, expectedLabels = []) {
+    const nodes = queryAllInDocs(selector);
+    for (const el of nodes) {
+      const target = findVisibleChoiceWidgetForInput(el);
+      if (!target) continue;
+      if (!verifyContextLabels(el, expectedLabels) && !verifyContextLabels(target, expectedLabels)) continue;
+      return { el, target };
+    }
+    return null;
   }
 
   function clickChoiceControl(el) {
@@ -1951,22 +2002,30 @@
   }
 
   async function ensureCheckboxVerified(selector, expectedLabels, label) {
-    const el = await waitForField(selector, expectedLabels, label);
-    if (isSelectedChoiceControl(el)) {
+    const ok = await waitFor(
+      () => !!findChoiceField(selector, expectedLabels),
+      CFG.waitTimeoutMs,
+      label
+    );
+    if (!ok) throw new Error(`${label}: field not found or context mismatch`);
+    const field = findChoiceField(selector, expectedLabels);
+    if (!field) throw new Error(`${label}: field vanished`);
+    const { el, target } = field;
+    if (isSelectedChoiceControl(el) || isSelectedChoiceControl(target)) {
       log(`${label}: already checked`);
       return;
     }
-    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-    if (!clickChoiceControl(el) && isNativeInput(el) && isVisibleEl(el) && !el.checked) {
+    try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    if (!clickChoiceControl(target) && !clickChoiceControl(el) && isNativeInput(el) && isVisibleEl(el) && !el.checked) {
       try { el.checked = true; } catch {}
       dispatchValueEvents(el);
     }
     await sleep(CFG.afterFieldMs);
-    if (!isSelectedChoiceControl(el)) {
-      clickChoiceControl(el);
+    if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) {
+      clickChoiceControl(target);
       await sleep(CFG.afterFieldMs);
     }
-    if (!isSelectedChoiceControl(el)) throw new Error(`${label}: failed to stay checked`);
+    if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) throw new Error(`${label}: failed to stay checked`);
     log(`${label}: checked`);
   }
 
