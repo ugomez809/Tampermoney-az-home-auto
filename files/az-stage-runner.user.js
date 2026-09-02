@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.43
+// @version      2.5.44
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -21,7 +21,7 @@
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.42';
+  const VERSION = '2.5.44';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -1371,25 +1371,13 @@
   }
 
   async function waitUntilFrontStable(ms = CFG.frontStableMs) {
-    let stableSince = 0;
+    const stableSince = Date.now();
+    state.bgPauseLogged = false;
 
     while (state.running && !state.destroyed) {
-      if (isFrontTab()) {
-        if (!stableSince) {
-          stableSince = Date.now();
-          state.bgPauseLogged = false;
-        }
-        if ((Date.now() - stableSince) >= ms) {
-          setStatus(`RUNNING (${state.mode ? state.mode.toUpperCase() : '—'})`);
-          return true;
-        }
-      } else {
-        stableSince = 0;
-        setStatus('PAUSED BACKGROUND');
-        if (!state.bgPauseLogged) {
-          log('Paused in background. Waiting to return to front...', 'warn');
-          state.bgPauseLogged = true;
-        }
+      if ((Date.now() - stableSince) >= ms) {
+        setStatus(`RUNNING (${state.mode ? state.mode.toUpperCase() : 'HOME'})`);
+        return true;
       }
       await sleep(120);
     }
@@ -2055,7 +2043,7 @@
     log(`${modeLabel} clicked. Waiting for background/return...`, 'info');
     await waitForHiddenThenFrontStable();
 
-    log('Returned to front and stable for 3s', 'ok');
+    log('Quote handoff wait complete', 'ok');
     return true;
   }
 
