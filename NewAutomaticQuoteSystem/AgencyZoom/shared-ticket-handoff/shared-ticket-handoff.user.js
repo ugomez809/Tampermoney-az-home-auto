@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GWPC Shared Ticket Handoff
 // @namespace    homebot.shared-ticket-handoff
-// @version      1.9.7
-// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, and advances final Home readiness directly to sender.
+// @version      1.9.8
+// @description  Shared AZ -> GWPC Ticket ID handoff using one Tampermonkey script. AZ saves Ticket ID into shared GM storage; GWPC seeds HOME-only current job/payload state, preserves same-AZ current job values, enriches identity from GWPC, advances final Home readiness directly to sender, and bridges successful Home final payloads back to AZ.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://policycenter.farmersinsurance.com/*
@@ -22,7 +22,7 @@
   if (window.top !== window.self) return;
 
   const SCRIPT_NAME = 'GWPC Shared Ticket Handoff';
-  const VERSION = '1.9.7';
+  const VERSION = '1.9.8';
 
   // Log-export integration — key choice depends on origin since this script
   // runs on both AZ and GWPC. Suffix `_logs_v1` and the `tm_*` prefix match
@@ -42,7 +42,10 @@
   const FLOW_STAGE_KEY = 'tm_pc_flow_stage_v1';
 
   const GM_KEYS = {
-    HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1'
+    HANDOFF: 'hb_shared_az_to_gwpc_ticket_handoff_v1',
+    finalPayload: 'tm_az_gwpc_final_payload_v1',
+    finalReady: 'tm_az_gwpc_final_payload_ready_v1',
+    homePayload: 'tm_pc_home_quote_grab_payload_v1'
   };
 
   const LS_KEYS = {
@@ -63,6 +66,7 @@
     bundle: 'tm_pc_webhook_bundle_v1',
     homeTrigger: 'tm_pc_home_quote_grabber_trigger_v1',
     webhookSentMeta: 'tm_pc_webhook_submit_sent_meta_v17',
+    webhookPostSuccess: 'tm_pc_webhook_post_success_v1',
     forceSend: 'tm_pc_force_send_now_v1'
   };
 
@@ -83,6 +87,8 @@
     lastIdleKey: '',
     lastAzSig: '',
     lastStatus: '',
+    lastFinalBridgeKey: '',
+    lastAzFinalImportKey: '',
     activityState: 'idle',
     activityMessage: 'Running'
   };
@@ -113,6 +119,7 @@
       writeActivityState('stopped', 'Stopped');
       return;
     }
+    bridgeFinalHomePayloadForCurrentOrigin();
     if (state.busy) {
       refreshActivityHeartbeat();
       return;
@@ -402,6 +409,270 @@
     return bundle && typeof bundle === 'object' && !Array.isArray(bundle) ? bundle : null;
   }
 
+  function bridgeFinalHomePayloadForCurrentOrigin() {
+    if (isGwpcOrigin()) return publishFinalHomePayloadFromGwpcSuccess();
+    if (isAzOrigin()) return importFinalHomePayloadToAzLocal();
+    return false;
+  }
+
+  function publishFinalHomePayloadFromGwpcSuccess() {
+    const currentJob = readLocalJson(GWPC_KEYS.currentJob, {});
+    const homePayload = readLocalJson(GWPC_KEYS.homePayload, {});
+    const bundle = readLocalJson(GWPC_KEYS.bundle, {});
+    const localAzId = clean(
+      currentJob?.['AZ ID'] ||
+      currentJob?.azId ||
+      bundle?.['AZ ID'] ||
+      bundle?.azId ||
+      extractHomePayloadAzId(homePayload) ||
+      extractHomePayloadAzId(bundle?.home?.data) ||
+      ''
+    );
+    const signal = pickWebhookSuccessSignalForAz(localAzId);
+    const azId = clean(localAzId || signal?.azId || '');
+
+    if (!signal || !azId) return false;
+    if (!homeFinalPayloadReadyForAz(azId, homePayload, bundle)) return false;
+
+    const signalKey = buildFinalPayloadSignalKey(signal);
+    const payload = {
+      azId,
+      savedAt: nowIso(),
+      signalPostedAt: clean(signal.postedAt || ''),
+      signalKey,
+      source: SCRIPT_NAME,
+      version: VERSION,
+      currentJob: isPlainObject(currentJob) ? deepClone(currentJob) : {},
+      bundle: isPlainObject(bundle) ? deepClone(bundle) : {},
+      homePayload: isPlainObject(homePayload) ? deepClone(homePayload) : {},
+      rawKeysFound: [
+        GWPC_KEYS.currentJob,
+        GWPC_KEYS.homePayload,
+        GWPC_KEYS.bundle,
+        GWPC_KEYS.webhookPostSuccess
+      ]
+    };
+
+    if (!shouldReplaceSharedFinalPayload(payload)) return false;
+
+    try { GM_setValue(GM_KEYS.finalPayload, payload); } catch {}
+    try {
+      GM_setValue(GM_KEYS.finalReady, {
+        ready: true,
+        azId,
+        savedAt: payload.savedAt,
+        signalPostedAt: payload.signalPostedAt,
+        signalKey,
+        source: SCRIPT_NAME,
+        version: VERSION
+      });
+    } catch {}
+    if (isPlainObject(homePayload) && extractHomePayloadAzId(homePayload)) {
+      try { GM_setValue(GM_KEYS.homePayload, homePayload); } catch {}
+    }
+
+    if (state.lastFinalBridgeKey !== signalKey) {
+      state.lastFinalBridgeKey = signalKey;
+      log(`Final Home payload bridged for AZ ${azId}`);
+    }
+    return true;
+  }
+
+  function importFinalHomePayloadToAzLocal() {
+    const payload = gmGetJson(GM_KEYS.finalPayload, null);
+    if (!isPlainObject(payload) || !clean(payload.azId || '')) return false;
+    if (!shouldReplaceLocalFinalPayload(payload)) return false;
+
+    const ready = gmGetJson(GM_KEYS.finalReady, null);
+    writeLocalJson(GM_KEYS.finalPayload, payload);
+    if (isPlainObject(ready)) writeLocalJson(GM_KEYS.finalReady, ready);
+
+    const homePayload = gmGetJson(GM_KEYS.homePayload, null);
+    if (isPlainObject(homePayload) && extractHomePayloadAzId(homePayload) === clean(payload.azId || '')) {
+      writeLocalJson(GM_KEYS.homePayload, homePayload);
+    }
+
+    const importKey = clean(payload.signalKey || `${payload.azId}|${payload.signalPostedAt || payload.savedAt || ''}`);
+    if (state.lastAzFinalImportKey !== importKey) {
+      state.lastAzFinalImportKey = importKey;
+      log(`Final Home payload imported into AZ for ${payload.azId}`);
+    }
+    return true;
+  }
+
+  function pickWebhookSuccessSignalForAz(azId) {
+    const wantedAzId = clean(azId || '');
+    const candidates = [
+      normalizeWebhookSuccessSignal(readLocalJson(GWPC_KEYS.webhookPostSuccess, null)),
+      normalizeWebhookSuccessSignal(gmGetJson(GWPC_KEYS.webhookPostSuccess, null))
+    ].filter(Boolean);
+
+    let best = null;
+    let bestMs = 0;
+    for (const signal of candidates) {
+      if (wantedAzId && signal.azId !== wantedAzId) continue;
+      const postedMs = toMs(signal.postedAt);
+      if (!best || postedMs > bestMs) {
+        best = signal;
+        bestMs = postedMs;
+      }
+    }
+    return best;
+  }
+
+  function normalizeWebhookSuccessSignal(signal) {
+    if (!isPlainObject(signal) || signal.ok !== true) return null;
+    const azId = clean(signal.azId || signal['AZ ID'] || signal.ticketId || '');
+    if (!azId) return null;
+    return {
+      ok: true,
+      azId,
+      postedAt: clean(signal.postedAt || signal.savedAt || ''),
+      signature: clean(signal.signature || ''),
+      source: clean(signal.source || ''),
+      version: clean(signal.version || '')
+    };
+  }
+
+  function homeFinalPayloadReadyForAz(azId, homePayload, bundle) {
+    const wantedAzId = clean(azId || '');
+    if (!wantedAzId) return false;
+
+    const payloadAzId = extractHomePayloadAzId(homePayload);
+    const bundleAzId = clean(
+      bundle?.['AZ ID'] ||
+      bundle?.azId ||
+      extractHomePayloadAzId(bundle?.home?.data) ||
+      ''
+    );
+    const payloadMatches = isPlainObject(homePayload) && (!payloadAzId || payloadAzId === wantedAzId);
+    const bundleMatches = isPlainObject(bundle) && (!bundleAzId || bundleAzId === wantedAzId);
+
+    return (
+      (payloadMatches && homePayload?.ready === true) ||
+      (bundleMatches && bundle?.home?.ready === true)
+    );
+  }
+
+  function shouldReplaceSharedFinalPayload(nextPayload) {
+    const existing = gmGetJson(GM_KEYS.finalPayload, null);
+    if (!isPlainObject(existing) || !clean(existing.azId || '')) return true;
+
+    const existingMs = getFinalPayloadSavedMs(existing);
+    const nextMs = getFinalPayloadSavedMs(nextPayload);
+    const existingAzId = clean(existing.azId || '');
+    const nextAzId = clean(nextPayload.azId || '');
+
+    if (existingAzId === nextAzId && clean(existing.signalKey || '') === clean(nextPayload.signalKey || '')) {
+      return scoreFinalHomePayload(nextPayload) > scoreFinalHomePayload(existing);
+    }
+    if (existingMs && nextMs && existingMs > nextMs) return false;
+    return true;
+  }
+
+  function shouldReplaceLocalFinalPayload(nextPayload) {
+    const existing = readLocalJson(GM_KEYS.finalPayload, null);
+    if (!isPlainObject(existing) || !clean(existing.azId || '')) return true;
+
+    const existingMs = getFinalPayloadSavedMs(existing);
+    const nextMs = getFinalPayloadSavedMs(nextPayload);
+    const existingAzId = clean(existing.azId || '');
+    const nextAzId = clean(nextPayload.azId || '');
+
+    if (existingAzId === nextAzId && clean(existing.signalKey || '') === clean(nextPayload.signalKey || '')) {
+      return false;
+    }
+    if (existingMs && nextMs && existingMs > nextMs) return false;
+    return true;
+  }
+
+  function buildFinalPayloadSignalKey(signal) {
+    return [
+      clean(signal?.azId || ''),
+      clean(signal?.postedAt || ''),
+      clean(signal?.signature || '')
+    ].join('|');
+  }
+
+  function extractHomePayloadAzId(raw) {
+    const data = unwrapProductPayload(raw);
+    return clean(
+      raw?.['AZ ID'] ||
+      raw?.azId ||
+      raw?.ticketId ||
+      raw?.currentJob?.['AZ ID'] ||
+      raw?.currentJob?.azId ||
+      data?.['AZ ID'] ||
+      data?.azId ||
+      data?.ticketId ||
+      data?.currentJob?.['AZ ID'] ||
+      data?.currentJob?.azId ||
+      ''
+    );
+  }
+
+  function unwrapProductPayload(raw) {
+    if (!isPlainObject(raw)) return {};
+    return isPlainObject(raw.data) ? raw.data : raw;
+  }
+
+  function getHomePayloadRow(raw) {
+    const data = unwrapProductPayload(raw);
+    if (isPlainObject(raw?.row)) return raw.row;
+    if (isPlainObject(data?.row)) return data.row;
+    return {};
+  }
+
+  function getFinalPayloadSavedMs(payload) {
+    const candidates = [
+      payload?.savedAt,
+      payload?.signalPostedAt,
+      payload?.homePayload?.savedAt,
+      payload?.homePayload?.meta?.updatedAt,
+      payload?.bundle?.home?.data?.savedAt,
+      payload?.bundle?.home?.data?.meta?.updatedAt
+    ];
+    let best = 0;
+    for (const candidate of candidates) {
+      const ms = toMs(candidate);
+      if (Number.isFinite(ms) && ms > best) best = ms;
+    }
+    return best;
+  }
+
+  function scoreFinalHomePayload(payload) {
+    if (!isPlainObject(payload)) return -1;
+    const homePayload = isPlainObject(payload.homePayload) ? payload.homePayload : {};
+    const bundleHomeData = isPlainObject(payload.bundle?.home?.data) ? payload.bundle.home.data : {};
+    const row = Object.assign({}, getHomePayloadRow(homePayload), getHomePayloadRow(bundleHomeData));
+    const keys = [
+      'CFP?',
+      'Reconstruction Cost',
+      'Year Built',
+      'Square FT',
+      '# of Story',
+      'Home Roof Type',
+      'Bedrooms',
+      'Bathrooms',
+      'Home Type',
+      'Water Device?',
+      'Standard Pricing No Auto Discount',
+      'Enhance Pricing No Auto Discount',
+      'Standard Pricing Auto Discount',
+      'Enhance Pricing Auto Discount',
+      'Submission Number',
+      'Account Number',
+      'Done?'
+    ];
+
+    let score = 0;
+    if (homePayload.ready === true || payload.bundle?.home?.ready === true) score += 20;
+    for (const key of keys) {
+      if (clean(row[key] || '')) score += 3;
+    }
+    return score;
+  }
+
   function getHomeGatherState(azId) {
     const wantedAzId = clean(azId);
     const payload = readGwpcHomePayload();
@@ -621,6 +892,38 @@
     } catch {
       return fallback;
     }
+  }
+
+  function readLocalJson(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null || raw === '') return fallback;
+      return safeJsonParse(raw, fallback);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeLocalJson(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value, null, 2));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function deepClone(value) {
+    try { return JSON.parse(JSON.stringify(value)); }
+    catch { return value; }
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
   }
 
   function toMs(value) {
