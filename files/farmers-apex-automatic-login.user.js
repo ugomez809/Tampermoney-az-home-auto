@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.21
+// @version      1.0.22
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -771,9 +771,9 @@
     const matches = allPiercing('*').filter((element) => (
       FARMERS_CODE_PATTERN.test(normalize(element.innerText || element.textContent || ''))
     ));
-    return matches.map((element) => {
+    return matches.flatMap((element) => {
       let node = element;
-      let best = element;
+      let best = null;
       for (let depth = 0; node && node !== document.body && depth < 7; depth += 1) {
         const raw = String(node.innerText || node.textContent || '').replace(/\r/g, '').trim();
         const text = normalize(raw);
@@ -783,7 +783,7 @@
         }
         node = node.parentElement;
       }
-      return best;
+      return best ? [best] : [];
     });
   }
 
