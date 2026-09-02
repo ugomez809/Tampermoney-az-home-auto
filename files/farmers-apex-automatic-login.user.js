@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.17
+// @version      1.0.18
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -786,16 +786,16 @@
 
   function runAgencyZoomRole() {
     if (stopped || !document.body) return;
-    const helperTab = isAgencyZoomHelperTab();
-    const request = liveRequest();
-    if (!request || !helperTab) return;
     const kind = classifyPage();
-    if (kind === 'unsupported_challenge') return block('AgencyZoom requires manual authentication.');
     if (kind === 'agencyzoom_login') {
       if (!takeLease(kind)) return;
       try { fillAgencyZoomLogin(); } catch { block('AgencyZoom browser-saved login could not be completed automatically.'); }
       return;
     }
+    const helperTab = isAgencyZoomHelperTab();
+    const request = liveRequest();
+    if (!request || !helperTab) return;
+    if (kind === 'unsupported_challenge') return block('AgencyZoom requires manual authentication.');
     if (kind === 'agencyzoom_authenticated' || location.hash === '#tm-apex-mfa') {
       if (!openAgencyZoomTexts(request)) return;
       pollAgencyZoomForCode();
