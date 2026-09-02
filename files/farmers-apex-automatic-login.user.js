@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.20
+// @version      1.0.21
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -745,6 +745,19 @@
     return parseAgencyZoomTimestamp(value);
   }
 
+  function extractAgencyZoomTimestampText(value) {
+    const text = String(value || '').replace(/\r/g, '\n');
+    const match = text.match(
+      /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\s*\|?\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i,
+    ) || text.match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\s*\|?\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i);
+    return match ? normalize(match[0]) : '';
+  }
+
+  function extractAgencyZoomSenderText(value) {
+    const lines = String(value || '').split(/\n/).map(normalize);
+    return lines.find((part) => /^\d{5}$/.test(part)) || normalize(value).match(/\b\d{5}\b/)?.[0] || '';
+  }
+
   function stableFingerprint(value) {
     let hash = 2166136261;
     for (let index = 0; index < value.length; index += 1) {
@@ -754,20 +767,41 @@
     return `generated-${(hash >>> 0).toString(16)}`;
   }
 
+  function agencyZoomCodePreviewRows() {
+    const matches = allPiercing('*').filter((element) => (
+      FARMERS_CODE_PATTERN.test(normalize(element.innerText || element.textContent || ''))
+    ));
+    return matches.map((element) => {
+      let node = element;
+      let best = element;
+      for (let depth = 0; node && node !== document.body && depth < 7; depth += 1) {
+        const raw = String(node.innerText || node.textContent || '').replace(/\r/g, '').trim();
+        const text = normalize(raw);
+        if (FARMERS_CODE_PATTERN.test(text) && text.length <= 500) {
+          best = node;
+          if (extractAgencyZoomTimestampText(raw) || extractAgencyZoomSenderText(raw)) break;
+        }
+        node = node.parentElement;
+      }
+      return best;
+    });
+  }
+
   function readAgencyZoomMessages() {
-    const rows = allPiercing(
-      '[data-message-id],[data-sms-id],[data-received-at],[data-timestamp],article,section,li,tr',
-    );
+    const rows = [...new Set([
+      ...allPiercing('[data-message-id],[data-sms-id],[data-received-at],[data-timestamp],article,section,li,tr'),
+      ...agencyZoomCodePreviewRows(),
+    ])];
     const messages = rows.map((row) => {
       const rawRowText = String(row.innerText || row.textContent || '').replace(/\r/g, '').trim();
       const rowText = normalize(rawRowText);
       const body = row.querySelector('[data-message-body],.message-body,.message-text,p');
       const text = normalize(body?.textContent || row.getAttribute('data-message-body') || rowText);
       const sender = normalize(row.getAttribute('data-sender')
-        || rawRowText.split(/\n/).map(normalize).find((part) => /^\d{5}$/.test(part)) || '');
+        || extractAgencyZoomSenderText(rawRowText) || '');
       const time = row.querySelector('time');
       const timeText = row.getAttribute('data-received-at') || row.getAttribute('data-timestamp')
-        || time?.getAttribute('datetime') || time?.textContent || '';
+        || time?.getAttribute('datetime') || time?.textContent || extractAgencyZoomTimestampText(rawRowText) || '';
       const id = row.getAttribute('data-message-id') || row.getAttribute('data-sms-id') || row.id
         || (sender && timeText && text ? stableFingerprint(`${sender}|${timeText}|${text}`) : '');
       return { id, sender, text, receivedAt: parseTime(timeText) };
