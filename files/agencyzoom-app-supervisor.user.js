@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom App Supervisor
 // @namespace    homebot.az-app-supervisor
-// @version      1.0.0
+// @version      1.0.1
 // @description  Watches normal AgencyZoom tabs for shell-only dead loads and reloads the current tab with a loop guard.
 // @author       Local
 // @match        https://app.agencyzoom.com/*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'AgencyZoom App Supervisor';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const TEST_MODE = !!globalThis.__AZ_APP_SUPERVISOR_TEST_MODE__;
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
@@ -53,6 +53,18 @@
     '[data-testid*="message" i]',
     '[data-testid*="conversation" i]',
     'table tbody tr',
+  ];
+
+  const HEALTHY_CONTENT_SELECTORS = [
+    '.page-content',
+    '.content-wrapper',
+    '.main-content',
+    '#main-content',
+    'main',
+    '[role="main"]',
+    '.app-content',
+    '.dashboard-content',
+    '.dashboard',
   ];
 
   const SHELL_SELECTORS = [
@@ -151,6 +163,24 @@
     });
   }
 
+  function elementText(el) {
+    return norm(el?.innerText || el?.textContent || '');
+  }
+
+  function hasUsefulAgencyZoomText(text) {
+    return /(?:pipeline|lead|customer|quotes?|messages?|tasks?|calendar|reports?|dashboard|policy|referral|opportunit(?:y|ies))/i.test(text);
+  }
+
+  function visibleAnyUsefulContent(selectors) {
+    return selectors.some((selector) => {
+      try {
+        return Array.from(document.querySelectorAll(selector))
+          .some((el) => visible(el) && elementText(el).length >= 30 && hasUsefulAgencyZoomText(elementText(el)));
+      } catch {}
+      return false;
+    });
+  }
+
   function hasAgencyZoomShell() {
     return visibleAny(SHELL_SELECTORS);
   }
@@ -162,7 +192,7 @@
   function hasUsefulText() {
     const text = pageText();
     if (!text) return false;
-    return /(?:pipeline|lead|customer|quotes?|messages?|tasks?|calendar|reports?|dashboard|policy|referral)/i.test(text);
+    return hasUsefulAgencyZoomText(text);
   }
 
   function hasKnownLoadingFailureText() {
@@ -173,6 +203,7 @@
   function isAgencyZoomHealthy() {
     if (!isNormalAgencyZoomPage()) return true;
     if (visibleAny(HEALTHY_SELECTORS)) return true;
+    if (visibleAnyUsefulContent(HEALTHY_CONTENT_SELECTORS)) return true;
     if (hasKnownLoadingFailureText()) return false;
     return hasUsefulText() && !hasAgencyZoomShell();
   }
