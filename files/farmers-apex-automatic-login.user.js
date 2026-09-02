@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.18
+// @version      1.0.19
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -33,6 +33,7 @@
     response: 'farmersApexLogin.v1.mfaResponse',
     status: 'farmersApexLogin.v1.status',
     helperOpenLease: 'farmersApexLogin.v1.agencyZoomHelperOpenLease',
+    helperHeartbeat: 'farmersApexLogin.v1.agencyZoomHelperHeartbeat',
   });
   const CONFIG = Object.freeze({
     initialMfaWaitMs: 10_000,
@@ -42,6 +43,8 @@
     scanIntervalMs: 300,
     actionLeaseMs: 12_000,
     helperOpenLeaseMs: 5 * 60_000,
+    helperStartupGraceMs: 15_000,
+    helperHeartbeatFreshMs: 15_000,
   });
   const FARMERS_CODE_PATTERN = /Your Farmers verification code is\s+(\d{6})\./i;
   const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
@@ -81,7 +84,7 @@
   }
 
   function clearAllStoredState() {
-    [KEYS.legacyCredentials, KEYS.request, KEYS.response, KEYS.status, KEYS.helperOpenLease]
+    [KEYS.legacyCredentials, KEYS.request, KEYS.response, KEYS.status, KEYS.helperOpenLease, KEYS.helperHeartbeat]
       .forEach((key) => GM_deleteValue(key));
     removePanel();
   }
@@ -493,6 +496,36 @@
     return lease;
   }
 
+  function recentTimestamp(value, maxAgeMs) {
+    const timestamp = Number(value || 0);
+    return timestamp > 0 && now() - timestamp >= 0 && now() - timestamp < maxAgeMs;
+  }
+
+  function readAgencyZoomHelperHeartbeat() {
+    const heartbeat = GM_getValue(KEYS.helperHeartbeat, null);
+    if (!isPlainObject(heartbeat) || !recentTimestamp(heartbeat.seenAt, CONFIG.helperHeartbeatFreshMs)) {
+      GM_deleteValue(KEYS.helperHeartbeat);
+      return null;
+    }
+    return heartbeat;
+  }
+
+  function isAgencyZoomHelperAlive(request) {
+    const heartbeat = readAgencyZoomHelperHeartbeat();
+    if (!heartbeat) return false;
+    const requestRunId = normalize(request?.runId || '');
+    const heartbeatRunId = normalize(heartbeat.runId || '');
+    return !requestRunId || !heartbeatRunId || requestRunId === heartbeatRunId;
+  }
+
+  function markAgencyZoomHelperAlive(request) {
+    GM_setValue(KEYS.helperHeartbeat, {
+      runId: normalize(request?.runId || ''),
+      seenAt: now(),
+      url: String(location.href || ''),
+    });
+  }
+
   function isAgencyZoomHelperTab() {
     if (location.hash === '#tm-apex-mfa') {
       try { sessionStorage.setItem(AGENCY_ZOOM_HELPER_SESSION_KEY, '1'); } catch {}
@@ -550,16 +583,27 @@
     if (helperTabHandle) return;
     const existingLease = readAgencyZoomHelperOpenLease();
     if (existingLease) {
-      if (!request.agencyZoomHelperOpenedAt) {
-        patchLiveRequest({ agencyZoomHelperOpenedAt: Number(existingLease.openedAt || now()) });
+      const openedAt = Number(existingLease.openedAt || 0);
+      if (recentTimestamp(openedAt, CONFIG.helperStartupGraceMs) || isAgencyZoomHelperAlive(request)) {
+        if (!request.agencyZoomHelperOpenedAt) {
+          patchLiveRequest({ agencyZoomHelperOpenedAt: openedAt || now() });
+        }
+        safeStatus('mfa_waiting', 'AgencyZoom helper already opened. Waiting for a fresh Farmers verification message.');
+        return;
       }
-      safeStatus('mfa_waiting', 'AgencyZoom helper already opened. Waiting for a fresh Farmers verification message.');
-      return;
+      GM_deleteValue(KEYS.helperOpenLease);
     }
     if (request.agencyZoomHelperOpenedAt) {
-      writeAgencyZoomHelperOpenLease(request, Number(request.agencyZoomHelperOpenedAt || now()));
-      safeStatus('mfa_waiting', 'Waiting for a fresh Farmers verification message.');
-      return;
+      const openedAt = Number(request.agencyZoomHelperOpenedAt || 0);
+      if (recentTimestamp(openedAt, CONFIG.helperStartupGraceMs) || isAgencyZoomHelperAlive(request)) {
+        writeAgencyZoomHelperOpenLease(request, openedAt || now());
+        safeStatus('mfa_waiting', 'Waiting for a fresh Farmers verification message.');
+        return;
+      }
+      const resetRequest = { ...request };
+      delete resetRequest.agencyZoomHelperOpenedAt;
+      GM_setValue(KEYS.request, resetRequest);
+      request = resetRequest;
     }
     const openedAt = now();
     writeAgencyZoomHelperOpenLease(request, openedAt);
@@ -656,6 +700,7 @@
   function cleanupMfaState() {
     GM_deleteValue(KEYS.request);
     GM_deleteValue(KEYS.response);
+    GM_deleteValue(KEYS.helperHeartbeat);
     try { helperTabHandle?.close?.(); } catch {}
     helperTabHandle = null;
   }
@@ -786,14 +831,15 @@
 
   function runAgencyZoomRole() {
     if (stopped || !document.body) return;
+    const helperTab = isAgencyZoomHelperTab();
+    const request = liveRequest();
+    if (helperTab) markAgencyZoomHelperAlive(request);
     const kind = classifyPage();
     if (kind === 'agencyzoom_login') {
       if (!takeLease(kind)) return;
       try { fillAgencyZoomLogin(); } catch { block('AgencyZoom browser-saved login could not be completed automatically.'); }
       return;
     }
-    const helperTab = isAgencyZoomHelperTab();
-    const request = liveRequest();
     if (!request || !helperTab) return;
     if (kind === 'unsupported_challenge') return block('AgencyZoom requires manual authentication.');
     if (kind === 'agencyzoom_authenticated' || location.hash === '#tm-apex-mfa') {
@@ -833,6 +879,8 @@
     if (response && Number(response.expiresAt || 0) <= now()) GM_deleteValue(KEYS.response);
     const helperOpenLease = GM_getValue(KEYS.helperOpenLease, null);
     if (helperOpenLease && Number(helperOpenLease.expiresAt || 0) <= now()) GM_deleteValue(KEYS.helperOpenLease);
+    const helperHeartbeat = GM_getValue(KEYS.helperHeartbeat, null);
+    if (helperHeartbeat && !recentTimestamp(helperHeartbeat.seenAt, CONFIG.helperHeartbeatFreshMs)) GM_deleteValue(KEYS.helperHeartbeat);
   }
 
   function startWatchers() {
