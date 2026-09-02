@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom App Supervisor
 // @namespace    homebot.az-app-supervisor
-// @version      1.0.2
+// @version      1.0.3
 // @description  Watches normal AgencyZoom tabs for shell-only dead loads and reloads the current tab with a loop guard.
 // @author       Local
 // @match        https://app.agencyzoom.com/*
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'AgencyZoom App Supervisor';
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const TEST_MODE = !!globalThis.__AZ_APP_SUPERVISOR_TEST_MODE__;
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
@@ -26,12 +26,14 @@
     deadShellMs: 45_000,
     maxRecoveries: 3,
     recoveryWindowMs: 5 * 60_000,
+    workflowActivityFreshMs: 2 * 60 * 60_000,
     navigateToPipelineAfter: 2,
     maxLogLines: 14,
     zIndex: 2147483646,
   });
 
   const KEYS = Object.freeze({
+    scriptActivity: 'tm_ui_script_activity_v1',
     recoveryHistory: 'tm_az_app_supervisor_recovery_history_v1',
     status: 'tm_az_app_supervisor_status_v1',
     disabled: 'tm_az_app_supervisor_disabled_v1',
@@ -77,6 +79,17 @@
     '[class*="left" i][class*="nav" i]',
   ];
 
+  const WORKFLOW_SCRIPT_IDS = new Set([
+    'az-stage-runner',
+    'az-ticket-finisher-tagger',
+    'shared-ticket-handoff',
+    'home-quote-grabber',
+    'dwelling-water-rule',
+    'webhook-submission',
+  ]);
+
+  const ACTIVE_ACTIVITY_STATES = new Set(['working', 'active', 'waiting', 'paused']);
+
   const state = {
     firstSeenUnhealthyAt: 0,
     healthySeenAt: 0,
@@ -97,6 +110,7 @@
       runHealthCheck,
       readRecoveryHistory,
       writeRecoveryHistory,
+      getActiveWorkflowActivity,
       getStatus,
       recoverDeadShell,
     };
@@ -143,6 +157,47 @@
     } catch {
       return fallback;
     }
+  }
+
+  function readScriptActivityMap() {
+    const parsed = readJson(localStorage.getItem(KEYS.scriptActivity), {});
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  }
+
+  function activityAgeMs(activity) {
+    const updatedAt = Date.parse(activity?.updatedAt || '');
+    return Number.isFinite(updatedAt) ? now() - updatedAt : Number.POSITIVE_INFINITY;
+  }
+
+  function hasActivityAzId(activity) {
+    return !!norm(activity?.azId || activity?.ticketId || activity?.['AZ ID'] || '');
+  }
+
+  function isPassiveBaselineActivity(activity) {
+    if (hasActivityAzId(activity)) return false;
+    const message = norm(activity?.message || '').toLowerCase();
+    return /^(waiting for mirrored payload|waiting for open ticket|payload missing|stopped|idle)$/i.test(message)
+      || /setup required|field targets already saved|tag setup required/i.test(message);
+  }
+
+  function isActiveWorkflowActivity(activity) {
+    const scriptId = norm(activity?.scriptId || '').toLowerCase();
+    if (!WORKFLOW_SCRIPT_IDS.has(scriptId)) return false;
+    if (activityAgeMs(activity) > CONFIG.workflowActivityFreshMs) return false;
+
+    const activityState = norm(activity?.state || '').toLowerCase();
+    if (!ACTIVE_ACTIVITY_STATES.has(activityState)) return false;
+    if (isPassiveBaselineActivity(activity)) return false;
+    if (activityState === 'working' || activityState === 'active') return true;
+    if (hasActivityAzId(activity)) return true;
+
+    const message = norm(activity?.message || '').toLowerCase();
+    return /background|workflow|quote|finisher|ticket|reloading|restoring|running|home|apex|gwpc|direct fail|handoff/i.test(message);
+  }
+
+  function getActiveWorkflowActivity() {
+    const activities = Object.values(readScriptActivityMap());
+    return activities.find(isActiveWorkflowActivity) || null;
   }
 
   function visible(el) {
@@ -277,6 +332,14 @@
       state.healthySeenAt = now();
       setStatus('healthy', 'AgencyZoom content detected');
       return true;
+    }
+
+    const workflowActivity = getActiveWorkflowActivity();
+    if (workflowActivity) {
+      state.firstSeenUnhealthyAt = 0;
+      state.recoveryPending = false;
+      setStatus('workflow_active', `Workflow active: ${norm(workflowActivity.message || workflowActivity.scriptName || workflowActivity.scriptId)}`);
+      return false;
     }
 
     if (!hasAgencyZoomShell() && document.readyState !== 'complete') {
