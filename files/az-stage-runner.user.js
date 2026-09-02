@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.42
+// @version      2.5.43
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
+// @exclude      https://app.agencyzoom.com/login*
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
@@ -31,6 +32,7 @@
   const LOG_TICK_MS = 2000;
   const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
   const SCRIPT_ID = 'az-stage-runner';
+  const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
 
@@ -248,6 +250,10 @@
   init();
 
   function init() {
+    if (isAgencyZoomMfaHelperPage()) {
+      try { console.log(`[${SCRIPT_NAME}] AgencyZoom MFA helper detected; stage runner standing down`); } catch {}
+      return;
+    }
     buildUi();
     bindUi();
     restorePanelPos();
@@ -666,6 +672,13 @@
 
   function isPipelinePage() {
     return /\/referral\/pipeline(?:$|[?#/])/i.test(`${location.pathname}${location.search}${location.hash}`);
+  }
+
+  function isAgencyZoomMfaHelperPage() {
+    if (!/(^|\.)app\.agencyzoom\.com$/i.test(String(location.host || ''))) return false;
+    if (String(location.hash || '') === '#tm-apex-mfa') return true;
+    try { return sessionStorage.getItem(AGENCY_ZOOM_HELPER_SESSION_KEY) === '1'; } catch {}
+    return false;
   }
 
   function markFrontIdleActivity() {
