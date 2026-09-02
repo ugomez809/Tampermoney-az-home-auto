@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.23
+// @version      1.0.24
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -18,6 +18,7 @@
 // @grant        GM_openInTab
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        window.close
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js
 // @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js
 // @noframes
@@ -55,6 +56,7 @@
   let observer;
   let requestListener;
   let responseListener;
+  let statusListener;
   let helperTabHandle;
   let lastAction = { signature: '', at: 0 };
   let agencyPollTimer;
@@ -830,10 +832,12 @@
     return true;
   }
 
-  function finishAgencyZoomHelper() {
+  function finishAgencyZoomHelper(message = 'Farmers verification delivered. This helper tab is inactive.') {
+    stopped = true;
     globalThis.setTimeout(() => {
-      try { globalThis.close(); } catch {}
-      if (document.body) document.body.textContent = 'Farmers verification delivered. This helper tab is inactive.';
+      try { window.close(); } catch {}
+      if (document.body) document.body.textContent = message;
+      stopWatchers();
     }, 50);
   }
 
@@ -912,6 +916,7 @@
     observer?.disconnect();
     if (requestListener) GM_removeValueChangeListener(requestListener);
     if (responseListener) GM_removeValueChangeListener(responseListener);
+    if (statusListener) GM_removeValueChangeListener(statusListener);
   }
 
   function cleanupExpiredState() {
@@ -934,6 +939,11 @@
     responseListener = GM_addValueChangeListener(KEYS.response, (_key, _oldValue, response) => {
       if (!isAgencyZoomHost()) consumeMfaResponse(response);
     });
+    statusListener = GM_addValueChangeListener(KEYS.status, (_key, _oldValue, status) => {
+      if (isAgencyZoomHost() && isAgencyZoomHelperTab() && status?.state === 'authenticated') {
+        finishAgencyZoomHelper('Farmers login completed. This helper tab is inactive.');
+      }
+    });
     observer = new MutationObserver(() => scheduleScan(80));
     observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
     scanInterval = globalThis.setInterval(() => scheduleScan(0), 1500);
@@ -955,7 +965,7 @@
       readApexCredentials, saveApexLoginInfo, clearApexCredentials, showApexCredentialSetupPanel,
       setNativeInputValue, classifyPage, selectFreshFarmersMfa, createMfaRequest,
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
-      requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText,
+      requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText, startWatchers,
       needsFactorDropdownFallback, isSmsFactorReady,
     };
   } else {
