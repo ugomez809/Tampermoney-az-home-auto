@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.27
+// @version      1.0.28
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -301,11 +301,19 @@
       .filter((element) => isVisible(element) && pattern.test(normalize(element.value || textOf(element))));
   }
 
+  function valueSetterFor(input) {
+    for (let prototype = Object.getPrototypeOf(input); prototype; prototype = Object.getPrototypeOf(prototype)) {
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (setter) return setter;
+    }
+    return Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  }
+
   function setNativeInputValue(input, value) {
     input.focus();
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    if (!setter) throw new Error('Input setter unavailable.');
-    setter.call(input, value);
+    const setter = valueSetterFor(input);
+    if (setter) setter.call(input, value);
+    else input.value = value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.blur();
@@ -414,7 +422,7 @@
   }
 
   function submitLoginForm(input) {
-    if (clickFirst(/^(sign in|log in|login|continue|next|i agree)$/i)) return true;
+    if (clickFirst(/^(sign in|log in|login|continue|next|i agree(?:\s+(?:and\s+)?continue)?|agree(?:\s+(?:and\s+)?continue)?)$/i)) return true;
     const form = input?.closest('form');
     if (form?.requestSubmit) { form.requestSubmit(); return true; }
     return false;
@@ -828,8 +836,9 @@
       if (kind === 'apex_username' || kind === 'apex_password') fillApexLogin();
       else if (kind === 'apex_finish') clickFirst(/^finish logging in$/i);
       else if (kind === 'apex_factor' || kind === 'apex_code') beginOrContinueMfa(kind);
-    } catch {
-      block('The Apex login page changed or the saved Apex login info could not be used.');
+    } catch (error) {
+      const reason = normalize(error?.message || error || '').slice(0, 100);
+      block(`The Apex login page changed or the saved Apex login info could not be used.${reason ? ` ${reason}` : ''}`);
     }
   }
 
@@ -1061,7 +1070,7 @@
       KEYS, CONFIG, clearAllStoredState, clearLegacyCredentials,
       readApexCredentials, saveApexLoginInfo, clearApexCredentials, showApexCredentialSetupPanel,
       readAgencyZoomCredentials, saveAgencyZoomLoginInfo, clearAgencyZoomCredentials, showAgencyZoomCredentialSetupPanel,
-      setNativeInputValue, classifyPage, selectFreshFarmersMfa, createMfaRequest,
+      setNativeInputValue, valueSetterFor, classifyPage, selectFreshFarmersMfa, createMfaRequest,
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
       requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, submitSavedAgencyZoomLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText, startWatchers,
       needsFactorDropdownFallback, isSmsFactorReady, isApexAuthenticatedAppPage, hasApexMfaCodePrompt,
