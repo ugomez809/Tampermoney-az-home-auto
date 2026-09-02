@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.19
+// @version      1.0.20
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -782,8 +782,6 @@
       location.assign(`${location.origin}/integration/messages/index#tm-apex-mfa`);
       return false;
     }
-    if (clickFirst(/^(text|texts|text messages|sms)$/i)) { scheduleScan(500); return false; }
-    if (clickFirst(/^conversations$/i)) { scheduleScan(500); return false; }
     return true;
   }
 
