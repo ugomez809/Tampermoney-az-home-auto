@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         AgencyZoom App Supervisor
 // @namespace    homebot.az-app-supervisor
-// @version      1.0.1
+// @version      1.0.2
 // @description  Watches normal AgencyZoom tabs for shell-only dead loads and reloads the current tab with a loop guard.
 // @author       Local
 // @match        https://app.agencyzoom.com/*
 // @run-at       document-idle
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
-// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/agencyzoom-app-supervisor.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/agencyzoom-app-supervisor.user.js
+// @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/refs/heads/main/files/agencyzoom-app-supervisor.user.js
+// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/refs/heads/main/files/agencyzoom-app-supervisor.user.js
 // @noframes
 // ==/UserScript==
 
@@ -17,7 +17,7 @@
   'use strict';
 
   const SCRIPT_NAME = 'AgencyZoom App Supervisor';
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const TEST_MODE = !!globalThis.__AZ_APP_SUPERVISOR_TEST_MODE__;
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
 
