@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.25
+// @version      1.0.26
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -81,6 +81,9 @@
     return [...new Set(matches)];
   }
   function isAgencyZoomHost() { return /(^|\.)agencyzoom\.com$/i.test(location.hostname); }
+  function isSalesforceAppHost() {
+    return /farmersagent\.(?:my\.salesforce|lightning\.force)\.com$/i.test(location.hostname);
+  }
   function isApexHost() {
     return /(?:farmersagent\.(?:my\.salesforce|lightning\.force)\.com|farmersinsurance\.(?:okta\.com|com)|eagentsaml\.farmersinsurance\.com)$/i
       .test(location.hostname);
@@ -336,6 +339,18 @@
       'input[name*="verification" i]', 'input[id*="verification" i]', 'input[type="tel"]']);
   }
 
+  function isApexAuthenticatedAppPage(text) {
+    return isSalesforceAppHost() && /\/(?:lightning|one)(?:\/|$)/i.test(location.pathname)
+      && /\b(salesforce|apex|alerts|home)\b/i.test([document.title, text].join(' '));
+  }
+
+  function hasApexMfaCodePrompt(text) {
+    if (!codeInput()) return false;
+    const clean = normalize(text);
+    return /\b(enter|verification|one-time|sms|mfa|multi-factor|authentication|send|re-send|resend|verify)\b.{0,80}\bcode\b/i.test(clean)
+      || /\bcode\b.{0,80}\b(verification|one-time|sms|mfa|multi-factor|authentication|send|re-send|resend|verify)\b/i.test(clean);
+  }
+
   function isRejectedLoginText(text) {
     return /\b(unable to sign in|invalid username|invalid password|incorrect username|incorrect password|login failed)\b/i
       .test(normalize(text));
@@ -358,10 +373,11 @@
       if (/conversations|service request|pipeline|customer/i.test(text)) return 'agencyzoom_authenticated';
       return 'unknown';
     }
+    if (isApexAuthenticatedAppPage(text)) return 'apex_authenticated';
     if (/select authentication factor|sms authentication|text message authentication|choose.*factor/i.test(text)
       || needsFactorDropdownFallback(text)
       || (/sms authentication|text message authentication/i.test(text) && hasSendCodeControl())) return 'apex_factor';
-    if (codeInput()) return 'apex_code';
+    if (hasApexMfaCodePrompt(text)) return 'apex_code';
     if (controlsByText(/^finish logging in$/i).length) return 'apex_finish';
     if (passwordInput()) return 'apex_password';
     if (usernameInput()) return 'apex_username';
@@ -724,7 +740,7 @@
     const kind = classifyPage();
     const pageText = bodyText();
     const hasSendControl = hasSendCodeControl();
-    if (kind !== 'apex_factor' && !hasSendControl && !codeInput()) return;
+    if (kind !== 'apex_factor' && !hasSendControl && !hasApexMfaCodePrompt(pageText)) return;
     if (!request.factorSelectedAt) {
       if (isSmsFactorReady(pageText)) {
         const updated = { ...request, factorSelectedAt: now() };
@@ -752,7 +768,7 @@
       transitionMfaRequest(request.runId, 'code_requested', { requestedAt: now() });
       return;
     }
-    if (codeInput()) {
+    if (hasApexMfaCodePrompt(pageText)) {
       transitionMfaRequest(request.runId, 'code_requested', { requestedAt: now() });
       return;
     }
@@ -1028,7 +1044,7 @@
       setNativeInputValue, classifyPage, selectFreshFarmersMfa, createMfaRequest,
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
       requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, submitSavedAgencyZoomLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText, startWatchers,
-      needsFactorDropdownFallback, isSmsFactorReady,
+      needsFactorDropdownFallback, isSmsFactorReady, isApexAuthenticatedAppPage, hasApexMfaCodePrompt,
     };
   } else {
     boot();
