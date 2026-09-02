@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.22
+// @version      1.0.23
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -544,7 +544,7 @@
       attempt,
       state: alreadySent ? 'code_requested' : 'collecting_baseline',
       baselineIds: [],
-      requestedAt: alreadySent ? started - CONFIG.initialMfaWaitMs : 0,
+      requestedAt: alreadySent ? started - CONFIG.freshnessMs : 0,
       expiresAt: started + CONFIG.freshnessMs,
       reloadCount: 0,
     };
@@ -560,6 +560,16 @@
     const started = nextState === 'code_requested' ? Number(patch.requestedAt || now()) : request.requestedAt;
     const updated = { ...request, ...patch, state: nextState, requestedAt: started,
       expiresAt: nextState === 'code_requested' ? started + CONFIG.freshnessMs : request.expiresAt };
+    GM_setValue(KEYS.request, updated);
+    return updated;
+  }
+
+  function expandExistingCodeRequestWindow(request) {
+    if (!request || request.state !== 'code_requested' || !codeInput()) return request;
+    if ((request.baselineIds || []).length) return request;
+    const expandedRequestedAt = now() - CONFIG.freshnessMs;
+    if (Number(request.requestedAt || 0) <= expandedRequestedAt) return request;
+    const updated = { ...request, requestedAt: expandedRequestedAt };
     GM_setValue(KEYS.request, updated);
     return updated;
   }
@@ -693,6 +703,7 @@
   function beginOrContinueMfa(kind) {
     let request = liveRequest();
     if (!request) request = createMfaRequest(1, kind === 'apex_code');
+    else request = expandExistingCodeRequestWindow(request);
     openAgencyZoomHelper(request);
     if (request.state === 'baseline_ready') requestApexCodeAfterBaseline(request);
   }
