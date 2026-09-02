@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.26
+// @version      1.0.27
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -795,6 +795,13 @@
     helperTabHandle = null;
   }
 
+  function closeApexTabAfterAuthenticated() {
+    if (isAgencyZoomHost()) return;
+    globalThis.setTimeout(() => {
+      try { window.close(); } catch {}
+    }, 50);
+  }
+
   function block(message) {
     stopped = true;
     safeStatus('blocked', message);
@@ -806,6 +813,7 @@
     stopped = true;
     safeStatus('authenticated', 'Apex login completed.');
     stopWatchers();
+    closeApexTabAfterAuthenticated();
   }
 
   function runApexRole() {
@@ -918,6 +926,14 @@
     }, 50);
   }
 
+  function reloadAgencyZoomAfterApexAuthenticated(status) {
+    if (!isAgencyZoomHost() || isAgencyZoomHelperTab() || status?.state !== 'authenticated') return false;
+    globalThis.setTimeout(() => {
+      try { location.reload(); } catch {}
+    }, 50);
+    return true;
+  }
+
   function inspectAgencyZoomMessages() {
     const request = liveRequest();
     if (!request) return;
@@ -1017,8 +1033,12 @@
       if (!isAgencyZoomHost()) consumeMfaResponse(response);
     });
     statusListener = GM_addValueChangeListener(KEYS.status, (_key, _oldValue, status) => {
-      if (isAgencyZoomHost() && isAgencyZoomHelperTab() && status?.state === 'authenticated') {
-        finishAgencyZoomHelper('Farmers login completed. This helper tab is inactive.');
+      if (isAgencyZoomHost() && status?.state === 'authenticated') {
+        if (isAgencyZoomHelperTab()) {
+          finishAgencyZoomHelper('Farmers login completed. This helper tab is inactive.');
+        } else {
+          reloadAgencyZoomAfterApexAuthenticated(status);
+        }
       }
     });
     observer = new MutationObserver(() => scheduleScan(80));
@@ -1045,6 +1065,7 @@
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
       requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, submitSavedAgencyZoomLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText, startWatchers,
       needsFactorDropdownFallback, isSmsFactorReady, isApexAuthenticatedAppPage, hasApexMfaCodePrompt,
+      closeApexTabAfterAuthenticated, reloadAgencyZoomAfterApexAuthenticated,
     };
   } else {
     boot();
