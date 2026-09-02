@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.28
+// @version      1.0.29
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -34,6 +34,7 @@
     request: 'farmersApexLogin.v1.mfaRequest',
     response: 'farmersApexLogin.v1.mfaResponse',
     status: 'farmersApexLogin.v1.status',
+    apexLoginHandoff: 'farmersApexLogin.v1.apexLoginHandoff',
     helperOpenLease: 'farmersApexLogin.v1.agencyZoomHelperOpenLease',
     helperHeartbeat: 'farmersApexLogin.v1.agencyZoomHelperHeartbeat',
   });
@@ -44,6 +45,7 @@
     maxMfaAttempts: 2,
     scanIntervalMs: 300,
     actionLeaseMs: 12_000,
+    apexLoginHandoffMs: 2 * 60_000,
     helperOpenLeaseMs: 5 * 60_000,
     helperStartupGraceMs: 15_000,
     helperHeartbeatFreshMs: 15_000,
@@ -90,7 +92,7 @@
   }
 
   function clearAllStoredState() {
-    [KEYS.legacyCredentials, KEYS.request, KEYS.response, KEYS.status, KEYS.helperOpenLease, KEYS.helperHeartbeat]
+    [KEYS.legacyCredentials, KEYS.request, KEYS.response, KEYS.status, KEYS.apexLoginHandoff, KEYS.helperOpenLease, KEYS.helperHeartbeat]
       .forEach((key) => GM_deleteValue(key));
     removePanel();
   }
@@ -143,11 +145,11 @@
     GM_deleteValue(KEYS.agencyZoomCredentials);
   }
 
-  function safeStatus(state, message) {
+  function safeStatus(state, message, extra = {}) {
     const allowed = new Set(['idle', 'setup_required', 'logging_in', 'mfa_waiting', 'authenticated', 'blocked']);
     const safeState = allowed.has(state) ? state : 'blocked';
     const safeMessage = normalize(message).slice(0, 180);
-    GM_setValue(KEYS.status, { state: safeState, message: safeMessage, updatedAt: new Date().toISOString() });
+    GM_setValue(KEYS.status, { ...extra, state: safeState, message: safeMessage, updatedAt: new Date().toISOString() });
     if (safeState === 'blocked') showPanel(safeState, safeMessage);
     else removePanel();
   }
@@ -503,7 +505,9 @@
   }
 
   function submitSavedApexLogin(credentials) {
-    return submitStoredLogin('Apex', credentials, 'logging_in', 'Saved Apex login submitted.');
+    const submitted = submitStoredLogin('Apex', credentials, 'logging_in', 'Saved Apex login submitted.');
+    writeApexLoginHandoff('login_submitted');
+    return submitted;
   }
 
   function submitSavedAgencyZoomLogin(credentials) {
@@ -547,6 +551,22 @@
     if (!request || typeof request !== 'object') return null;
     if (Number(request.expiresAt || 0) <= now()) { GM_deleteValue(KEYS.request); return null; }
     return request;
+  }
+
+  function writeApexLoginHandoff(reason) {
+    const startedAt = now();
+    GM_setValue(KEYS.apexLoginHandoff, {
+      reason: normalize(reason) || 'login_submitted',
+      startedAt,
+      expiresAt: startedAt + CONFIG.apexLoginHandoffMs,
+    });
+  }
+
+  function takeApexLoginHandoff() {
+    const handoff = GM_getValue(KEYS.apexLoginHandoff, null);
+    GM_deleteValue(KEYS.apexLoginHandoff);
+    if (!isPlainObject(handoff) || Number(handoff.expiresAt || 0) <= now()) return null;
+    return handoff;
   }
 
   function patchLiveRequest(patch = {}) {
@@ -737,6 +757,7 @@
       exactTrustCheckbox()?.click();
       if (!clickFirst(/^(verify|continue|next)$/i)) throw new Error('Apex verification control was not recognized.');
       safeStatus('logging_in', 'Farmers verification submitted.');
+      writeApexLoginHandoff('mfa_submitted');
       return true;
     } finally {
       response.code = '';
@@ -817,11 +838,15 @@
   }
 
   function stopAuthenticated() {
+    const handoff = takeApexLoginHandoff();
     cleanupMfaState();
     stopped = true;
-    safeStatus('authenticated', 'Apex login completed.');
+    safeStatus('authenticated', 'Apex login completed.', handoff ? {
+      apexLoginHandoff: true,
+      apexLoginHandoffReason: normalize(handoff.reason || ''),
+    } : {});
     stopWatchers();
-    closeApexTabAfterAuthenticated();
+    if (handoff) closeApexTabAfterAuthenticated();
   }
 
   function runApexRole() {
@@ -936,7 +961,7 @@
   }
 
   function reloadAgencyZoomAfterApexAuthenticated(status) {
-    if (!isAgencyZoomHost() || isAgencyZoomHelperTab() || status?.state !== 'authenticated') return false;
+    if (!isAgencyZoomHost() || isAgencyZoomHelperTab() || status?.state !== 'authenticated' || status?.apexLoginHandoff !== true) return false;
     globalThis.setTimeout(() => {
       try { location.reload(); } catch {}
     }, 50);
@@ -1031,6 +1056,8 @@
     if (helperOpenLease && Number(helperOpenLease.expiresAt || 0) <= now()) GM_deleteValue(KEYS.helperOpenLease);
     const helperHeartbeat = GM_getValue(KEYS.helperHeartbeat, null);
     if (helperHeartbeat && !recentTimestamp(helperHeartbeat.seenAt, CONFIG.helperHeartbeatFreshMs)) GM_deleteValue(KEYS.helperHeartbeat);
+    const apexLoginHandoff = GM_getValue(KEYS.apexLoginHandoff, null);
+    if (apexLoginHandoff && Number(apexLoginHandoff.expiresAt || 0) <= now()) GM_deleteValue(KEYS.apexLoginHandoff);
   }
 
   function startWatchers() {
@@ -1042,7 +1069,7 @@
       if (!isAgencyZoomHost()) consumeMfaResponse(response);
     });
     statusListener = GM_addValueChangeListener(KEYS.status, (_key, _oldValue, status) => {
-      if (isAgencyZoomHost() && status?.state === 'authenticated') {
+      if (isAgencyZoomHost() && status?.state === 'authenticated' && status?.apexLoginHandoff === true) {
         if (isAgencyZoomHelperTab()) {
           finishAgencyZoomHelper('Farmers login completed. This helper tab is inactive.');
         } else {
@@ -1074,7 +1101,7 @@
       transitionMfaRequest, consumeMfaResponse, readAgencyZoomMessages, runApexRole, runAgencyZoomRole,
       requestApexCodeAfterBaseline, inputHasValue, primeBrowserSavedLogin, submitBrowserSavedLogin, submitSavedApexLogin, submitSavedAgencyZoomLogin, isTrustDeviceText, parseAgencyZoomTimestamp, isRejectedLoginText, startWatchers,
       needsFactorDropdownFallback, isSmsFactorReady, isApexAuthenticatedAppPage, hasApexMfaCodePrompt,
-      closeApexTabAfterAuthenticated, reloadAgencyZoomAfterApexAuthenticated,
+      closeApexTabAfterAuthenticated, reloadAgencyZoomAfterApexAuthenticated, writeApexLoginHandoff, takeApexLoginHandoff,
     };
   } else {
     boot();
