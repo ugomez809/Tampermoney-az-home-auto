@@ -48,7 +48,9 @@ test('relocated profile, full browser restart, duplicate guard and Windows check
     child = spawn(path.join(dir,'runtime','node.exe'),[path.join(dir,'supervisor.cjs')],{windowsHide:true,stdio:'ignore'});
     await until(() => hits >= 1);
     const startupPort = fs.readFileSync(path.join(dir,'browser-profile','DevToolsActivePort'),'utf8').split(/\r?\n/)[0];
-    const startupBrowser = await chromium.connectOverCDP('http://127.0.0.1:' + startupPort);
+    // Observer connections must not enable Playwright focus emulation: that
+    // makes background tabs appear focused and changes the behavior under test.
+    const startupBrowser = await chromium.connectOverCDP('http://127.0.0.1:' + startupPort, { noDefaults: true });
     await sleep(2500);
     assert.equal(startupBrowser.contexts()[0].pages().filter(p => p.url().startsWith('chrome-extension://')).length,0,'Normal startup must not open Tampermonkey tabs');
     assert.ok(startupBrowser.contexts()[0].serviceWorkers().some(w => w.url().includes('dhdgffkkebhmkfjojejmpbldmpobfkfo')),'Tampermonkey must stay enabled in the background');
@@ -67,7 +69,7 @@ test('relocated profile, full browser restart, duplicate guard and Windows check
     const portFile = path.join(dir,'browser-profile','DevToolsActivePort');
     await until(() => fs.existsSync(portFile));
     const port = fs.readFileSync(portFile,'utf8').split(/\r?\n/)[0];
-    const attached = await chromium.connectOverCDP('http://127.0.0.1:' + port);
+    const attached = await chromium.connectOverCDP('http://127.0.0.1:' + port, { noDefaults: true });
     const active = attached.contexts()[0].pages().find(p => p.url().startsWith('http://127.0.0.1'));
     await active.evaluate(() => { window.changer = setInterval(() => document.querySelector('h1').textContent = 'Ticket ' + Date.now(),100); });
     const progressingHits = hits;
