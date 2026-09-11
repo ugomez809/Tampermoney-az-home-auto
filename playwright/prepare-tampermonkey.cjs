@@ -132,7 +132,7 @@ async function prepareMain(){
       compareInventory(expected,actual,{requireApproval:pass>0});
       if(pass===0){
         const blocked=expected.scripts.filter(s=>s.requiredApproval&&actual.scripts.find(a=>a.uuid===s.uuid)?.evilness);
-        console.log('Restoring approvals for '+blocked.length+' enabled scripts.');
+        console.log('Restoring approvals for '+blocked.length+' scripts while preserving enabled choices.');
         for(const script of blocked)await saveScript(context,script);
       }
       result=compareInventory(expected,await readInventory(context));

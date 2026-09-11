@@ -16,7 +16,7 @@ function inventoryFromStorage(storage, registered=0) {
   const scripts=Object.entries(storage).filter(([key,record])=>key.startsWith('!extdb.@meta#')&&record?.value?.uuid&&record?.value?.name).map(([, {value:meta}])=>({
     uuid:meta.uuid,name:meta.name,version:meta.version,enabled:!!meta.enabled,deleted:!!meta.deleted,
     checkForUpdates:!!meta.options?.check_for_updates,locallyModified:!!meta.options?.user_modified,
-    evilness:meta.evilness||0,requiredApproval:!!meta.enabled&&!meta.deleted&&!meta.evilness,
+    evilness:meta.evilness||0,requiredApproval:!meta.deleted&&!meta.evilness,
     sourceHash:digest(storage['!extdb.@source#'+meta.uuid]),storageHash:digest(storage['!extdb.@st#'+meta.uuid])
   })).sort((a,b)=>a.uuid.localeCompare(b.uuid));
   return {schema:1,extensionId,scripts,registered};
@@ -39,9 +39,9 @@ function compareInventory(expected,actual,{requireApproval=true}={}) {
     }
     for(const key of ['checkForUpdates','locallyModified'])if(before[key]!==undefined&&before[key]!==after[key])throw new Error('Tampermonkey '+key+' mismatch: '+before.uuid);
     if(before.deleted!==undefined&&before.deleted!==after.deleted)throw new Error('Tampermonkey deleted state mismatch: '+before.uuid);
-    if(before.requiredApproval){enabled++;if(after.evilness||after.deleted)blocked++;}
+    if(before.requiredApproval){if(before.enabled)enabled++;if(after.evilness||after.deleted)blocked++;}
   }
-  if(requireApproval&&blocked)throw new Error('Tampermonkey approval missing for '+blocked+' enabled scripts');
+  if(requireApproval&&blocked)throw new Error('Tampermonkey approval missing for '+blocked+' scripts');
   if(requireApproval&&!actual.registered)throw new Error('Tampermonkey has no registered dispatcher bundles');
   return {scripts:actual.scripts.length,enabled,disabled:actual.scripts.filter(s=>!s.enabled).length,blocked,registered:actual.registered};
 }
