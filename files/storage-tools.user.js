@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Storage Tools
 // @namespace    homebot.storage-tools
-// @version      1.5.9
+// @version      1.5.10
 // @description  Tiny standalone helper: exports tracked AZ + APEX + GWPC HOME payload/storage to TXT, mirrors key Home payloads into shared cache, and clears tracked workflow data without deleting saved setup.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -15,11 +15,19 @@
 // @grant        GM_listValues
 // @grant        GM_addValueChangeListener
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/storage-tools.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
 
   const VERSION = '1.5.9';
   const UI_ID = 'tm-az-apex-gwpc-storage-tools-v156';

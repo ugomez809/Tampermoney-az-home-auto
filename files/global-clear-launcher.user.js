@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Global Clear Launcher
 // @namespace    homebot.global-clear-launcher
-// @version      1.0.4
+// @version      1.0.5
 // @description  One click: clears current origin now, clears GM mirrored caches, opens AZ + APEX + GWPC 1/2/3, each opened tab clears itself, then auto-closes.
 // @match        https://app.agencyzoom.com/*
 // @match        https://farmersagent.lightning.force.com/*
@@ -15,11 +15,19 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/global-clear-launcher.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
 
   if (window.top !== window.self) return;
 

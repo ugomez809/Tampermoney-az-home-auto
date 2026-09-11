@@ -1,5 +1,20 @@
 # Install & Update Guide
 
+## September 11 quoting release
+
+The quoting scripts now match the working Playwright browser installation,
+including the Farmers SMS/MFA repair. Release versions are higher than prior
+repository and local versions so Tampermonkey can detect them.
+
+For a migrated profile, open Tampermonkey Settings and set **Check Interval**
+to **Every day**. In each script's Settings, enable **Check for updates**.
+Earlier lab profiles explicitly disabled both checks, so having GitHub links
+alone did not enable updates. Use the dashboard's update check once to fetch
+the published versions. Updating preserves script storage and saved settings.
+
+The public reinstall bundle contains script code only. It does not contain
+the private Playwright browser profile, passwords or customer storage.
+
 Every script in this repo is a Tampermonkey userscript with `@updateURL` and
 `@downloadURL` pointing at the raw GitHub URL for that file. After a one-time
 install from the links below, Tampermonkey will check for new versions
@@ -88,6 +103,7 @@ These files remain installable only so existing Tampermonkey installs can auto-u
 | Cross-Origin UI Dock Organizer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js) |
 | GWPC Payload Mirror + Non-AZ Tab Closer | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js) |
 | Cross-Origin Shared Failure Selector | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-failure-selector.user.js) |
+| Generic Selector Auto Clicker V1.1 (optional; disabled in quoting profile) | [Install](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/generic-selector-auto-clicker.user.js) |
 
 ## How auto-update works
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Webhook Submission
 // @namespace    homebot.webhook-submission
-// @version      1.18.12
+// @version      1.18.13
 // @description  HOME-only GWPC sender. Waits for tm_pc_current_job_v1 handoff and final-ready Home payload flow, keeps the compatibility auto branch disabled, then sends one webhook payload while retaining stored Home payloads for reuse/testing.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -14,7 +14,7 @@
 // @connect      127.0.0.1
 // @connect      localhost
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/webhook-submission.user.js
 // ==/UserScript==
 
 (function () {

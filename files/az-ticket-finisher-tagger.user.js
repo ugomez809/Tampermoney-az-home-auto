@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.60
+// @version      1.0.61
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -10,17 +10,25 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-ticket-finisher-tagger.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
+
   if (window.top !== window.self) return;
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.60';
+  const VERSION = '1.0.59';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -128,16 +136,6 @@
     'Account Number',
     DECLINE_REASON_FIELD
   ];
-
-  const FIELD_LABEL_ALIASES = {
-    'CFP?': ['CFP?', 'CFP', 'Fair Plan Companion', 'FAIR Plan Companion Endorsement'],
-    'Home Sqft': ['Home Sqft', 'Home Sqft.', 'Home Square Feet', 'Square FT', 'Square Feet', 'Sq Ft', 'Sqft'],
-    '# of Story': ['# of Story', '# of Stories', 'No. of Story', 'Number of Story', 'Number of Stories', 'Stories'],
-    'Enhance Pricing No Auto Discount': ['Enhance Pricing No Auto Discount', 'Enhanced Pricing No Auto Discount'],
-    'Enhance Pricing Auto Discount': ['Enhance Pricing Auto Discount', 'Enhanced Pricing Auto Discount'],
-    'Home Submission Number': ['Home Submission Number', 'Submission Number', 'Submission #'],
-    'Account Number': ['Account Number', 'Account number']
-  };
 
   const TAG_ORDER = [
     { key: 'successfulTag', label: 'Success tag' },
@@ -1192,15 +1190,19 @@
   }
 
   function hasAllFieldTargets() {
-    return true;
+    const targets = getFieldTargets();
+    return FIELD_ORDER.every((label) => isPlainObject(targets[label]) && norm(targets[label].selector));
   }
 
   function getMissingFieldTargetLabels() {
-    return [];
+    const targets = getFieldTargets();
+    return FIELD_ORDER.filter((label) => !(isPlainObject(targets[label]) && norm(targets[label].selector)));
   }
 
   function getFieldTargetStatusText() {
-    return 'By label';
+    const missing = getMissingFieldTargetLabels();
+    if (!missing.length) return 'Saved';
+    return `Missing ${missing.length}/${FIELD_ORDER.length}`;
   }
 
   function hasAllTagTargets() {
@@ -1914,174 +1916,6 @@
     return visibleNodes[0] || nodes[0] || null;
   }
 
-  function isFinisherUiElement(el) {
-    let current = el;
-    while (current && current instanceof Element) {
-      if (current.getAttribute?.(UI_ATTR) === '1' || current.hasAttribute?.(UI_ATTR)) return true;
-      current = current.parentElement;
-    }
-    return false;
-  }
-
-  function getFieldSearchRoot() {
-    return document.querySelector(SEL.detailForm) ||
-      document.querySelector(SEL.mainPane) ||
-      document.body ||
-      document.documentElement;
-  }
-
-  function getAllElements(root = getFieldSearchRoot()) {
-    const base = root || document.body || document.documentElement;
-    const out = [];
-    if (base instanceof Element) out.push(base);
-
-    try {
-      out.push(...Array.from(base.getElementsByTagName('*')));
-      return out;
-    } catch {}
-
-    try {
-      out.push(...Array.from(base.querySelectorAll('*')));
-    } catch {}
-    return out;
-  }
-
-  function normalizeFieldLabel(value) {
-    return lower(value)
-      .replace(/\*/g, '')
-      .replace(/\brequired\b/g, '')
-      .replace(/[:：]+$/g, '')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim();
-  }
-
-  function getFieldLabelKeys(label) {
-    const values = [label, ...(FIELD_LABEL_ALIASES[label] || [])];
-    return new Set(values.map(normalizeFieldLabel).filter(Boolean));
-  }
-
-  function getOwnText(el) {
-    try {
-      const nodes = Array.from(el.childNodes || []);
-      const text = nodes
-        .filter((node) => node.nodeType === 3)
-        .map((node) => node.textContent || '')
-        .join(' ');
-      return norm(text);
-    } catch {
-      return '';
-    }
-  }
-
-  function getLabelCandidateText(el) {
-    if (!(el instanceof Element)) return '';
-    return pickFirst(
-      el.getAttribute?.('aria-label'),
-      el.getAttribute?.('data-label'),
-      el.getAttribute?.('title'),
-      getOwnText(el),
-      el.innerText,
-      el.textContent
-    );
-  }
-
-  function fieldLabelMatches(text, keys) {
-    const normalized = normalizeFieldLabel(text);
-    return !!normalized && keys.has(normalized);
-  }
-
-  function isEditableFieldElement(el) {
-    if (!(el instanceof Element) || isFinisherUiElement(el)) return false;
-    const tag = String(el.tagName || '').toUpperCase();
-    const type = lower(el.getAttribute?.('type') || el.type || '');
-    if (el.disabled || el.getAttribute?.('disabled') != null) return false;
-    if (tag === 'INPUT') return !['hidden', 'button', 'submit', 'reset', 'image', 'file'].includes(type);
-    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
-    return el.getAttribute?.('contenteditable') === 'true' || el.getAttribute?.('role') === 'textbox';
-  }
-
-  function getEditableFieldElements(root = getFieldSearchRoot()) {
-    return getAllElements(root).filter((el) => isEditableFieldElement(el) && visible(el));
-  }
-
-  function findControlFromLabelFor(labelEl) {
-    const forId = norm(labelEl?.getAttribute?.('for') || '');
-    if (!forId) return null;
-    try {
-      const target = document.getElementById(forId);
-      return isEditableFieldElement(target) && visible(target) ? target : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function controlDistance(labelEl, controlEl) {
-    try {
-      const labelRect = labelEl.getBoundingClientRect();
-      const controlRect = controlEl.getBoundingClientRect();
-      const yGap = Math.abs((controlRect.top + controlRect.height / 2) - (labelRect.top + labelRect.height / 2));
-      const xGap = Math.abs((controlRect.left + controlRect.width / 2) - (labelRect.left + labelRect.width / 2));
-      const rightOrBelowBonus = controlRect.left >= labelRect.left || controlRect.top >= labelRect.top ? -50 : 0;
-      return yGap * 4 + xGap + rightOrBelowBonus;
-    } catch {
-      return 999999;
-    }
-  }
-
-  function pickNearestControl(labelEl, controls) {
-    return controls
-      .filter((control) => control !== labelEl && isEditableFieldElement(control) && visible(control))
-      .sort((a, b) => controlDistance(labelEl, a) - controlDistance(labelEl, b))[0] || null;
-  }
-
-  function findEditableControlNearLabel(labelEl) {
-    const forTarget = findControlFromLabelFor(labelEl);
-    if (forTarget) return forTarget;
-
-    const nested = pickNearestControl(labelEl, getEditableFieldElements(labelEl));
-    if (nested) return nested;
-
-    let current = labelEl;
-    for (let depth = 0; current && depth < 6; depth += 1) {
-      const controls = getEditableFieldElements(current);
-      if (controls.length === 1) return controls[0];
-      if (controls.length > 1) return pickNearestControl(labelEl, controls);
-      current = current.parentElement;
-    }
-
-    return pickNearestControl(labelEl, getEditableFieldElements(getFieldSearchRoot()));
-  }
-
-  function findFieldControlByLabel(label) {
-    const keys = getFieldLabelKeys(label);
-    const root = getFieldSearchRoot();
-    const controls = getEditableFieldElements(root);
-
-    const directControl = controls.find((control) => fieldLabelMatches(pickFirst(
-      control.getAttribute?.('aria-label'),
-      control.getAttribute?.('data-label'),
-      control.getAttribute?.('placeholder'),
-      control.getAttribute?.('name')
-    ), keys));
-    if (directControl) return directControl;
-
-    const labelCandidates = getAllElements(root)
-      .filter((el) => el instanceof Element && !isEditableFieldElement(el) && !isFinisherUiElement(el) && visible(el))
-      .filter((el) => fieldLabelMatches(getLabelCandidateText(el), keys))
-      .sort((a, b) => {
-        const aTag = String(a.tagName || '').toUpperCase() === 'LABEL' ? -1 : 0;
-        const bTag = String(b.tagName || '').toUpperCase() === 'LABEL' ? -1 : 0;
-        return aTag - bTag;
-      });
-
-    for (const labelEl of labelCandidates) {
-      const control = findEditableControlNearLabel(labelEl);
-      if (control) return control;
-    }
-
-    return null;
-  }
-
   function resolveEditableTarget(baseEl) {
     if (!(baseEl instanceof Element)) return null;
     const selectors = [
@@ -2192,16 +2026,6 @@
     const base = findSavedElement(record);
     if (!base) return { ok: false, reason: 'saved field target not found' };
 
-    return writeFieldValue(base, value);
-  }
-
-  async function setFieldValueByLabel(label, value) {
-    const base = findFieldControlByLabel(label);
-    if (!base) return { ok: false, reason: 'field label not found' };
-    return writeFieldValue(base, value);
-  }
-
-  async function writeFieldValue(base, value) {
     const nextValue = norm(value);
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -2254,6 +2078,12 @@
     if (!mainTab || !visible(mainTab)) {
       log('Main tab button not found');
       return false;
+    }
+
+    const mainPane = document.querySelector(SEL.mainPane);
+    const detailForm = document.querySelector(SEL.detailForm);
+    if (mainTab.classList.contains('active') && mainPane && visible(mainPane) && detailForm && visible(detailForm)) {
+      return true;
     }
 
     showBootstrapTab(mainTab);
@@ -2466,14 +2296,6 @@
     const filled = await fillNoteEditor(noteInput);
     if (!filled) log('Note editor value did not fully stick');
     else log('Filled note editor');
-
-    const pin = findPinToTop();
-    if (pin) {
-      clickPinToTop(pin);
-      await sleep(CFG.bigActionDelayMs);
-    } else {
-      log('Pin to top not found');
-    }
 
     const saveBtn = findSaveNoteButton();
     if (!saveBtn) {
@@ -3223,6 +3045,7 @@
   }
 
   async function fillTicketFields(data, runRecord, forceRun) {
+    const targets = getFieldTargets();
     let changed = false;
 
     for (const label of FIELD_ORDER) {
@@ -3233,7 +3056,7 @@
         await sleep(CFG.bigActionDelayMs);
         continue;
       }
-      const result = await setFieldValueByLabel(label, value);
+      const result = await setFieldValue(targets[label], value);
       if (result.ok) {
         log(`Filled field: ${label} = ${value || '(blank)'}${rawValue && rawValue !== value ? ` (from ${rawValue})` : ''}`);
         changed = true;
@@ -3279,6 +3102,10 @@
       log(`Payload source | Home=${data.sources.home}`);
     }
 
+    if (!data.missingPayloadFallback && !hasAllFieldTargets()) {
+      setStatus('Field setup required');
+      return;
+    }
     if (!hasAllTagTargets()) {
       setStatus('Tag setup required');
       return;

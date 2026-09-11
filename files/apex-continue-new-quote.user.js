@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         APEX Home Quote Continue
 // @namespace    homebot.apex-continue-new-quote
-// @version      1.9.9
+// @version      1.9.10
 // @description  Detect Personal Lines Quote modal, click the real Home control that owns custom107, wait for any APEX address repair work, respect Risk Address when the repair script uses it, then continue the Home quote flow and recover when one PC blocks the GWPC popup handoff.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
 // @run-at       document-idle
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-continue-new-quote.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
   if (isAnchorTab()) return;
 
   const SCRIPT_NAME = 'APEX Home Quote Continue';
-  const VERSION = '1.9.9';
+  const VERSION = '1.9.8';
   const SHARED_TAB_OPEN_REQUEST_KEY = 'tm_shared_tab_open_request_v1';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
@@ -317,7 +317,7 @@
 
   function isFrontVisibleTab() {
     try {
-      return document.visibilityState !== 'hidden' && document.hasFocus();
+      return document.visibilityState !== 'hidden';
     } catch {
       return true;
     }
@@ -415,10 +415,6 @@
       .replace(/\u00A0/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-  }
-
-  function lower(v) {
-    return norm(v).toLowerCase();
   }
 
   function isVisible(el) {

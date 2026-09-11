@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin UI Dock Organizer
 // @namespace    homebot.ui-dock-organizer
-// @version      1.7.6
+// @version      1.7.7
 // @description  Organizes floating UIs safely inside the viewport. Biggest panel anchors bottom-right, others stack to the left within the anchor height, then continue upward on the right. Includes active-script highlighting for opted-in panels.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -14,11 +14,19 @@
 // @noframes
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/ui-dock-organizer.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
 
   if (window.top !== window.self) return;
 

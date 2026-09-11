@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farmers Apex Automatic Login
 // @namespace    local.automatic-renewals.apex-login
-// @version      1.0.29
+// @version      1.0.32
 // @description  Automatically logs into Farmers Apex and completes SMS MFA through AgencyZoom.
 // @author       Local
 // @match        https://farmersagent.my.salesforce.com/*
@@ -20,7 +20,7 @@
 // @grant        GM_addStyle
 // @grant        window.close
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/farmers-apex-automatic-login.user.js
 // @noframes
 // ==/UserScript==
 
@@ -40,6 +40,7 @@
   });
   const CONFIG = Object.freeze({
     initialMfaWaitMs: 10_000,
+    messageListLoadMs: 45_000,
     freshnessMs: 5 * 60_000,
     reloadLimit: 3,
     maxMfaAttempts: 2,
@@ -53,6 +54,7 @@
   const FARMERS_CODE_PATTERN = /Your Farmers verification code is\s+(\d{6})\./i;
   const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
   const TEST_MODE = globalThis.__FARMERS_APEX_LOGIN_TEST_MODE__ === true;
+  const pageStartedAt = Date.now();
 
   let stopped = false;
   let scanTimer;
@@ -549,6 +551,8 @@
   function liveRequest() {
     const request = GM_getValue(KEYS.request, null);
     if (!request || typeof request !== 'object') return null;
+    // Requests from the old five-minute lookback flow cannot be resumed safely.
+    if (request.protocolVersion !== 3) { GM_deleteValue(KEYS.request); return null; }
     if (Number(request.expiresAt || 0) <= now()) { GM_deleteValue(KEYS.request); return null; }
     return request;
   }
@@ -642,16 +646,17 @@
     return false;
   }
 
-  function createMfaRequest(attempt = 1, alreadySent = false) {
+  function createMfaRequest(attempt = 1) {
     const existing = liveRequest();
     if (existing) return existing;
     const started = now();
     const request = {
+      protocolVersion: 3,
       runId: newRunId(),
       attempt,
-      state: alreadySent ? 'code_requested' : 'collecting_baseline',
+      state: 'collecting_baseline',
       baselineIds: [],
-      requestedAt: alreadySent ? started - CONFIG.freshnessMs : 0,
+      requestedAt: 0,
       expiresAt: started + CONFIG.freshnessMs,
       reloadCount: 0,
     };
@@ -671,24 +676,17 @@
     return updated;
   }
 
-  function expandExistingCodeRequestWindow(request) {
-    if (!request || request.state !== 'code_requested' || !codeInput()) return request;
-    if ((request.baselineIds || []).length) return request;
-    const expandedRequestedAt = now() - CONFIG.freshnessMs;
-    if (Number(request.requestedAt || 0) <= expandedRequestedAt) return request;
-    const updated = { ...request, requestedAt: expandedRequestedAt };
-    GM_setValue(KEYS.request, updated);
-    return updated;
-  }
-
   function selectFreshFarmersMfa(messages, request) {
     const baseline = new Set(request.baselineIds || []);
     const unique = new Map(messages.filter((message) => message.id).map((message) => [message.id, message]));
     const candidates = [...unique.values()].flatMap((message) => {
       const match = normalize(message.text).match(FARMERS_CODE_PATTERN);
       const receivedAt = Number(message.receivedAt);
+      // AgencyZoom preview dates omit seconds. Treat that displayed minute as an interval.
+      const precisionMs = message.timestampPrecisionMs === 60000 ? 60000 : 1;
       if (!match || !/^\d{5}$/.test(normalize(message.sender)) || baseline.has(message.id)
-        || receivedAt < request.requestedAt || receivedAt > request.expiresAt) return [];
+        || !Number.isFinite(receivedAt) || receivedAt <= 0
+        || receivedAt + precisionMs <= request.requestedAt || receivedAt > request.expiresAt) return [];
       return [{ code: match[1], messageId: message.id }];
     });
     if (!candidates.length) return { status: 'missing' };
@@ -810,8 +808,7 @@
 
   function beginOrContinueMfa(kind) {
     let request = liveRequest();
-    if (!request) request = createMfaRequest(1, kind === 'apex_code');
-    else request = expandExistingCodeRequestWindow(request);
+    if (!request) request = createMfaRequest(1);
     openAgencyZoomHelper(request);
     if (request.state === 'baseline_ready') requestApexCodeAfterBaseline(request);
   }
@@ -936,14 +933,14 @@
         || time?.getAttribute('datetime') || time?.textContent || extractAgencyZoomTimestampText(rawRowText) || '';
       const id = row.getAttribute('data-message-id') || row.getAttribute('data-sms-id') || row.id
         || (sender && timeText && text ? stableFingerprint(`${sender}|${timeText}|${text}`) : '');
-      return { id, sender, text, receivedAt: parseTime(timeText) };
+      const timestampPrecisionMs = /\b\d{1,2}:\d{2}\s*(?:AM|PM)\b/i.test(timeText) ? 60000 : 1;
+      return { id, sender, text, receivedAt: parseTime(timeText), timestampPrecisionMs };
     }).filter((message) => message.id);
     return [...new Map(messages.map((message) => [message.id, message])).values()];
   }
 
   function openAgencyZoomTexts(request) {
     if (!/\/integration\/messages\/index/i.test(location.pathname)) {
-      if (request.agencyZoomMessagesOpenedAt) return false;
       patchLiveRequest({ agencyZoomMessagesOpenedAt: now() });
       location.assign(`${location.origin}/integration/messages/index#tm-apex-mfa`);
       return false;
@@ -971,6 +968,10 @@
   function inspectAgencyZoomMessages() {
     const request = liveRequest();
     if (!request) return;
+    // The conversation request can take longer than the polling interval. Reloading
+    // an empty, still-loading list aborts that request and loses the baseline.
+    const list = document.querySelector('#threadContainer');
+    if (list && !list.querySelector('a.thread') && now() - pageStartedAt < CONFIG.messageListLoadMs) return;
     const messages = readAgencyZoomMessages();
     if (request.state === 'collecting_baseline') {
       transitionMfaRequest(request.runId, 'baseline_ready', { baselineIds: messages.map((message) => message.id) });

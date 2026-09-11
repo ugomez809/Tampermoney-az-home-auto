@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Payload Mirror + Non-AZ Tab Closer
 // @namespace    homebot.payload-mirror-non-az-tab-closer
-// @version      1.0.31
+// @version      1.0.32
 // @description  After HOME webhook success, mirrors the final GWPC Home payload into shared GM storage, waits 5 seconds, then best-effort closes non-AZ tabs from the shared close signal while leaving AgencyZoom available with mirrored Home state.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -15,17 +15,25 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_openInTab
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/payload-mirror-non-az-tab-closer.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
+
   if (window.top !== window.self) return;
   try { window.__AZ_TO_GWPC_PAYLOAD_MIRROR_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Payload Mirror + Non-AZ Tab Closer';
-  const VERSION = '1.0.31';
+  const VERSION = '1.0.27';
   const LEGACY_TIMEOUT_SCRIPT_NAME = 'GWPC Header Timeout Monitor';
 
   // Log-export integration — runs on 4 origins; pick one key per origin.
@@ -201,8 +209,7 @@
     samePageSinceAt: 0,
     samePageCloseAttempted: false,
     samePageLoggedArmed: false,
-    lexSnagHandledKey: '',
-    lastMirrorOwnerSkipKey: ''
+    lexSnagHandledKey: ''
   };
 
   init();
@@ -1820,27 +1827,6 @@
     };
   }
 
-  function getGwpcMirrorSignalOwnership(signal) {
-    const signalAzId = norm(signal?.azId || '');
-    if (!signalAzId) return { ok: false, reason: 'success signal missing AZ ID' };
-
-    const current = readCurrentGwpcIdentity();
-    if (!current.azId) return { ok: false, reason: 'GWPC tab has no local AZ payload' };
-    if (current.azId !== signalAzId) {
-      return { ok: false, reason: `GWPC local AZ ${current.azId} != success AZ ${signalAzId}` };
-    }
-
-    return { ok: true, current };
-  }
-
-  function logMirrorOwnerSkip(signal, reason) {
-    const key = `${buildSuccessSignalKey(signal)}|${reason}`;
-    if (state.lastMirrorOwnerSkipKey === key) return;
-    state.lastMirrorOwnerSkipKey = key;
-    log(`Mirror skipped: ${reason}`);
-    setStatus('Waiting for matching GWPC payload');
-  }
-
   function readLocalKey(key, foundKeys) {
     try {
       const raw = localStorage.getItem(key);
@@ -1854,12 +1840,6 @@
 
   function mirrorPayloadFromGwpc(signal) {
     if (!isGwpcHost()) return false;
-
-    const ownership = getGwpcMirrorSignalOwnership(signal);
-    if (!ownership.ok) {
-      logMirrorOwnerSkip(signal, ownership.reason);
-      return false;
-    }
 
     const payload = collectGwpcPayloads(signal);
     if (!payload.azId) {

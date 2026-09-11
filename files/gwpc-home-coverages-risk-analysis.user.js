@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Coverages + Risk Analysis
 // @namespace    homebot.gwpc-home-coverages-risk-analysis
-// @version      2.0.2
+// @version      2.0.3
 // @description  DEPRECATED. Merged into "GWPC Home Quote Extractor" v3.0+. This script is now a silent no-op stub kept only so Tampermonkey can deliver the deprecation update via the existing @updateURL. Safe to disable in Tampermonkey.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -10,7 +10,7 @@
 // @noframes
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-home-coverages-risk-analysis.user.js
 // ==/UserScript==
 
 (function () {

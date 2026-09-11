@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Policy Info Prefill
 // @namespace    homebot.gwpc-policy-info
-// @version      2.4.8
+// @version      2.4.9
 // @description  HOME-only Policy Info flow. Keeps the Home Bot Policy Info actions without clicking Home Auto discount, switches Gender to Male if the Non-Binary/Flex error appears, uses DT2 Next retry if stuck, and hard stops if Submission (Quoted) appears.
 // @match        https://policycenter.farmersinsurance.com/pc/PolicyCenter.do*
 // @match        https://policycenter-2.farmersinsurance.com/pc/PolicyCenter.do*
@@ -10,14 +10,14 @@
 // @noframes
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/gwpc-policy-info.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   const SCRIPT_NAME = 'GWPC Policy Info Prefill';
-  const VERSION = '2.4.8';
+  const VERSION = '2.3.6';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_policy_info_logs_v1';
@@ -131,6 +131,7 @@
   let lastTabNudgeAt = 0;
 
   let nextAttempts = 0;
+  let spouseMaritalCorrected = false;
 
   function safeJsonParse(text, fallback = null) {
     try { return JSON.parse(text); } catch { return fallback; }
@@ -273,6 +274,16 @@
     return hasGenderFallbackErrorAnyDoc() ? GENDER_FALLBACK_VALUE : GENDER_VALUE;
   }
 
+  function hasSingleWithSpouseWarning() {
+    const warning = /Correct the Marital Status of .+?\. The insured is listed single with a spouse on the policy\./i;
+    for (const doc of allDocs()) {
+      for (const message of doc.querySelectorAll('.gw-message, .gw-WebMessage, .gw-MessagesWidget, .gw-message-and-suffix')) {
+        if (isVisible(message) && warning.test(normText(message.innerText ?? message.textContent))) return true;
+      }
+    }
+    return false;
+  }
+
   function titleIsPolicyInfoAnyDoc() {
     for (const doc of allDocs()) {
       const titles = Array.from(doc.querySelectorAll('.gw-TitleBar--title'));
@@ -302,79 +313,41 @@
     try { el.blur?.(); } catch {}
   }
 
-  function isNativeInput(el) {
-    return String(el?.tagName || '').toUpperCase() === 'INPUT';
-  }
-
-  function isSelectedChoiceControl(el) {
-    if (!el) return false;
-    if (isNativeInput(el) && el.checked === true) return true;
-    if (el.getAttribute?.('aria-checked') === 'true') return true;
-    try {
-      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
-        .some(input => input.checked === true);
-    } catch {
-      return false;
-    }
-  }
-
-  function getChoiceClickTarget(el) {
-    if (!el) return null;
-    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return el;
-    if (/\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''))) return el;
-    return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
-  }
-
-  function clickChoiceControl(el) {
-    const target = getChoiceClickTarget(el);
-    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
-
-    clickLikeUser(target);
-    dispatchAll(target);
-    if (target !== el) dispatchAll(el);
-
-    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
-  }
-
   function safeCheck(el) {
     if (!el || el.disabled) return false;
-    if (!isSelectedChoiceControl(el)) {
-      if (clickChoiceControl(el)) return true;
-      if (isNativeInput(el) && isVisible(el) && !el.checked) {
+    if (!el.checked) {
+      try { el.click(); } catch {}
+      if (!el.checked) {
         try { el.checked = true; } catch {}
-        dispatchAll(el);
       }
-      return isSelectedChoiceControl(el);
+      dispatchAll(el);
+      return true;
     }
     return false;
   }
 
   function safeUncheck(el) {
     if (!el || el.disabled) return false;
-    if (isSelectedChoiceControl(el)) {
-      const target = getChoiceClickTarget(el);
-      clickLikeUser(target);
-      dispatchAll(target);
-      if (target !== el) dispatchAll(el);
-      if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) return true;
-      if (isNativeInput(el) && isVisible(el) && el.checked) {
+    if (el.checked) {
+      try { el.click(); } catch {}
+      if (el.checked) {
         try { el.checked = false; } catch {}
-        dispatchAll(el);
       }
-      return !isSelectedChoiceControl(el);
+      dispatchAll(el);
+      return true;
     }
     return false;
   }
 
   function safeRadio(el) {
     if (!el || el.disabled) return false;
-    if (!isSelectedChoiceControl(el)) {
-      if (clickChoiceControl(el)) return true;
-      if (isNativeInput(el) && isVisible(el) && !el.checked) {
+    if (!el.checked) {
+      try { el.click(); } catch {}
+      if (!el.checked) {
         try { el.checked = true; } catch {}
-        dispatchAll(el);
       }
-      return isSelectedChoiceControl(el);
+      dispatchAll(el);
+      return true;
     }
     return false;
   }
@@ -433,7 +406,18 @@
     const wantedGender = getWantedHomeGenderValue();
 
     try { safeSetSelect(doc.querySelector(SEL_GENDER), wantedGender); } catch {}
-    try { safeSetSelect(doc.querySelector(SEL_MARITAL), MARITAL_VALUE); } catch {}
+    try {
+      const marital = doc.querySelector(SEL_MARITAL);
+      if (hasSingleWithSpouseWarning()) {
+        if (isVisible(marital) && marital.value === MARITAL_VALUE &&
+            Array.from(marital.options).some(option => option.value === 'M')) {
+          spouseMaritalCorrected = safeSetSelect(marital, 'M') || spouseMaritalCorrected;
+        }
+      } else if (!spouseMaritalCorrected) {
+        safeSetSelect(marital, MARITAL_VALUE);
+      }
+      // Keep the correction when the warning clears; the existing Next retry submits it.
+    } catch {}
 
     try { safeUncheck(doc.querySelector(SEL_ESIGNATURE)); } catch {}
     try { safeUncheck(doc.querySelector(SEL_PAPERLESS_POLICY)); } catch {}

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Dwelling Water Rule
 // @namespace    homebot.dwelling-water-rule
-// @version      3.9.15
+// @version      3.9.16
 // @description  Dwelling step with Submission (Draft) gate, optional Get Location Reports, optional Create Valuation, optional Plumbing Replaced field, Year Built water-device rule, one 360Value retry if Quote stays on Dwelling, active heartbeat, and success recovery after header move.
 // @match        https://policycenter.farmersinsurance.com/*
 // @match        https://policycenter-2.farmersinsurance.com/*
@@ -9,7 +9,7 @@
 // @run-at       document-idle
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/dwelling-water-rule.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
   try { window.__HB_DWELLING_WATER_RULE_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Dwelling Water Rule';
-  const VERSION = '3.9.15';
+  const VERSION = '3.9.5';
 
   // Log-export integration — matches storage-tools.user.js discovery rules.
   const LOG_PERSIST_KEY = 'tm_pc_dwelling_water_rule_logs_v1';
@@ -82,23 +82,11 @@
     water:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoWaterProtectionDevice',
 
-    theft:
-      'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoTheftProtectionDevice',
-
-    fire:
-      'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-HoFireProtectionDevice',
-
     yearBuilt:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-YearBuilt',
 
     garageType:
       'SubmissionWizard-LOBWizardStepGroup-LineWizardStepSet-HODwellingHOEScreen-HODwellingConstructionSingleHOEPanelSet-HODwellingConstructionDetailsHOEDV-GarageType'
-  };
-
-  const QUESTIONS = {
-    poolNo: ['Is there a pool located on the premises?'],
-    solarNo: ['Are there solar panels at the premises?'],
-    trampolineNo: ['Is there a trampoline on the premises?']
   };
 
   const state = {
@@ -313,155 +301,19 @@
     }
   }
 
-  function getElementClickPoint(el) {
-    if (!el || !(el instanceof Element)) return null;
-    try {
-      const rect = el.getBoundingClientRect();
-      const width = Number.isFinite(rect?.width) ? rect.width : 0;
-      const height = Number.isFinite(rect?.height) ? rect.height : 0;
-      if (!rect || width <= 0 || height <= 0) return null;
-      const left = Number.isFinite(rect.left) ? rect.left : 0;
-      const top = Number.isFinite(rect.top) ? rect.top : 0;
-      const xOffset = Math.min(Math.max(width / 2, 1), width - 1);
-      const yOffset = Math.min(Math.max(height / 2, 1), height - 1);
-      return {
-        clientX: left + xOffset,
-        clientY: top + yOffset
-      };
-    } catch {}
-    return null;
-  }
-
-  function getPointerEventTarget(el) {
-    if (!el || !(el instanceof Element)) return el;
-
-    try {
-      const point = getElementClickPoint(el);
-      if (!point) return el;
-
-      const doc = el.ownerDocument || document;
-      const pointTarget = doc.elementFromPoint?.(point.clientX, point.clientY);
-
-      if (pointTarget && (pointTarget === el || el.contains(pointTarget))) {
-        return pointTarget;
-      }
-    } catch {}
-
-    return el;
-  }
-
-  function getActionInnerTarget(el) {
-    let cur = el;
-    let depth = 0;
-    while (cur && depth < 8) {
-      if (cur instanceof Element) {
-        const className = String(cur.className || '');
-        const tagName = String(cur.tagName || '').toUpperCase();
-        if (
-          className.includes('gw-action--inner') ||
-          cur.getAttribute?.('role') === 'button' ||
-          tagName === 'BUTTON' ||
-          tagName === 'A'
-        ) {
-          return cur;
-        }
-      }
-      cur = cur?.parentElement;
-      depth++;
-    }
-    return null;
-  }
-
-  function getActionOuterTarget(el) {
-    let cur = el;
-    let depth = 0;
-    while (cur && depth < 8) {
-      if (cur instanceof Element) {
-        const className = String(cur.className || '');
-        if (className.includes('gw-ButtonValueWidget') || className.includes('gw-ToolbarButtonWidget') || className.includes('gw-action--outer')) {
-          return cur;
-        }
-      }
-      cur = cur?.parentElement;
-      depth++;
-    }
-    return null;
-  }
-
-  function addUniqueClickTarget(targets, target) {
-    if (target && !targets.includes(target)) targets.push(target);
-  }
-
-  function getStrongClickTargets(el) {
-    const targets = [];
-    const pointTarget = getPointerEventTarget(el);
-    addUniqueClickTarget(targets, pointTarget);
-
-    if (pointTarget instanceof Element) {
-      addUniqueClickTarget(targets, getActionInnerTarget(pointTarget));
-      addUniqueClickTarget(targets, getActionOuterTarget(pointTarget));
-    }
-
-    addUniqueClickTarget(targets, el);
-    return targets;
-  }
-
-  function makeClickEvent(target, type, point) {
-    const doc = target?.ownerDocument || document;
-    const view = doc?.defaultView || window;
-    const isPointer = type.startsWith('pointer');
-    const buttons = type === 'pointerdown' || type === 'mousedown' ? 1 : 0;
-    const init = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view,
-      clientX: point?.clientX || 0,
-      clientY: point?.clientY || 0,
-      screenX: point?.clientX || 0,
-      screenY: point?.clientY || 0,
-      button: 0,
-      buttons
-    };
-    if (isPointer) {
-      init.pointerId = 1;
-      init.pointerType = 'mouse';
-      init.isPrimary = true;
-    }
-
-    try {
-      const Ctor = isPointer && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
-      return new Ctor(type, init);
-    } catch {}
-
-    try {
-      return new Event(type, { bubbles: true, cancelable: true, composed: true });
-    } catch {}
-
-    return null;
-  }
-
   function strongClick(el) {
-    if (!el) return false;
-    try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    const point = getElementClickPoint(el);
-
-    for (const target of getStrongClickTargets(el)) {
-      try { target.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-      try { target.focus?.({ preventScroll: true }); } catch {
-        try { target.focus?.(); } catch {}
+    try {
+      if (!el.matches?.('.gw-radioDiv--inner')) {
+        el.scrollIntoView?.({ block: 'center', inline: 'center' });
+        el.focus?.({ preventScroll: true });
       }
-
       for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        const event = makeClickEvent(target, type, point);
-        if (event) {
-          try { target.dispatchEvent(event); } catch {}
-        }
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
       }
-
-      try { target.click?.(); } catch {}
+      return true;
+    } catch {
+      return false;
     }
-    return true;
   }
 
   function findActionByText(text) {
@@ -507,134 +359,6 @@
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
   }
 
-  function isNativeInput(el) {
-    return String(el?.tagName || '').toUpperCase() === 'INPUT';
-  }
-
-  function isSelectedChoiceControl(el) {
-    if (!el) return false;
-    if (isNativeInput(el) && el.checked === true) return true;
-    if (el.getAttribute?.('aria-checked') === 'true') return true;
-    if (/\bgw-checked\b/.test(String(el.className || ''))) return true;
-    try {
-      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
-        .some(input => input.checked === true || /\bgw-checked\b/.test(String(input.closest?.('.gw-radioDiv, .gw-checkboxDiv')?.className || '')));
-    } catch {
-      return false;
-    }
-  }
-
-  function getChoiceClickTarget(el) {
-    if (!el) return null;
-    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return el;
-    if (/\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''))) return el;
-    return el.closest?.('[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, label') || el;
-  }
-
-  function getChoiceClickTargets(el) {
-    const primary = getChoiceClickTarget(el);
-    const targets = [];
-    const add = target => {
-      if (target && !targets.includes(target)) targets.push(target);
-    };
-
-    add(primary);
-    for (const selector of [
-      '.gw-radioDiv--inner, .gw-checkboxDiv--inner',
-      '.gw-radioDiv--label, .gw-checkboxDiv--label',
-      '.gw-label',
-      'label',
-      'input[type="radio"], input[type="checkbox"]'
-    ]) {
-      try { add(primary?.querySelector?.(selector)); } catch {}
-    }
-    add(el);
-
-    return targets;
-  }
-
-  function isChoiceControl(el) {
-    if (!el) return false;
-    if (isNativeInput(el) && /^(radio|checkbox)$/i.test(String(el.type || ''))) return true;
-    if (el.getAttribute?.('role') === 'radio' || el.getAttribute?.('role') === 'checkbox') return true;
-    return /\bgw-radioDiv\b|\bgw-checkboxDiv\b/.test(String(el.className || ''));
-  }
-
-  function isNoChoiceControl(el) {
-    if (!isChoiceControl(el)) return false;
-    if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') return false;
-
-    const text = normalizeText(
-      el.getAttribute?.('aria-label') ||
-      el.getAttribute?.('title') ||
-      el.value ||
-      el.textContent ||
-      ''
-    ).toLowerCase();
-
-    if (text === 'no') return true;
-    if (text.length <= 20 && /\bno\b/.test(text)) return true;
-    return /_1$/.test(String(el.id || ''));
-  }
-
-  function findNoChoiceInside(container) {
-    if (!container) return null;
-    const candidates = Array.from(container.querySelectorAll?.(
-      '[role="radio"], [role="checkbox"], .gw-radioDiv, .gw-checkboxDiv, input[type="radio"], input[type="checkbox"]'
-    ) || []);
-
-    return candidates.find(isNoChoiceControl) || null;
-  }
-
-  function findNoChoiceForDwellingQuestion(questionTexts = []) {
-    const wanted = (Array.isArray(questionTexts) ? questionTexts : [questionTexts])
-      .map(text => normalizeText(text).toLowerCase())
-      .filter(Boolean);
-    if (!wanted.length) return null;
-
-    const labels = Array.from(document.querySelectorAll(
-      '.gw-InputWidget, .gw-LabelWidget, .gw-label, label, div, span, td, tr'
-    ));
-
-    for (const label of labels) {
-      if (!isVisible(label)) continue;
-      const labelText = normalizeText(label.textContent || '').toLowerCase();
-      if (!wanted.some(text => labelText.includes(text))) continue;
-
-      let container = label;
-      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
-        if (!isVisible(container)) continue;
-        const choice = findNoChoiceInside(container);
-        if (choice) return choice;
-      }
-    }
-
-    return null;
-  }
-
-  async function clickChoiceControl(el) {
-    const primary = getChoiceClickTarget(el);
-
-    for (const target of getChoiceClickTargets(el)) {
-      if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') continue;
-
-      strongClick(target);
-      dispatchChange(target);
-      if (target !== el) dispatchChange(el);
-      await sleep(CFG.clickPauseMs);
-
-      if (
-        isSelectedChoiceControl(target) ||
-        isSelectedChoiceControl(primary) ||
-        isSelectedChoiceControl(el)
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   async function waitFor(fn, timeoutMs, label) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -659,9 +383,9 @@
 
   function fieldsReady() {
     return !!(
-      (byId(IDS.poolNo) || findNoChoiceForDwellingQuestion(QUESTIONS.poolNo)) &&
-      (byId(IDS.solarNo) || findNoChoiceForDwellingQuestion(QUESTIONS.solarNo)) &&
-      (byId(IDS.trampolineNo) || findNoChoiceForDwellingQuestion(QUESTIONS.trampolineNo)) &&
+      byId(IDS.poolNo) &&
+      byId(IDS.solarNo) &&
+      byId(IDS.trampolineNo) &&
       byName(NAMES.plumbing, 'select') &&
       byName(NAMES.yearBuilt, 'input')
     );
@@ -669,8 +393,7 @@
 
   function getCreateTargets() {
     const wrap = byId(IDS.createWrap);
-    const textFallback = findActionByText('Create Valuation');
-    if (!wrap) return textFallback ? [textFallback] : [];
+    if (!wrap) return [];
 
     const exactRoleBtn = q(
       `#${CSS.escape(IDS.createWrap)} > div.gw-action--inner.gw-hasDivider[role="button"]`
@@ -679,7 +402,7 @@
     const inner = wrap.querySelector('div.gw-action--inner.gw-hasDivider');
     const label = wrap.querySelector('[aria-label="Create Valuation"], .gw-label');
 
-    return [exactRoleBtn, roleBtn, inner, label, wrap, textFallback].filter(Boolean);
+    return [exactRoleBtn, roleBtn, inner, label, wrap].filter(Boolean);
   }
 
   function getBestCreateTarget() {
@@ -759,44 +482,60 @@
     return true;
   }
 
-  async function ensureRadioChecked(id, label, questionTexts = []) {
-    const el = await waitFor(() => byId(id) || findNoChoiceForDwellingQuestion(questionTexts), CFG.fieldWaitMs, label);
+  function findReadyRadio(id) {
+    const overlay = document.getElementById('gw-click-overlay');
+    if (overlay && getComputedStyle(overlay).pointerEvents !== 'none') return null;
+    return byId(id);
+  }
 
-    if (isSelectedChoiceControl(el)) {
+  async function ensureRadioChecked(id, label) {
+    const el = await waitFor(() => findReadyRadio(id), CFG.fieldWaitMs, label);
+
+    const radio = el.querySelector('input[type="radio"]') || el;
+    if (radio.checked) {
       log(`${label} already set`);
       return;
     }
 
-    if (!await clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
-      try { el.checked = true; } catch {}
-      dispatchChange(el);
-    }
+    const target = el.querySelector('.gw-radioDiv--inner') || el;
+    strongClick(target);
     await sleep(CFG.clickPauseMs);
 
-    if (!isSelectedChoiceControl(el)) throw new Error(`Could not set ${label}`);
+    if (!radio.checked && radio === el) {
+      try { el.checked = true; } catch {}
+      dispatchChange(el);
+      await sleep(CFG.clickPauseMs);
+    }
+
+    if (!radio.checked) throw new Error(`Could not set ${label}`);
     log(`${label} set`);
   }
 
   async function ensureRadioCheckedOptional(id, label) {
-    const el = await waitForOptional(() => byId(id), CFG.optionalFieldWaitMs);
+    const el = await waitForOptional(() => findReadyRadio(id), CFG.optionalFieldWaitMs);
 
     if (!el) {
       log(`${label} missing. Continuing`);
       return false;
     }
 
-    if (isSelectedChoiceControl(el)) {
+    const radio = el.querySelector('input[type="radio"]') || el;
+    if (radio.checked) {
       log(`${label} already set`);
       return true;
     }
 
-    if (!await clickChoiceControl(el) && isNativeInput(el) && isVisible(el) && !el.checked) {
-      try { el.checked = true; } catch {}
-      dispatchChange(el);
-    }
+    const target = el.querySelector('.gw-radioDiv--inner') || el;
+    strongClick(target);
     await sleep(CFG.clickPauseMs);
 
-    if (!isSelectedChoiceControl(el)) {
+    if (!radio.checked && radio === el) {
+      try { el.checked = true; } catch {}
+      dispatchChange(el);
+      await sleep(CFG.clickPauseMs);
+    }
+
+    if (!radio.checked) {
       log(`${label} found but not set. Continuing`);
       return false;
     }
@@ -975,16 +714,6 @@
     });
   }
 
-  function hasProfessionalAlarmRequiredMessage() {
-    const nodes = Array.from(document.querySelectorAll('.gw-message, .gw-message-and-suffix'))
-      .filter(isVisible);
-
-    return nodes.some(el => {
-      const txt = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      return txt.includes('professionally installed and monitored central burglar and fire alarm');
-    });
-  }
-
   async function waitForGarageError(timeoutMs) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -1067,26 +796,6 @@
     return false;
   }
 
-  async function fixProfessionalAlarmIfNeeded() {
-    if (!hasProfessionalAlarmRequiredMessage()) return false;
-
-    log('Professional alarm requirement detected');
-    setStatus('Fixing alarm protection');
-
-    const theftOK = await ensureSelectValueOptional(
-      NAMES.theft,
-      'P',
-      'Theft Protection = Professionally Monitored'
-    );
-    const fireOK = await ensureSelectValueOptional(
-      NAMES.fire,
-      'P',
-      'Fire Protection = Professionally Monitored'
-    );
-
-    return theftOK && fireOK;
-  }
-
   async function waitForQuoteTransition() {
     const start = Date.now();
     while (Date.now() - start < CFG.afterQuoteWaitMs) {
@@ -1111,9 +820,9 @@
   }
 
   async function fillDwellingFields() {
-    await ensureRadioChecked(IDS.poolNo, 'Swimming Pool = No', QUESTIONS.poolNo);
-    await ensureRadioChecked(IDS.solarNo, 'Solar Panels = No', QUESTIONS.solarNo);
-    await ensureRadioChecked(IDS.trampolineNo, 'Trampoline = No', QUESTIONS.trampolineNo);
+    await ensureRadioChecked(IDS.poolNo, 'Swimming Pool = No');
+    await ensureRadioChecked(IDS.solarNo, 'Solar Panels = No');
+    await ensureRadioChecked(IDS.trampolineNo, 'Trampoline = No');
     await ensureSelectValue(NAMES.plumbing, 'copper', 'Plumbing System = Copper');
 
     await ensureRadioCheckedOptional(
@@ -1158,10 +867,6 @@
       await fixGarageTypeIfNeeded();
     }
 
-    if (hasProfessionalAlarmRequiredMessage()) {
-      await fixProfessionalAlarmIfNeeded();
-    }
-
     setStatus('Repeating Dwelling one more time');
     await fillDwellingFields();
     return clickQuoteAndWaitForTransition();
@@ -1175,7 +880,6 @@
     let quoteOK = await clickQuoteAndWaitForTransition();
     if (!quoteOK) {
       await fixGarageTypeIfNeeded();
-      await fixProfessionalAlarmIfNeeded();
       quoteOK = await rerunAfterStuckQuote();
     }
     if (!quoteOK) throw new Error('Quote click did not move off Dwelling');

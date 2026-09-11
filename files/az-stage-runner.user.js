@@ -1,27 +1,34 @@
 // ==UserScript==
 // @name         AgencyZoom Quote Launcher + Payload Grabber
 // @namespace    homebot.az-stage-runner
-// @version      2.5.44
+// @version      2.5.45
 // @description  HOME-only AZ stage runner. Always boots through a fresh clear+reload cycle, restores after its own reload token, switches to Ignored tags from the saved-query filter, opens one ticket per page refresh, and launches the Home quote path only.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
-// @exclude      https://app.agencyzoom.com/login*
 // @run-at       document-end
 // @noframes
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/az-stage-runner.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
+  // Leave the login script's MFA retrieval tab untouched, including redirects.
+  if (location.hostname === 'app.agencyzoom.com') {
+    if (location.hash === '#tm-apex-mfa') return;
+    try {
+      if (sessionStorage.getItem('farmersApexLogin.v1.agencyZoomHelper') === '1') return;
+    } catch {}
+  }
+
   try { window.__HB_AZ_STAGE_RUNNER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Quote Launcher + Payload Grabber';
-  const VERSION = '2.5.44';
+  const VERSION = '2.5.42';
 
   // Persist state.logs to a tracked key so storage-tools.user.js can export
   // every script's logs in one click, and listen for a cross-origin clear
@@ -32,7 +39,6 @@
   const LOG_TICK_MS = 2000;
   const SCRIPT_ACTIVITY_KEY = 'tm_ui_script_activity_v1';
   const SCRIPT_ID = 'az-stage-runner';
-  const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
   let _lastLogPersistAt = 0;
   let _lastLogClearHandledAt = '';
 
@@ -250,10 +256,6 @@
   init();
 
   function init() {
-    if (isAgencyZoomMfaHelperPage()) {
-      try { console.log(`[${SCRIPT_NAME}] AgencyZoom MFA helper detected; stage runner standing down`); } catch {}
-      return;
-    }
     buildUi();
     bindUi();
     restorePanelPos();
@@ -672,13 +674,6 @@
 
   function isPipelinePage() {
     return /\/referral\/pipeline(?:$|[?#/])/i.test(`${location.pathname}${location.search}${location.hash}`);
-  }
-
-  function isAgencyZoomMfaHelperPage() {
-    if (!/(^|\.)app\.agencyzoom\.com$/i.test(String(location.host || ''))) return false;
-    if (String(location.hash || '') === '#tm-apex-mfa') return true;
-    try { return sessionStorage.getItem(AGENCY_ZOOM_HELPER_SESSION_KEY) === '1'; } catch {}
-    return false;
   }
 
   function markFrontIdleActivity() {
@@ -1367,17 +1362,29 @@
   }
 
   function isFrontTab() {
-    return document.visibilityState === 'visible' && document.hasFocus();
+    return document.visibilityState !== 'hidden';
   }
 
   async function waitUntilFrontStable(ms = CFG.frontStableMs) {
-    const stableSince = Date.now();
-    state.bgPauseLogged = false;
+    let stableSince = 0;
 
     while (state.running && !state.destroyed) {
-      if ((Date.now() - stableSince) >= ms) {
-        setStatus(`RUNNING (${state.mode ? state.mode.toUpperCase() : 'HOME'})`);
-        return true;
+      if (isFrontTab()) {
+        if (!stableSince) {
+          stableSince = Date.now();
+          state.bgPauseLogged = false;
+        }
+        if ((Date.now() - stableSince) >= ms) {
+          setStatus(`RUNNING (${state.mode ? state.mode.toUpperCase() : '—'})`);
+          return true;
+        }
+      } else {
+        stableSince = 0;
+        setStatus('PAUSED HIDDEN TAB');
+        if (!state.bgPauseLogged) {
+          log('Paused while tab is hidden. Waiting for tab to become visible...', 'warn');
+          state.bgPauseLogged = true;
+        }
       }
       await sleep(120);
     }
@@ -1415,7 +1422,7 @@
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {}
 
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
       try {
         el.dispatchEvent(new MouseEvent(type, {
           bubbles: true,
@@ -1924,6 +1931,14 @@
           continue;
         }
 
+        // The stage counter is blank while AgencyZoom is fetching its cards.
+        const stageLoadStarted = Date.now();
+        while (!norm(getStageWrap()?.querySelector('.dd-header-counter')?.textContent) || getStageContainer()?.querySelector('.placeload-background')) {
+          if (!state.running || state.destroyed) return;
+          if (Date.now() - stageLoadStarted >= CFG.detailWaitMs) throw new Error('Stage cards did not finish loading');
+          await foregroundSleep(CFG.gapMs);
+        }
+
         const cards = getStageCards();
         const pageLabel = getStagePageLabel();
         if (state.ui.page) state.ui.page.textContent = pageLabel || '—';
@@ -2043,7 +2058,7 @@
     log(`${modeLabel} clicked. Waiting for background/return...`, 'info');
     await waitForHiddenThenFrontStable();
 
-    log('Quote handoff wait complete', 'ok');
+    log('Returned to front and stable for 3s', 'ok');
     return true;
   }
 
@@ -2261,6 +2276,7 @@
   function scoreHomeQuoteAction(el, quotePane) {
     const haystack = lower(getQuoteActionText(el));
     if (!haystack || haystack.includes('auto')) return 0;
+      if (!/\b(?:home|homeowners)\s+quote\b/.test(haystack)) return 0;
 
     let score = 0;
     if (haystack.includes('farmers home quote')) score += 120;
@@ -2427,8 +2443,7 @@
   }
 
   function isTicketDrawerOpen() {
-    const side = document.querySelector(SEL.dockSideActions);
-    return !!(side && visible(side));
+    return [...document.querySelectorAll(SEL.dockSideActions)].some(visible);
   }
 
   async function openCard(card, ticketId) {
@@ -2448,7 +2463,7 @@
       await waitUntilFrontStable(CFG.frontStableMs);
 
       for (const target of targets) {
-        if (!target) continue;
+        if (!target || !target.isConnected) continue;
 
         strongClick(target);
         log(`Clicked ticket target, waiting 2s for drawer...`, 'info');
@@ -2493,14 +2508,16 @@
   }
 
   function getOpenDockRoot() {
-    return document.querySelector(SEL.dockRoot) || null;
+    return [...document.querySelectorAll('#serviceDetailDock, #notePanelContainer, .az-dock')]
+      .find(root => visible(root) && root.querySelector(SEL.topName))
+      || [...document.querySelectorAll(SEL.dockRoot)].find(visible) || null;
   }
 
   function getOpenTicketInfo() {
     const root = getOpenDockRoot();
     if (!root) return { ticketId: '', name: '', tags: [] };
 
-    const top = document.querySelector(SEL.dockTop) || root;
+    const top = root.querySelector(SEL.dockTop) || root;
     const h3 = top.querySelector(SEL.topName) || root.querySelector(SEL.topName);
 
     let name = '';

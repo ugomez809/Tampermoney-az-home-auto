@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GWPC Home Quote Extractor
 // @namespace    homebot.home-quote-grabber
-// @version      4.1.35
+// @version      4.1.36
 // @description  Background Home quote gatherer. Auto-arms on load, gathers early Policy Info and Dwelling fields, captures no-auto and auto-discount pricing in two passes, keeps partial/final Home payload state by AZ ID, hard-stops after the final Home pass for that page load, and hands off Home completion through shared storage without sending the webhook directly.
 // @author       OpenAI
 // @match        https://policycenter.farmersinsurance.com/*
@@ -12,7 +12,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/home-quote-grabber.user.js
 // ==/UserScript==
 
 (function () {
@@ -22,7 +22,7 @@
   try { window.__HOME_QUOTE_GRABBER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'GWPC Home Quote Extractor';
-  const VERSION = '4.1.35';
+  const VERSION = '4.1.18';
 
   // Log-export integration — matches the suffix + prefix used by
   // storage-tools.user.js so its LOGS TXT / CLEAR LOGS buttons find this.
@@ -42,8 +42,6 @@
 
   const KEYS = {
     payload: 'tm_pc_home_quote_grab_payload_v1',
-    tabCurrentJob: 'tm_pc_home_quote_grab_tab_current_job_v1',
-    tabPayload: 'tm_pc_home_quote_grab_tab_payload_v1',
     panelPos: 'tm_pc_home_quote_grab_panel_pos_v1',
     customFieldRules: 'tm_pc_home_quote_grab_custom_field_rules_v1'
   };
@@ -69,7 +67,7 @@
     afterRequoteSettleMs: 4000,
     afterAutoDiscountBeforeQuoteMs: 5000,
     navigationMoveTimeoutMs: 3500,
-    coveragesWarningStallMs: 0
+    coveragesWarningStallMs: 60000
   };
 
   const SEL = {
@@ -358,20 +356,7 @@
     return out;
   }
 
-  function mergeCurrentJobValues(base, update) {
-    const current = normalizeCurrentJob(base);
-    const incoming = normalizeCurrentJob(update);
-    const next = { ...current };
-    for (const key of Object.keys(next)) {
-      const value = normalizeText(incoming[key] || '');
-      if (value) next[key] = value;
-    }
-    next['AZ ID'] = normalizeText(incoming['AZ ID'] || current['AZ ID'] || '');
-    next.updatedAt = normalizeText(incoming.updatedAt || current.updatedAt || '');
-    return next;
-  }
-
-  function readSharedCurrentJob() {
+  function readCurrentJob() {
     let raw = safeJsonParse(localStorage.getItem(CURRENT_JOB_KEY), null);
     let job = normalizeCurrentJob(raw);
     if (job['AZ ID']) return job;
@@ -381,93 +366,9 @@
     return job;
   }
 
-  function readTabCurrentJob() {
-    try {
-      return normalizeCurrentJob(safeJsonParse(sessionStorage.getItem(KEYS.tabCurrentJob), null));
-    } catch {
-      return normalizeCurrentJob(null);
-    }
-  }
-
-  function writeTabCurrentJob(job) {
-    const incoming = normalizeCurrentJob(job);
-    if (!incoming['AZ ID']) return incoming;
-    const tabJob = readTabCurrentJob();
-    const base = tabJob['AZ ID'] && tabJob['AZ ID'] !== incoming['AZ ID']
-      ? normalizeCurrentJob(null)
-      : tabJob;
-    const next = mergeCurrentJobValues(base, incoming);
-    next.updatedAt = normalizeText(next.updatedAt || '') || new Date().toISOString();
-    try { sessionStorage.setItem(KEYS.tabCurrentJob, JSON.stringify(next, null, 2)); } catch {}
-    return next;
-  }
-
-  function getVisibleJobMatchText() {
-    try {
-      const root = document.querySelector?.('#gw-body') || document.querySelector?.('#gw-center-panel') || document.body;
-      return normalizeText(root?.innerText || root?.textContent || '').toLowerCase();
-    } catch {
-      return '';
-    }
-  }
-
-  function jobVisibleMatchScore(job) {
-    const current = normalizeCurrentJob(job);
-    const visibleText = getVisibleJobMatchText();
-    if (!visibleText) return 0;
-
-    let score = 0;
-    const visibleSubmission = normalizeText(extractSubmissionNumber());
-    if (visibleSubmission && current['SubmissionNumber'] && visibleSubmission === current['SubmissionNumber']) score += 4;
-
-    const name = normalizeText(current['Name']).toLowerCase();
-    if (name && name.length >= 3 && visibleText.includes(name)) score += 3;
-
-    const street = normalizeText(current['Street Address'] || current['Mailing Address']).toLowerCase();
-    const streetNumber = street.match(/\b\d{2,}\b/)?.[0] || '';
-    if (streetNumber && visibleText.includes(streetNumber)) score += 1;
-
-    return score;
-  }
-
-  function shouldPreferSharedCurrentJob(tabJob, sharedJob) {
-    if (!sharedJob['AZ ID']) return false;
-    if (!tabJob['AZ ID']) return true;
-    if (sharedJob['AZ ID'] === tabJob['AZ ID']) return true;
-
-    const sharedScore = jobVisibleMatchScore(sharedJob);
-    const tabScore = jobVisibleMatchScore(tabJob);
-    if (sharedScore > 0 && sharedScore > tabScore) return true;
-    if (tabScore > 0 && tabScore >= sharedScore) return false;
-
-    const tabUpdatedAtMs = parseTimeMs(tabJob.updatedAt);
-    const sharedUpdatedAtMs = parseTimeMs(sharedJob.updatedAt);
-    const tabIsFromPreviousLoad = tabUpdatedAtMs > 0 && tabUpdatedAtMs < state.pageLoadedAtMs - 1000;
-    const sharedIsFreshForThisLoad = sharedUpdatedAtMs > 0 && sharedUpdatedAtMs >= state.pageLoadedAtMs - 10000;
-    return tabIsFromPreviousLoad && sharedIsFreshForThisLoad && sharedUpdatedAtMs >= tabUpdatedAtMs;
-  }
-
-  function readCurrentJob() {
-    const tabJob = readTabCurrentJob();
-    const sharedJob = readSharedCurrentJob();
-
-    if (tabJob['AZ ID']) {
-      if (sharedJob['AZ ID'] === tabJob['AZ ID']) {
-        return mergeCurrentJobValues(tabJob, sharedJob);
-      }
-      if (shouldPreferSharedCurrentJob(tabJob, sharedJob)) {
-        return writeTabCurrentJob(sharedJob);
-      }
-      return tabJob;
-    }
-
-    return sharedJob;
-  }
-
   function writeCurrentJob(job) {
     const next = normalizeCurrentJob(job);
     next.updatedAt = next.updatedAt || new Date().toISOString();
-    writeTabCurrentJob(next);
     try { localStorage.setItem(CURRENT_JOB_KEY, JSON.stringify(next, null, 2)); } catch {}
     return next;
   }
@@ -581,34 +482,8 @@
     };
   }
 
-  function getHomePayloadAzId(payload) {
-    return normalizeText(payload?.['AZ ID'] || payload?.currentJob?.['AZ ID'] || '');
-  }
-
-  function readTabHomePayloadRaw() {
-    try {
-      return safeJsonParse(sessionStorage.getItem(KEYS.tabPayload), null);
-    } catch {
-      return null;
-    }
-  }
-
-  function readHomePayloadRaw(job = null) {
-    const currentJob = normalizeCurrentJob(job || readTabCurrentJob());
-    const expectedAzId = normalizeText(currentJob['AZ ID'] || '');
-    const tabPayload = readTabHomePayloadRaw();
-    const tabAzId = getHomePayloadAzId(tabPayload);
-
-    if (isPlainObject(tabPayload) && tabAzId && (!expectedAzId || tabAzId === expectedAzId)) {
-      return tabPayload;
-    }
-
+  function readHomePayloadRaw() {
     return safeJsonParse(localStorage.getItem(KEYS.payload), null);
-  }
-
-  function writeTabHomePayload(payload) {
-    if (!isPlainObject(payload) || !getHomePayloadAzId(payload)) return;
-    try { sessionStorage.setItem(KEYS.tabPayload, JSON.stringify(payload, null, 2)); } catch {}
   }
 
   function createHomePayloadBase(job) {
@@ -645,7 +520,7 @@
   function ensureHomePayloadForJob(job) {
     const currentJob = normalizeCurrentJob(job);
     const azId = normalizeText(currentJob['AZ ID']);
-    const current = readHomePayloadRaw(currentJob);
+    const current = readHomePayloadRaw();
     const currentAzId = normalizeText(current?.['AZ ID'] || current?.currentJob?.['AZ ID'] || '');
 
     if (!azId || !isPlainObject(current) || currentAzId !== azId) {
@@ -914,8 +789,6 @@
         title: document.title
       };
 
-    writeTabCurrentJob(next.currentJob);
-    writeTabHomePayload(next);
     localStorage.setItem(KEYS.payload, JSON.stringify(next, null, 2));
 
     const bundleSave = saveBundleSection('home', next, next.currentJob, {
@@ -1218,22 +1091,11 @@
   }
 
   function queryFirstVisible(selector) {
-    return findInDocs((doc) => {
-      const nodes = doc.querySelectorAll(selector);
-      for (const el of nodes) {
-        if (isVisibleEl(el)) return el;
-      }
-      return null;
-    });
-  }
-
-  function queryAllInDocs(selector) {
-    const out = [];
-    const docs = getAccessibleDocs();
-    for (const doc of docs) {
-      try { out.push(...Array.from(doc.querySelectorAll(selector))); } catch {}
-    }
-    return out;
+    try {
+      return Array.from(document.querySelectorAll(selector)).find(el =>
+        isVisibleEl(el) || (el.matches('input[type="checkbox"]') && isVisibleEl(el.closest('.gw-checkboxDiv')))
+      ) || null;
+    } catch { return null; }
   }
 
   function findVisibleNodeInDocs(selector) {
@@ -1342,155 +1204,15 @@
     return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
-  function getElementClickPoint(el) {
-    if (!el || !(el instanceof Element)) return null;
-    try {
-      const rect = el.getBoundingClientRect();
-      const width = Number.isFinite(rect?.width) ? rect.width : 0;
-      const height = Number.isFinite(rect?.height) ? rect.height : 0;
-      if (!rect || width <= 0 || height <= 0) return null;
-      const left = Number.isFinite(rect.left) ? rect.left : 0;
-      const top = Number.isFinite(rect.top) ? rect.top : 0;
-      const xOffset = Math.min(Math.max(width / 2, 1), width - 1);
-      const yOffset = Math.min(Math.max(height / 2, 1), height - 1);
-      return {
-        clientX: left + xOffset,
-        clientY: top + yOffset
-      };
-    } catch {}
-    return null;
-  }
-
-  function getPointerEventTarget(el) {
-    if (!el || !(el instanceof Element)) return el;
-
-    try {
-      const point = getElementClickPoint(el);
-      if (!point) return el;
-
-      const doc = el.ownerDocument || document;
-      const pointTarget = doc.elementFromPoint?.(point.clientX, point.clientY);
-
-      if (pointTarget && (pointTarget === el || el.contains(pointTarget))) {
-        return pointTarget;
-      }
-    } catch {}
-
-    return el;
-  }
-
-  function getActionInnerTarget(el) {
-    let cur = el;
-    let depth = 0;
-    while (cur && depth < 8) {
-      if (cur instanceof Element) {
-        const className = String(cur.className || '');
-        const tagName = String(cur.tagName || '').toUpperCase();
-        if (
-          className.includes('gw-action--inner') ||
-          cur.getAttribute?.('role') === 'button' ||
-          tagName === 'BUTTON' ||
-          tagName === 'A'
-        ) {
-          return cur;
-        }
-      }
-      cur = cur?.parentElement;
-      depth++;
-    }
-    return null;
-  }
-
-  function getActionOuterTarget(el) {
-    let cur = el;
-    let depth = 0;
-    while (cur && depth < 8) {
-      if (cur instanceof Element) {
-        const className = String(cur.className || '');
-        if (className.includes('gw-ToolbarButtonWidget') || className.includes('gw-action--outer')) {
-          return cur;
-        }
-      }
-      cur = cur?.parentElement;
-      depth++;
-    }
-    return null;
-  }
-
-  function addUniqueClickTarget(targets, target) {
-    if (target && !targets.includes(target)) targets.push(target);
-  }
-
-  function getStrongClickTargets(el, options = {}) {
-    const targets = [];
-    const pointTarget = options.directTarget ? el : getPointerEventTarget(el);
-    addUniqueClickTarget(targets, pointTarget);
-
-    if (!options.directTarget && pointTarget instanceof Element) {
-      addUniqueClickTarget(targets, getActionInnerTarget(pointTarget));
-      addUniqueClickTarget(targets, getActionOuterTarget(pointTarget));
-    }
-
-    addUniqueClickTarget(targets, el);
-    return targets;
-  }
-
-  function makeClickEvent(target, type, point) {
-    const doc = target?.ownerDocument || document;
-    const view = doc?.defaultView || window;
-    const isPointer = type.startsWith('pointer');
-    const buttons = type === 'pointerdown' || type === 'mousedown' ? 1 : 0;
-    const init = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view,
-      clientX: point?.clientX || 0,
-      clientY: point?.clientY || 0,
-      screenX: point?.clientX || 0,
-      screenY: point?.clientY || 0,
-      button: 0,
-      buttons
-    };
-    if (isPointer) {
-      init.pointerId = 1;
-      init.pointerType = 'mouse';
-      init.isPrimary = true;
-    }
-
-    try {
-      const Ctor = isPointer && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
-      return new Ctor(type, init);
-    } catch {}
-
-    try {
-      return new Event(type, { bubbles: true, cancelable: true, composed: true });
-    } catch {}
-
-    return null;
-  }
-
-  function strongClick(el, options = {}) {
+  function strongClick(el) {
     if (!el) return false;
     try { el.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-    const point = getElementClickPoint(el);
-    const targets = getStrongClickTargets(el, options);
-
-    for (const target of targets) {
-      try { target.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
-      try { target.focus?.({ preventScroll: true }); } catch {
-        try { target.focus?.(); } catch {}
-      }
-
-      for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        const event = makeClickEvent(target, type, point);
-        if (event) {
-          try { target.dispatchEvent(event); } catch {}
-        }
-      }
-
-      try { target.click?.(); } catch {}
-    }
+    try { el.focus?.({ preventScroll: true }); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+    try { el.click?.(); } catch {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
+    try { el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })); } catch {}
     return true;
   }
 
@@ -1498,82 +1220,6 @@
     try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
     try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
-  }
-
-  function isNativeInput(el) {
-    return String(el?.tagName || '').toUpperCase() === 'INPUT';
-  }
-
-  function isSelectedChoiceControl(el) {
-    if (!el) return false;
-    if (isNativeInput(el) && el.checked === true) return true;
-    if (el.getAttribute?.('aria-checked') === 'true') return true;
-    try {
-      return Array.from(el.querySelectorAll?.('input[type="checkbox"], input[type="radio"]') || [])
-        .some(input => input.checked === true);
-    } catch {
-      return false;
-    }
-  }
-
-  function getChoiceClickTarget(el) {
-    if (!el) return null;
-    if (el.getAttribute?.('role') === 'checkbox' || el.getAttribute?.('role') === 'radio') return el;
-    if (/\bgw-checkboxDiv\b|\bgw-radioDiv\b/.test(String(el.className || ''))) return el;
-    return el.closest?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || el;
-  }
-
-  function findVisibleChoiceWidgetForInput(input) {
-    if (!input || !(input instanceof Element)) return null;
-    if (isVisibleEl(input)) return getChoiceClickTarget(input);
-
-    const doc = input.ownerDocument || document;
-    const keys = [
-      input.id,
-      input.name,
-      input.getAttribute?.('name')
-    ].filter(Boolean);
-    for (const key of keys) {
-      for (const suffix of ['_checkboxDiv', '_radioDiv']) {
-        const byGeneratedId = doc.getElementById?.(`${key}${suffix}`);
-        if (byGeneratedId && isVisibleEl(byGeneratedId)) return byGeneratedId;
-      }
-    }
-
-    let cur = input.parentElement;
-    let depth = 0;
-    while (cur && depth < 5) {
-      const peers = cur.querySelectorAll?.('[role="checkbox"], [role="radio"], .gw-checkboxDiv, .gw-radioDiv, label') || [];
-      for (const peer of peers) {
-        if (peer !== input && isVisibleEl(peer)) return getChoiceClickTarget(peer);
-      }
-      cur = cur.parentElement;
-      depth++;
-    }
-
-    return null;
-  }
-
-  function findChoiceField(selector, expectedLabels = []) {
-    const nodes = queryAllInDocs(selector);
-    for (const el of nodes) {
-      const target = findVisibleChoiceWidgetForInput(el);
-      if (!target) continue;
-      if (!verifyContextLabels(el, expectedLabels) && !verifyContextLabels(target, expectedLabels)) continue;
-      return { el, target };
-    }
-    return null;
-  }
-
-  function clickChoiceControl(el) {
-    const target = getChoiceClickTarget(el);
-    if (!target || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return false;
-
-    strongClick(target);
-    dispatchValueEvents(target);
-    if (target !== el) dispatchValueEvents(el);
-
-    return isSelectedChoiceControl(target) || isSelectedChoiceControl(el);
   }
 
   function gatherContextText(el) {
@@ -1667,53 +1313,8 @@
     return null;
   }
 
-  function findToolbarButtonOuterByLabel(labelText) {
-    const labels = Array.from(document.querySelectorAll(`.gw-label[aria-label="${cssAttrEscape(labelText)}"]`)).filter(isVisibleEl);
-    for (const label of labels) {
-      let cur = label;
-      let depth = 0;
-      while (cur && depth < 8) {
-        const className = String(cur.className || '');
-        if (
-          className.includes('gw-ToolbarButtonWidget') &&
-          className.includes('gw-action--outer') &&
-          normalizeText(cur.textContent || '').includes(labelText) &&
-          isVisibleEl(cur)
-        ) {
-          return cur;
-        }
-        cur = cur.parentElement;
-        depth++;
-      }
-    }
-
-    const buttons = Array.from(document.querySelectorAll('.gw-ToolbarButtonWidget, .gw-action--outer')).filter(isVisibleEl);
-    for (const button of buttons) {
-      const className = String(button.className || '');
-      const text = normalizeText(button.textContent || '');
-      if (className.includes('gw-ToolbarButtonWidget') && text.includes(labelText)) return button;
-    }
-    return null;
-  }
-
   function findEditAllTarget() {
-    return findToolbarButtonOuterByLabel('Edit All') || findClickableOwnerByLabel('Edit All');
-  }
-
-  function editModeReady() {
-    if (hasEditableCoverageControls()) return true;
-    return hasCoverageEditToolbar();
-  }
-
-  function hasEditableCoverageControls() {
-    return !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox);
-  }
-
-  function hasCoverageEditToolbar() {
-    return !!findClickableOwnerByLabel('Quote') &&
-      !!findClickableOwnerByLabel('Reset All') &&
-      !!findClickableOwnerByLabel('Save Draft') &&
-      !findEditAllTarget();
+    return findClickableOwnerByLabel('Edit All');
   }
 
   function quoteRecentlyClicked() {
@@ -1949,8 +1550,8 @@
   function armCoveragesWarningRetryBlock(context, reason = '') {
     if (!context?.active) return;
     syncCoveragesWarningWatch(context);
-    state.coveragesRetryBlockedUntilMs = 0;
-    log(`Coverages warning recovery armed${reason ? `: ${reason}` : ''}`);
+    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
+    log(`Coverages retry blocked for 60s after stalled warning${reason ? `: ${reason}` : ''}`);
   }
 
   function maybeHandleCoveragesWarningRecovery(currentJob, homeState) {
@@ -1962,9 +1563,19 @@
 
     syncCoveragesWarningWatch(context);
 
+    if (state.coveragesRetryBlockedUntilMs > Date.now()) {
+      setWaiting('Deductible warning stalled on Coverages; waiting 60s before re-running Edit All -> Quote');
+      announceSkipReason('coverages warning retry blocked');
+      return true;
+    }
+
+    if (Date.now() - state.coveragesWarningSinceMs < CFG.coveragesWarningStallMs) {
+      return false;
+    }
+
     state.coveragesWarningSinceMs = Date.now();
-    state.coveragesRetryBlockedUntilMs = 0;
-    log(`Coverages warning visible; re-running Edit All -> Quote | ${context.warningText}`);
+    state.coveragesRetryBlockedUntilMs = Date.now() + CFG.coveragesWarningStallMs;
+    log(`Coverages warning unchanged for 60s; re-running Edit All -> Quote | ${context.warningText}`);
     startHomeFlow(currentJob, 'coverages warning recovery');
     return true;
   }
@@ -2059,25 +1670,15 @@
     if (editTarget) {
       log('Clicking Edit All');
       strongClick(editTarget);
-      if (!editModeReady()) {
-        await sleep(CFG.afterEditAllMs);
-      }
-      if (!editModeReady()) {
-        log('Edit All did not open edit mode from pointer target; trying toolbar wrapper');
-        strongClick(editTarget, { directTarget: true });
-        await sleep(CFG.afterEditAllMs);
-      }
-    } else if (hasEditableCoverageControls()) {
+      await sleep(CFG.afterEditAllMs);
+    } else if (queryFirstVisible(SEL.stdAllPerils)) {
       log('Edit All not visible. Controls already editable.');
       return;
     } else {
       throw new Error('Edit All not found');
     }
     const ok = await waitFor(
-      () => {
-        if (hasEditableCoverageControls()) return true;
-        return hasCoverageEditToolbar();
-      },
+      () => !!queryFirstVisible(SEL.stdAllPerils) || !!queryFirstVisible(SEL.personalInjuryCheckbox),
       CFG.waitTimeoutMs,
       'editable coverage controls'
     );
@@ -2129,48 +1730,42 @@
   }
 
   async function ensureCheckboxVerified(selector, expectedLabels, label) {
-    const ok = await waitFor(
-      () => !!findChoiceField(selector, expectedLabels),
-      CFG.waitTimeoutMs,
-      label
-    );
-    if (!ok) throw new Error(`${label}: field not found or context mismatch`);
-    const field = findChoiceField(selector, expectedLabels);
-    if (!field) throw new Error(`${label}: field vanished`);
-    const { el, target } = field;
-    if (isSelectedChoiceControl(el) || isSelectedChoiceControl(target)) {
+    const el = await waitForField(selector, expectedLabels, label);
+    if (el.checked) {
       log(`${label}: already checked`);
       return;
     }
-    try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-    if (!clickChoiceControl(target) && !clickChoiceControl(el) && isNativeInput(el) && isVisibleEl(el) && !el.checked) {
+    const wrapper = el.closest('.gw-checkboxDiv');
+    if (wrapper) {
+      const target = wrapper.querySelector('.gw-checkboxDiv--inner') || wrapper;
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+      }
+      await sleep(CFG.afterFieldMs);
+      if (!el.checked) throw new Error(`${label}: failed to stay checked`);
+      log(`${label}: checked`);
+      return;
+    }
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+    strongClick(el);
+    await sleep(CFG.afterFieldMs);
+    if (!el.checked) {
       try { el.checked = true; } catch {}
       dispatchValueEvents(el);
-    }
-    await sleep(CFG.afterFieldMs);
-    if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) {
-      clickChoiceControl(target);
       await sleep(CFG.afterFieldMs);
     }
-    if (!isSelectedChoiceControl(el) && !isSelectedChoiceControl(target)) throw new Error(`${label}: failed to stay checked`);
+    if (!el.checked) {
+      strongClick(el);
+      await sleep(CFG.afterFieldMs);
+    }
+    if (!el.checked) throw new Error(`${label}: failed to stay checked`);
     log(`${label}: checked`);
-  }
-
-  function getEnhancedSplitWaterDesiredTexts() {
-    const warningText = getCoveragesRetryWarningText().toLowerCase();
-    if (warningText.includes('split water deductible must be greater than the all perils deductible')) {
-      return ['1.5%'];
-    }
-    if (warningText.includes('minimum 1%') && warningText.includes('split water')) {
-      return ['1.5%'];
-    }
-    return ['$10,000', '10000'];
   }
 
   async function applyCoverageSelections() {
     await setSelectVerified(SEL.stdAllPerils, ['All Perils'], ['$3,000', '3000'], 'Standard / All Perils');
     await setSelectVerified(SEL.enhAllPerils, ['All Perils'], ['$7,500', '7500'], 'Enhanced / All Perils');
-    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], getEnhancedSplitWaterDesiredTexts(), 'Enhanced / Split Water');
+    await setSelectVerified(SEL.enhSplitWater, ['Split Water'], ['$10,000', '10000'], 'Enhanced / Split Water');
     await setSelectVerified(SEL.enhSeparateStructures, ['Separate Structures'], ['5%'], 'Enhanced / Separate Structures');
     await setSelectVerified(SEL.enhPersonalPropertyLimit, ['Personal Property', 'Limit'], ['40%'], 'Enhanced / Personal Property Limit');
     await setSelectVerified(SEL.enhPersonalLiability, ['Personal Liability'], ['$1,000,000', '1000000'], 'Enhanced / Personal Liability');
@@ -3208,7 +2803,7 @@
   function isAutoDiscountApplied() {
     const control = findAutoDiscountControl();
     if (!control) return false;
-    return isSelectedChoiceControl(control);
+    return control.checked === true || control.getAttribute('checked') != null || control.getAttribute('aria-checked') === 'true';
   }
 
   async function applyAutoDiscount() {
@@ -3233,7 +2828,12 @@
       }
 
       log(`Selecting auto discount, attempt ${attempt}/3`);
-      clickChoiceControl(control);
+      const clickTarget = isVisibleEl(control) ? control : control.closest('label') || control.parentElement || control;
+      strongClick(clickTarget);
+
+      try { control.checked = true; } catch {}
+      try { control.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+      try { control.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
 
       const ok = await waitFor(() => isAutoDiscountApplied(), CFG.waitTimeoutMs, 'auto discount selection');
       if (ok) {

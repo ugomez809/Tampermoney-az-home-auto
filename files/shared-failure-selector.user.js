@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Origin Shared Failure Selector
 // @namespace    homebot.shared-failure-selector
-// @version      1.0.8
+// @version      1.0.9
 // @description  Shared selector recorder/monitor for LEX and GWPC failure messages. Saves rules to the same shared sheet as GWPC Header Timeout Monitor and publishes specific failed-path note reasons on LEX.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -15,7 +15,7 @@
 // @grant        GM_setValue
 // @connect      *
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-failure-selector.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-failure-selector.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/shared-failure-selector.user.js
 // ==/UserScript==
 
 (function () {

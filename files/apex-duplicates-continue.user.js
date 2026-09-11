@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         APEX Duplicate Check Continue
 // @namespace    homebot.apex-duplicates-continue
-// @version      1.8.5
+// @version      1.8.6
 // @description  Detects Duplicates Found inside APEX, selects the first duplicate, waits for Continue to enable, then clicks Continue. Keeps the same flow, with stronger Chrome-safe detection and fallback scanning, and force-closes the tab after one minute.
 // @author       OpenAI
 // @match        https://farmersagent.lightning.force.com/*
@@ -9,7 +9,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @updateURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
-// @downloadURL  https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
+// @downloadURL    https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/files/apex-duplicates-continue.user.js
 // ==/UserScript==
 
 (function () {
