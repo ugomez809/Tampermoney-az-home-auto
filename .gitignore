@@ -7,3 +7,17 @@
 # Ad-hoc exports
 *.txt
 !README*.txt
+
+# Private portable installation payload; publish source code only.
+playwright/browser-profile/
+playwright/browser-engine/
+playwright/extension/
+playwright/runtime/
+playwright/node_modules/
+playwright/migration/
+playwright/monitor-state/
+playwright/monitor-test-*/
+playwright/tampermonkey-manifest.json
+playwright/package-manifest.json
+playwright/package-info.json
+playwright/*.zip
