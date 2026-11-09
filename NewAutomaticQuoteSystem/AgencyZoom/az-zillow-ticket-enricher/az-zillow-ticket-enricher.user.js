@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
-// @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.3.8
+// @name         13 AUTO AgencyZoom Zillow Ticket Enricher
+// @version      1.4.9
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -31,7 +31,6 @@
   const UI_ATTR = 'data-tm-az-zillow-ticket-enricher-ui';
   const PIPELINE_ROOT_URL = 'https://app.agencyzoom.com/referral/pipeline';
   const SHARED_TAB_ID_KEY = 'tm_auto_shared_tab_id_v1';
-  const AGENCY_ZOOM_HELPER_SESSION_KEY = 'farmersApexLogin.v1.agencyZoomHelper';
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
@@ -40,7 +39,10 @@
     customFields: 'tm_az_zillow_ticket_enricher_custom_fields_v1',
     providerPicker: 'tm_az_zillow_ticket_enricher_provider_picker_v1',
     zillowOpenLease: 'tm_az_zillow_ticket_enricher_zillow_open_lease_v1',
-    zillowTabHeartbeat: 'tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1'
+    zillowTabHeartbeat: 'tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1',
+    processedTickets: 'tm_az_zillow_ticket_enricher_processed_tickets_v1',
+    webhookDeliveries: 'tm_az_zillow_ticket_enricher_webhook_deliveries_v1',
+    logs: 'tm_az_zillow_ticket_enricher_logs_v1'
   };
 
   const LEGACY_GM_JOB_KEYS = [
@@ -90,12 +92,11 @@
     openTotalMs: 12000,
     openCheckAfterClickMs: 2000,
     frontStableMs: 1200,
-    gapMs: 2000,
-    majorStepDelayMs: 2000,
+    gapMs: 220,
     mainReadyMs: 10000,
-    filterSettleMs: 2000,
-    actionSettleMs: 2000,
-    updateSettleMs: 2000,
+    filterSettleMs: 1500,
+    actionSettleMs: 900,
+    updateSettleMs: 1200,
     closeWaitMs: 5000,
     zillowWaitMs: 30000,
     zillowCaptchaRefreshMs: 180000,
@@ -104,11 +105,15 @@
     zillowMaxLaunches: 0,
     zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
-    azRefreshIfNoZillowOpenMs: 60000,
+    azRefreshIfNoZillowOpenMs: 300000,
     pageSlotTtlMs: 12000,
     zillowOpenLeaseMs: 20000,
     zillowTabHeartbeatStaleMs: 15000,
-    maxLogLines: 80,
+    maxProcessedTickets: 50000,
+    maxWebhookDeliveries: 50000,
+    maxLogLines: 1000,
+    statusLogHeartbeatMs: 15000,
+    progressLogMs: 15000,
     panelWidth: 390,
     zIndex: 2147483647
   };
@@ -148,7 +153,7 @@
     tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
-    logs: [],
+    logs: loadPersistedLogs(),
     panel: null,
     ui: {},
     picker: null,
@@ -163,9 +168,13 @@
     currentAddress: '',
     zillowSummary: '',
     lastStatus: '',
+    lastLoggedStatus: '',
+    lastStatusLogKey: '',
+    lastStatusLoggedAt: 0,
     mainReadyTicketId: '',
     lastWrongAzUrl: '',
-    lastSingletonLog: ''
+    lastSingletonLog: '',
+    progressLogs: {}
   };
 
   init();
@@ -182,7 +191,6 @@
   function init() {
     window.__AZ_ZILLOW_TICKET_ENRICHER_CLEANUP__ = cleanup;
     if (isAgencyZoomLoginPage()) return;
-    if (isAgencyZoomMfaHelperPage()) return;
     if (!claimSingletonPageSlot()) return;
 
     const legacyJobStateCleared = clearLegacyJobState();
@@ -251,13 +259,6 @@
 
   function isAgencyZoomLoginPage() {
     return isAzOrigin() && /^\/login(?:\/|$)/i.test(String(location.pathname || ''));
-  }
-
-  function isAgencyZoomMfaHelperPage() {
-    if (!isAzOrigin()) return false;
-    if (String(location.hash || '') === '#tm-apex-mfa') return true;
-    try { return sessionStorage.getItem(AGENCY_ZOOM_HELPER_SESSION_KEY) === '1'; } catch {}
-    return false;
   }
 
   function isZillowOrigin() {
@@ -386,6 +387,44 @@
     try { GM_deleteValue(key); } catch {}
   }
 
+  function loadPersistedLogs() {
+    const value = readGM(GM_KEYS.logs, []);
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((line) => norm(line))
+      .filter(Boolean)
+      .slice(-CFG.maxLogLines);
+  }
+
+  function mergeLogLines(...groups) {
+    const seen = new Set();
+    const merged = [];
+    for (const group of groups) {
+      if (!Array.isArray(group)) continue;
+      for (const line of group) {
+        const clean = norm(line);
+        if (!clean || seen.has(clean)) continue;
+        seen.add(clean);
+        merged.push(clean);
+      }
+    }
+    return merged.slice(-CFG.maxLogLines);
+  }
+
+  function savePersistedLogs() {
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
+    writeGM(GM_KEYS.logs, state.logs);
+  }
+
+  function getLogText() {
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
+    const lines = state.logs.slice(-CFG.maxLogLines);
+    if (state.lastStatus) {
+      lines.push(`[${timeNow()}] Current status: ${state.lastStatus}`);
+    }
+    return lines.join('\n');
+  }
+
   function getSharedTabId() {
     try {
       const existing = sessionStorage.getItem(SHARED_TAB_ID_KEY);
@@ -476,6 +515,14 @@
       url: String(location.href || ''),
       script: SCRIPT_NAME
     });
+  }
+
+  function clearZillowTabHeartbeatForThisTab() {
+    if (!isZillowOrigin()) return;
+    const heartbeat = readGM(GM_KEYS.zillowTabHeartbeat, null);
+    if (isPlainObject(heartbeat) && norm(heartbeat.tabId || '') === state.tabId) {
+      deleteGM(GM_KEYS.zillowTabHeartbeat);
+    }
   }
 
   function getFreshZillowOpenLease() {
@@ -614,6 +661,123 @@
     deleteGM(GM_KEYS.job);
   }
 
+  function pruneRecordMap(records, maxEntries) {
+    if (!isPlainObject(records)) return {};
+    const entries = Object.entries(records)
+      .filter(([key, value]) => norm(key) && isPlainObject(value))
+      .sort((a, b) => {
+        const aTime = Date.parse(norm(a[1].processedAt || a[1].deliveredAt || a[1].savedAt || '')) || 0;
+        const bTime = Date.parse(norm(b[1].processedAt || b[1].deliveredAt || b[1].savedAt || '')) || 0;
+        return bTime - aTime;
+      })
+      .slice(0, Math.max(1, Number(maxEntries) || 1));
+    return Object.fromEntries(entries);
+  }
+
+  function getProcessedTickets() {
+    const value = readGM(GM_KEYS.processedTickets, {});
+    return isPlainObject(value) ? value : {};
+  }
+
+  function saveProcessedTickets(value) {
+    writeGM(GM_KEYS.processedTickets, pruneRecordMap(value, CFG.maxProcessedTickets));
+  }
+
+  function getProcessedTicketRecord(ticketId) {
+    const id = norm(ticketId);
+    if (!id) return null;
+    const records = getProcessedTickets();
+    const record = records[id];
+    return isPlainObject(record) ? record : null;
+  }
+
+  function isTicketProcessed(ticketId) {
+    const record = getProcessedTicketRecord(ticketId);
+    if (!record) return false;
+    const status = norm(record.status || '');
+    if (status === 'failed-zillow') return false;
+    return true;
+  }
+
+  function describeProcessedTicketStatus(ticketId) {
+    const record = getProcessedTicketRecord(ticketId);
+    if (!record) return '';
+    const status = norm(record.status || 'processed') || 'processed';
+    const reason = norm(record.reason || '');
+    return reason ? `${status}: ${reason}` : status;
+  }
+
+  function markProcessedTicket(ticketId, details = {}) {
+    const id = norm(ticketId);
+    if (!id) return false;
+    const records = getProcessedTickets();
+    records[id] = {
+      ticketId: id,
+      status: norm(details.status || 'completed') || 'completed',
+      address: norm(details.address || ''),
+      zillowUrl: stripZillowJobHashFromUrl(norm(details.zillowUrl || '')),
+      reason: norm(details.reason || ''),
+      processedAt: nowIso(),
+      version: VERSION
+    };
+    saveProcessedTickets(records);
+    return true;
+  }
+
+  function clearProcessedTickets() {
+    deleteGM(GM_KEYS.processedTickets);
+    deleteGM(GM_KEYS.webhookDeliveries);
+    log('Processed ticket and webhook delivery history cleared');
+    renderAll();
+  }
+
+  function getWebhookDeliveries() {
+    const value = readGM(GM_KEYS.webhookDeliveries, {});
+    return isPlainObject(value) ? value : {};
+  }
+
+  function saveWebhookDeliveries(value) {
+    writeGM(GM_KEYS.webhookDeliveries, pruneRecordMap(value, CFG.maxWebhookDeliveries));
+  }
+
+  function buildWebhookIdempotencyKey(job) {
+    if (!isPlainObject(job)) return '';
+    const result = isPlainObject(job.result) ? job.result : {};
+    const parts = [
+      norm(job.ticketId || state.activeTicketId || ''),
+      lower(job.address || state.currentAddress || ''),
+      lower(stripZillowJobHashFromUrl(firstNonEmpty(result.zillowUrl, job.searchUrl))),
+      lower(result.bedrooms || ''),
+      lower(result.bathrooms || ''),
+      lower(result.homeType || '')
+    ].filter(Boolean);
+    return parts.join('|');
+  }
+
+  function hasWebhookDelivery(key) {
+    const cleanKey = norm(key);
+    if (!cleanKey) return false;
+    return !!getWebhookDeliveries()[cleanKey];
+  }
+
+  function markWebhookDelivery(key, job, status = 'delivered') {
+    const cleanKey = norm(key);
+    if (!cleanKey) return false;
+    const deliveries = getWebhookDeliveries();
+    const existing = isPlainObject(deliveries[cleanKey]) ? deliveries[cleanKey] : {};
+    deliveries[cleanKey] = {
+      ...existing,
+      ticketId: norm(job?.ticketId || state.activeTicketId || ''),
+      address: norm(job?.address || state.currentAddress || ''),
+      status: norm(status || 'delivered') || 'delivered',
+      deliveredAt: norm(status) === 'delivered' ? nowIso() : norm(existing.deliveredAt || ''),
+      attemptedAt: norm(existing.attemptedAt || '') || nowIso(),
+      version: VERSION
+    };
+    saveWebhookDeliveries(deliveries);
+    return true;
+  }
+
   function clearLegacyJobState() {
     let cleared = false;
     for (const key of LEGACY_GM_JOB_KEYS) {
@@ -650,12 +814,22 @@
     return norm(value).toLowerCase();
   }
 
+  function addressTokenSet(value) {
+    return new Set(
+      lower(value)
+        .replace(/[^a-z0-9]+/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean)
+    );
+  }
+
   function escapeRegExp(value) {
     return String(value == null ? '' : value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   function cleanTagText(value) {
     return norm(value)
+      .replace(/^[\s\u2713\u2714]+/g, '')
       .replace(/\s+/g, ' ')
       .replace(/[|,;]+$/g, '')
       .trim();
@@ -793,24 +967,99 @@
   }
 
   function log(message) {
-    const line = `[${timeNow()}] ${norm(message)}`;
-    state.logs.push(line);
-    if (state.logs.length > CFG.maxLogLines) {
-      state.logs.splice(0, state.logs.length - CFG.maxLogLines);
-    }
+    const cleanMessage = norm(message);
+    if (!cleanMessage) return;
+    const line = `[${timeNow()}] ${cleanMessage}`;
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs, [line]);
+    savePersistedLogs();
     renderLogs();
-    try { console.log(`[${SCRIPT_NAME}] ${message}`); } catch {}
+    try { console.log(`[${SCRIPT_NAME}] ${cleanMessage}`); } catch {}
   }
 
-  function setStatus(text) {
-    state.lastStatus = norm(text || '');
+  function logProgress(key, message, intervalMs = CFG.progressLogMs) {
+    const cleanKey = norm(key || 'progress');
+    const cleanMessage = norm(message || '');
+    if (!cleanMessage) return;
+
+    const now = Date.now();
+    const current = state.progressLogs[cleanKey] || {};
+    if (current.message === cleanMessage && (now - Number(current.ts || 0)) < intervalMs) return;
+
+    state.progressLogs[cleanKey] = { message: cleanMessage, ts: now };
+    log(cleanMessage);
+  }
+
+  function getStatusLogKey(status) {
+    const text = norm(status);
+    if (/^Waiting for Zillow \(\d+s\)$/i.test(text)) return 'Waiting for Zillow';
+    return text;
+  }
+
+  function setStatus(text, options = null) {
+    const nextStatus = norm(text || '');
+    state.lastStatus = nextStatus;
     if (state.ui.status) state.ui.status.textContent = state.lastStatus || '-';
+
+    const opts = isPlainObject(options) ? options : {};
+    if (opts.log === false || !nextStatus) return;
+
+    const now = Date.now();
+    const allowHeartbeat = nextStatus !== 'Stopped';
+    const statusLogKey = getStatusLogKey(nextStatus);
+    if (
+      state.lastStatusLogKey !== statusLogKey ||
+      (allowHeartbeat && (now - Number(state.lastStatusLoggedAt || 0)) >= CFG.statusLogHeartbeatMs)
+    ) {
+      state.lastLoggedStatus = nextStatus;
+      state.lastStatusLogKey = statusLogKey;
+      state.lastStatusLoggedAt = now;
+      log(`Status: ${nextStatus}`);
+    }
   }
 
   function renderLogs() {
     if (!state.ui.logs) return;
+    state.logs = mergeLogLines(loadPersistedLogs(), state.logs);
     state.ui.logs.value = state.logs.join('\n');
     state.ui.logs.scrollTop = state.ui.logs.scrollHeight;
+  }
+
+  async function copyLogsToClipboard() {
+    const text = getLogText();
+    if (!text) {
+      log('No logs to copy');
+      return false;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        log(`Copied ${state.logs.length} log line(s)`);
+        return true;
+      }
+    } catch {}
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'readonly');
+      Object.assign(textarea.style, {
+        position: 'fixed',
+        left: '-9999px',
+        top: '-9999px'
+      });
+      document.documentElement.appendChild(textarea);
+      textarea.select();
+      const ok = document.execCommand('copy');
+      textarea.remove();
+      if (ok) {
+        log(`Copied ${state.logs.length} log line(s)`);
+        return true;
+      }
+    } catch {}
+
+    log('Copy logs failed; select the log box and copy manually');
+    return false;
   }
 
   function cssEscape(value) {
@@ -1186,7 +1435,7 @@
     return chosen || base;
   }
 
-  async function setFieldValue(record, value) {
+  async function setFieldValue(record, value, label = '') {
     const base = findSavedElement(record);
     if (!base) return { ok: false, reason: 'saved field target not found' };
 
@@ -1209,7 +1458,11 @@
 
       const currentValue = readCurrentFieldValue(target);
       if (hasMeaningfulExistingFieldValue(currentValue)) {
-        return { ok: true, skipped: 'existing-value', currentValue };
+        return {
+          ok: true,
+          skipped: 'existing-value',
+          currentValue
+        };
       }
 
       if (target instanceof HTMLSelectElement) {
@@ -1616,6 +1869,19 @@
     return cards.filter(visible);
   }
 
+  function getNextUnprocessedStageCard() {
+    const cards = getVisibleStageCards();
+    for (const card of cards) {
+      const ticketId = norm(card.getAttribute('data-id') || '');
+      if (ticketId && isTicketProcessed(ticketId)) {
+        logProgress(`skip-processed-card-${ticketId}`, `Skipping already processed ticket ${ticketId}: ${describeProcessedTicketStatus(ticketId)}`);
+        continue;
+      }
+      return card;
+    }
+    return null;
+  }
+
   function getTicketOpenTargets(card) {
     const link = card?.querySelector(SEL.customerLink) || null;
     return [link, card].filter((target, index, list) => target && list.indexOf(target) === index);
@@ -1709,8 +1975,9 @@
     return false;
   }
 
-  function parseInitialValuesJson() {
-    const input = document.querySelector(SEL.initialValues);
+  function parseInitialValuesJson(root = document) {
+    if (!(root instanceof Element) && root !== document) root = document;
+    const input = root.querySelector(SEL.initialValues);
     if (!input) return null;
 
     const raw = input.value || input.getAttribute('value') || '';
@@ -1733,20 +2000,33 @@
     return ta.value;
   }
 
-  function readVal(selector) {
-    const el = document.querySelector(selector);
+  function readVal(selector, root = document) {
+    if (!(root instanceof Element) && root !== document) root = document;
+    const el = root.querySelector(selector);
     return norm(el?.value || el?.textContent || '');
   }
 
   function readAzAddressInfo(fallbackTicketId = '') {
-    const initial = parseInitialValuesJson() || {};
+    const root = getOpenDockRoot();
+    if (!(root instanceof Element)) {
+      return {
+        ticketId: norm(fallbackTicketId || ''),
+        street: '',
+        city: '',
+        state: '',
+        postal: '',
+        address: ''
+      };
+    }
+    const form = root?.querySelector?.(SEL.detailForm) || root;
+    const initial = parseInitialValuesJson(form || root || document) || {};
     const cr = initial?.CustomerReferral || {};
     const openInfo = getOpenTicketInfo();
 
-    const street = firstNonEmpty(cr.address1, readVal('#customerreferral-address1'));
-    const city = firstNonEmpty(cr.city, readVal('#customerreferral-city'));
-    const stateValue = firstNonEmpty(cr.state, readVal('#state'));
-    const postal = firstNonEmpty(cr.zip, readVal('#customerreferral-zip'));
+    const street = firstNonEmpty(cr.address1, readVal('#customerreferral-address1', form || root));
+    const city = firstNonEmpty(cr.city, readVal('#customerreferral-city', form || root));
+    const stateValue = firstNonEmpty(cr.state, readVal('#state', form || root));
+    const postal = firstNonEmpty(cr.zip, readVal('#customerreferral-zip', form || root));
     const ticketId = firstNonEmpty(initial?.id, initial?.instaId, openInfo.ticketId, fallbackTicketId);
 
     const cityStateZip = [city, [stateValue, postal].filter(Boolean).join(' ')].filter(Boolean).join(', ');
@@ -1760,6 +2040,25 @@
       postal,
       address
     };
+  }
+
+  function validateZillowAddressInfo(addressInfo) {
+    const street = norm(addressInfo?.street || '');
+    const city = norm(addressInfo?.city || '');
+    const stateValue = norm(addressInfo?.state || '');
+    const postal = norm(addressInfo?.postal || '');
+    const address = norm(addressInfo?.address || '');
+    const joined = lower([street, city, stateValue, postal, address].join(' '));
+
+    if (!address) return { ok: false, reason: 'address is blank' };
+    if (!street) return { ok: false, reason: 'street is blank' };
+    if (!city) return { ok: false, reason: 'city is blank' };
+    if (!/^[A-Z]{2}$/i.test(stateValue)) return { ok: false, reason: 'state is missing or invalid' };
+    if (!/^\d{5}(?:-\d{4})?$/.test(postal)) return { ok: false, reason: 'ZIP is missing or invalid' };
+    if (!/^\d{1,7}\b/.test(street)) return { ok: false, reason: 'street is missing a leading house number' };
+    if (/(?:undefined|null|unknown)/i.test(joined) || /n\/a/i.test(joined)) return { ok: false, reason: 'address contains placeholder text' };
+    if (/\bP\.?\s*O\.?\s*Box\b/i.test(street) || /\bPO\s*Box\b/i.test(street)) return { ok: false, reason: 'address is a PO Box' };
+    return { ok: true, reason: '' };
   }
 
   function isMainTabReady() {
@@ -1785,7 +2084,7 @@
 
     showBootstrapTab(mainTab);
     log('Clicked: Main tab');
-    await sleep(CFG.majorStepDelayMs);
+    await sleep(500);
 
     const ready = await waitFor(() => isMainTabReady(), CFG.mainReadyMs);
 
@@ -2068,6 +2367,40 @@
     }
   }
 
+  function stripZillowJobHashFromUrl(url) {
+    const baseUrl = norm(url);
+    if (!baseUrl) return '';
+
+    try {
+      const parsed = new URL(baseUrl);
+      const hash = String(parsed.hash || '').replace(/^#/, '');
+      if (!hash) return parsed.toString();
+
+      const segments = hash.split('&');
+      const publicSegments = segments.filter((segment) => {
+        const [rawKey] = segment.split('=');
+        return norm(rawKey) !== ZILLOW_JOB_HASH_KEY;
+      });
+      if (publicSegments.length === segments.length) return parsed.toString();
+
+      parsed.hash = publicSegments.join('&');
+      return parsed.toString();
+    } catch {
+      const hashIndex = baseUrl.indexOf('#');
+      if (hashIndex < 0) return baseUrl;
+
+      const prefix = baseUrl.slice(0, hashIndex);
+      const hash = baseUrl.slice(hashIndex + 1);
+      const segments = hash.split('&');
+      const publicSegments = segments.filter((segment) => {
+        const [rawKey] = segment.split('=');
+        return norm(rawKey) !== ZILLOW_JOB_HASH_KEY;
+      });
+      if (publicSegments.length === segments.length) return baseUrl;
+      return publicSegments.length ? `${prefix}#${publicSegments.join('&')}` : prefix;
+    }
+  }
+
   function createJobId(ticketId) {
     const ticket = norm(ticketId || 'az') || 'az';
     const random = Math.random().toString(36).slice(2, 8);
@@ -2141,12 +2474,26 @@
       customFields[label] = getFallbackCustomFieldValue(label, extraCustom[label], job);
     }
     return {
-      zillowUrl: firstNonEmpty(extra.zillowUrl, job?.searchUrl),
+      zillowUrl: stripZillowJobHashFromUrl(firstNonEmpty(extra.zillowUrl, job?.searchUrl)),
       bedrooms: getFallbackRoomValue(extra.bedrooms),
       bathrooms: getFallbackRoomValue(extra.bathrooms),
       homeType: getFallbackHomeType(extra.homeType),
       customFields
     };
+  }
+
+  function continueWithPartialZillowResult(job, reason = '', overrides = null) {
+    if (!isPlainObject(job)) return false;
+    const message = norm(reason || job.error || 'Zillow data unavailable; continuing with available data');
+    job.status = 'result-ready';
+    job.updatedAt = nowIso();
+    job.resultReadyAt = nowIso();
+    job.error = message;
+    job.result = buildFallbackResult(job, overrides);
+    saveJob(job);
+    state.zillowSummary = summarizeResult(job.result);
+    log(`Zillow partial result ready for ${norm(job.ticketId || state.activeTicketId || '?')}: ${message}`);
+    return true;
   }
 
   function resultHasRoomFacts(result) {
@@ -2161,16 +2508,30 @@
     return missing;
   }
 
+  function zillowShowsMissingFactPlaceholder(label) {
+    const text = norm(document.body?.innerText || '');
+    if (!text) return false;
+    if (label === 'Bedrooms') return /--\s*(?:beds?|bedrooms?)\b/i.test(text);
+    if (label === 'Bathrooms') return /--\s*(?:baths?|bathrooms?)\b/i.test(text);
+    return false;
+  }
+
+  function zillowShowsAnyMissingFactPlaceholder(labels) {
+    return (Array.isArray(labels) ? labels : []).some((label) => zillowShowsMissingFactPlaceholder(label));
+  }
+
   function buildWebhookPayload(job) {
     const result = isPlainObject(job?.result) ? job.result : {};
+    const idempotencyKey = buildWebhookIdempotencyKey(job);
     return {
       script: SCRIPT_NAME,
       version: VERSION,
+      idempotencyKey,
       sentAt: nowIso(),
       ticketId: norm(job?.ticketId || state.activeTicketId || ''),
       jobId: norm(job?.jobId || ''),
       address: firstNonEmpty(norm(job?.address || ''), norm(state.currentAddress || '')),
-      zillowUrl: firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || '')),
+      zillowUrl: stripZillowJobHashFromUrl(firstNonEmpty(norm(result?.zillowUrl || ''), norm(job?.searchUrl || ''))),
       bedrooms: norm(result?.bedrooms || ''),
       bathrooms: norm(result?.bathrooms || ''),
       homeType: norm(result?.homeType || ''),
@@ -2201,6 +2562,17 @@
     const endpoint = getWebhookUrl();
     if (!endpoint) return true;
 
+    const idempotencyKey = buildWebhookIdempotencyKey(job);
+    if (hasWebhookDelivery(idempotencyKey)) {
+      job.webhookDeliveredAt = nowIso();
+      job.webhookDuplicateSkippedAt = nowIso();
+      job.updatedAt = nowIso();
+      saveJob(job);
+      log(`Webhook skipped for AZ ${norm(job.ticketId || '?')}: duplicate idempotency key`);
+      return true;
+    }
+    markWebhookDelivery(idempotencyKey, job, 'attempted');
+
     const payload = buildWebhookPayload(job);
     if (!payload.ticketId) {
       log('Webhook skipped: missing ticket ID');
@@ -2226,6 +2598,7 @@
     job.webhookEndpoint = endpoint;
     job.updatedAt = nowIso();
     saveJob(job);
+    markWebhookDelivery(idempotencyKey, job, 'delivered');
     log(`Webhook sent for AZ ${payload.ticketId}`);
     return true;
   }
@@ -2265,6 +2638,7 @@
   }
 
   function closeCurrentTabSoon() {
+    clearZillowTabHeartbeatForThisTab();
     for (const delay of [250, 1200, 2500, 5000]) {
       setTimeout(() => {
         try { window.close(); } catch {}
@@ -2274,11 +2648,19 @@
     }
   }
 
+  function closeOrphanZillowTab(reason = '') {
+    const message = norm(reason || 'Closing orphan Zillow tab');
+    if (message) log(message);
+    clearZillowOpenSlot();
+    clearZillowTabHeartbeatForThisTab();
+    setZillowTabJobId('');
+    closeCurrentTabSoon();
+  }
+
   function reloadThisPageSoon(reason = '') {
     const message = norm(reason || 'Reload requested');
     if (message) {
-      try { console.log(`[${SCRIPT_NAME}] ${message}; reloading page`); } catch {}
-      if (isAzOrigin()) log(`${message}; reloading page`);
+      log(`${message}; reloading page`);
     }
 
     setTimeout(() => {
@@ -2428,7 +2810,7 @@
     return tabJobId === activeJobId;
   }
 
-  function handleExistingZillowJob(job) {
+  async function handleExistingZillowJob(job) {
     const jobStatus = norm(job?.status || '');
     const sameTicketJob = jobMatchesTicket(job, state.activeTicketId);
     if (!sameTicketJob) return false;
@@ -2436,17 +2818,8 @@
     if (jobStatus === 'captcha') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = firstNonEmpty(norm(job?.error || ''), summarizeResult(job?.result));
-      reportCaptchaWaitOnce(job);
-      if (getIsoAgeMs(getCaptchaRefreshBaseIso(job)) >= CFG.zillowCaptchaRefreshMs) {
-        job.captchaLastRefreshAt = nowIso();
-        job.updatedAt = nowIso();
-        saveJob(job);
-        setStatus(`Refreshing after Zillow captcha wait for ${state.activeTicketId}`);
-        log(`Refreshing page after 3 minutes waiting on Zillow captcha for AZ ${state.activeTicketId}`);
-        requestBootstrapReload(`captcha-wait-${state.activeTicketId}`);
-        return true;
-      }
-      setStatus(`Waiting for human Zillow captcha for ${state.activeTicketId}`);
+      continueWithPartialZillowResult(job, getZillowJobErrorText(job, 'Zillow captcha detected'));
+      setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
       return true;
     }
 
@@ -2467,19 +2840,16 @@
         } else if (hasFreshZillowOpenBlock()) {
           setStatus('Waiting for existing Zillow tab');
         } else {
-          job.status = 'failed';
-          job.updatedAt = nowIso();
-          job.error = 'Could not open Zillow tab';
-          saveJob(job);
-          setStatus('Could not open Zillow tab');
-          log('Could not open Zillow tab');
+          continueWithPartialZillowResult(job, 'Could not open Zillow tab');
+          setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
         }
         return true;
       }
 
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
-        reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow opened but no property data ever loaded');
+        continueWithPartialZillowResult(job, 'Zillow opened but no property data ever loaded');
+        setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
         return true;
       }
 
@@ -2491,22 +2861,34 @@
         } else if (hasFreshZillowOpenBlock()) {
           setStatus('Waiting for existing Zillow tab');
         } else {
-          job.status = 'failed';
-          job.updatedAt = nowIso();
-          job.error = 'Could not relaunch stale Zillow tab';
-          saveJob(job);
-          setStatus('Could not relaunch Zillow tab');
-          log('Could not relaunch stale Zillow tab');
+          continueWithPartialZillowResult(job, 'Could not relaunch stale Zillow tab');
+          setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
         }
         return true;
       }
 
       if (ageMs > CFG.zillowWaitMs) {
-        reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow scrape timed out');
+        continueWithPartialZillowResult(job, 'Zillow scrape timed out');
+        setStatus(`Continuing with partial Zillow data for ${state.activeTicketId}`);
         return true;
       }
 
       const remaining = Math.max(1, Math.ceil((CFG.zillowWaitMs - ageMs) / 1000));
+      const heartbeat = getFreshZillowTabHeartbeat();
+      logProgress(
+        `az-zillow-wait-${norm(job.jobId || '')}`,
+        [
+          `Waiting for Zillow job ${norm(job.ticketId || state.activeTicketId || '?')}`,
+          `status=${jobStatus || 'blank'}`,
+          `launches=${getJobLaunchCount(job)}`,
+          `age=${Math.ceil(ageMs / 1000)}s`,
+          `lastError=${norm(job.error || '') || 'none'}`,
+          `listingNavigated=${norm(job.listingNavigatedAt || '') || 'no'}`,
+          `listingSeen=${norm(job.listingSeenAt || '') || 'no'}`,
+          `zillowTab=${heartbeat ? stripZillowJobHashFromUrl(norm(heartbeat.url || '')) || 'fresh heartbeat' : 'no fresh heartbeat'}`
+        ].join(' | '),
+        10000
+      );
       setStatus(`Waiting for Zillow (${remaining}s)`);
       return true;
     }
@@ -2514,7 +2896,7 @@
     if (jobStatus === 'failed') {
       state.currentAddress = firstNonEmpty(state.currentAddress, job?.address);
       state.zillowSummary = summarizeResult(job?.result);
-      reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
+      continueWithPartialZillowResult(job, getZillowJobErrorText(job));
       return true;
     }
 
@@ -2725,10 +3107,18 @@
       .toLowerCase()
       .replace(/[^a-z0-9 ]/g, ' ')
       .split(/\s+/)
-      .filter((token) => token.length >= 3 && !['street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr', 'lane', 'ln', 'court', 'ct', 'boulevard', 'blvd', 'circle', 'cir', 'place', 'pl', 'way', 'trail', 'trl', 'highway', 'hwy'].includes(token))
+      .filter((token) => token.length >= 3 && token !== lower(streetNumber) && !/^\d+$/.test(token) && !['street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr', 'lane', 'ln', 'court', 'ct', 'boulevard', 'blvd', 'circle', 'cir', 'place', 'pl', 'way', 'trail', 'trl', 'highway', 'hwy'].includes(token))
       .slice(0, 4);
     const cityToken = norm(job?.city || '').toLowerCase();
     const postalToken = norm(job?.postal || '').toLowerCase();
+    if (!streetNumber || !postalToken || !streetTokens.length) {
+      logProgress(
+        `zillow-match-incomplete-${norm(job?.jobId || job?.ticketId || '')}`,
+        `Zillow match blocked: incomplete address for AZ ${norm(job?.ticketId || '?')} (${norm(job?.address || '') || 'blank address'})`
+      );
+      return null;
+    }
+
     const anchors = Array.from(document.querySelectorAll('a[href*="/homedetails/"], a[href*="_zpid/"], a[data-test="property-card-link"]'))
       .filter((el) => el instanceof HTMLAnchorElement && norm(el.href));
 
@@ -2736,15 +3126,18 @@
     let bestScore = -1;
     for (const anchor of anchors) {
       const haystack = lower([anchor.href, anchor.textContent, anchor.getAttribute('aria-label')].filter(Boolean).join(' '));
+      const haystackTokens = addressTokenSet(haystack);
+      const matchedStreetTokens = streetTokens.filter((token) => haystackTokens.has(token));
+      const hasStreetNumber = haystackTokens.has(lower(streetNumber));
+      const hasPostal = haystackTokens.has(postalToken);
+      if (!hasStreetNumber || !hasPostal || !matchedStreetTokens.length) continue;
+
       let score = 0;
       if (haystack.includes('/homedetails/')) score += 8;
       if (haystack.includes('_zpid')) score += 4;
-      if (streetNumber && haystack.includes(lower(streetNumber))) score += 6;
-      if (postalToken && haystack.includes(postalToken)) score += 6;
+      score += 12;
       if (cityToken && haystack.includes(cityToken)) score += 3;
-      for (const token of streetTokens) {
-        if (haystack.includes(token)) score += 2;
-      }
+      score += matchedStreetTokens.length * 2;
       if (visible(anchor)) score += 2;
       if (score > bestScore) {
         best = anchor;
@@ -2752,7 +3145,7 @@
       }
     }
 
-    return bestScore >= 8 ? best : null;
+    return bestScore >= 18 ? best : null;
   }
 
   function scrapeZillowSearchResultCard(job) {
@@ -2774,7 +3167,7 @@
     if (!norm(bedrooms) && !norm(bathrooms) && !norm(homeType)) return null;
 
     return {
-      zillowUrl: anchor.href,
+      zillowUrl: stripZillowJobHashFromUrl(anchor.href),
       bedrooms,
       bathrooms,
       homeType,
@@ -2865,7 +3258,7 @@
     const customFields = buildScrapedCustomFieldValues();
 
     return {
-      zillowUrl: location.href,
+      zillowUrl: stripZillowJobHashFromUrl(location.href),
       bedrooms,
       bathrooms,
       homeType,
@@ -2883,18 +3276,23 @@
     syncZillowTabJobIdFromLocation();
     const job = getJob();
     if (!isPlainObject(job)) {
-      setZillowTabJobId('');
+      closeOrphanZillowTab(`Zillow tab has no active AgencyZoom job for ${stripZillowJobHashFromUrl(location.href) || location.href}`);
       return;
     }
-    if (!['pending', 'searching', 'captcha'].includes(norm(job.status || ''))) return;
-    if (!currentZillowTabMatchesJob(job)) return;
+    if (!['pending', 'searching', 'captcha'].includes(norm(job.status || ''))) {
+      closeOrphanZillowTab(`Zillow tab ignoring job ${norm(job.ticketId || '?')} because status is ${norm(job.status || 'blank')}`);
+      return;
+    }
+    if (!currentZillowTabMatchesJob(job)) {
+      closeOrphanZillowTab(`Zillow tab does not match active job ${norm(job.jobId || '?')}; current URL marker is ${readZillowJobIdFromLocation() || 'missing'}`);
+      return;
+    }
 
     const verificationBlock = detectZillowVerificationBlock(job);
     if (verificationBlock) {
-      if (norm(job.status || '') !== 'captcha') {
-        markJobCaptcha(job, verificationBlock);
-        try { console.log(`[${SCRIPT_NAME}] Waiting for human captcha solve for ${job.ticketId}: ${verificationBlock}`); } catch {}
-      }
+      continueWithPartialZillowResult(job, verificationBlock);
+      clearZillowOpenSlot();
+      closeCurrentTabSoon();
       return;
     }
 
@@ -2905,7 +3303,7 @@
       job.azCaptchaReportedAt = '';
       job.captchaSolvedAt = nowIso();
       saveJob(job);
-      try { console.log(`[${SCRIPT_NAME}] Zillow captcha cleared for ${job.ticketId}; resuming scrape`); } catch {}
+      log(`Zillow captcha cleared for ${job.ticketId}; resuming scrape`);
     }
 
     if (!isZillowListingPage()) {
@@ -2921,6 +3319,7 @@
           job.listingNavigatedAt = nowIso();
           job.updatedAt = nowIso();
           saveJob(job);
+          log(`Zillow search result matched; opening listing ${stripZillowJobHashFromUrl(listing.href)}`);
           try { location.assign(listing.href); } catch {}
           return;
         }
@@ -2929,8 +3328,7 @@
       if (cardResult && cardHasAnyFacts && getJobActiveAgeMs(job) >= CFG.zillowSearchFallbackMs) {
         const missingCardFacts = getMissingRequiredZillowFactLabels(cardResult);
         if (missingCardFacts.length) {
-          reloadZillowPageForJob(job, `Zillow search result missing ${missingCardFacts.join(', ')}`);
-          return;
+          log(`Zillow search-card result missing ${missingCardFacts.join(', ')}; continuing with available data`);
         }
 
         job.status = 'result-ready';
@@ -2938,7 +3336,7 @@
         job.resultReadyAt = nowIso();
         job.result = buildFallbackResult(job, cardResult);
         saveJob(job);
-        try { console.log(`[${SCRIPT_NAME}] Zillow search-card fallback ready for ${job.ticketId}: ${summarizeResult(cardResult)}`); } catch {}
+        log(`Zillow search-card result ready for ${job.ticketId}: ${summarizeResult(cardResult)}`);
         clearZillowOpenSlot();
         closeCurrentTabSoon();
         return;
@@ -2946,10 +3344,17 @@
 
       if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowDeadPageMs) {
         const reason = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
-        reloadZillowPageForJob(job, reason);
+        continueWithPartialZillowResult(job, reason, { zillowUrl: stripZillowJobHashFromUrl(location.href) });
+        log(`${reason} for ${norm(job.ticketId || '?')}`);
+        clearZillowOpenSlot();
+        closeCurrentTabSoon();
         return;
       }
 
+      logProgress(
+        `zillow-search-wait-${norm(job.jobId || '')}`,
+        `Zillow search page still looking for matching listing/card for AZ ${norm(job.ticketId || '?')} (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`
+      );
       return;
     }
 
@@ -2957,31 +3362,37 @@
       job.listingSeenAt = nowIso();
       job.updatedAt = nowIso();
       saveJob(job);
+      log(`Zillow listing detected for AZ ${norm(job.ticketId || '?')}: ${stripZillowJobHashFromUrl(location.href)}`);
     }
 
     const scraped = scrapeZillowResult();
     const missingRequiredFacts = getMissingRequiredZillowFactLabels(scraped);
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);
+    const factsClearlyMissing = zillowShowsAnyMissingFactPlaceholder(missingRequiredFacts);
+
+    if (missingRequiredFacts.length && listingAgeMs < CFG.zillowFactSettleMs && !factsClearlyMissing) {
+      logProgress(
+        `zillow-facts-wait-${norm(job.jobId || '')}`,
+        `Waiting for Zillow listing facts for AZ ${norm(job.ticketId || '?')}: missing ${missingRequiredFacts.join(', ')} (${Math.ceil((CFG.zillowFactSettleMs - listingAgeMs) / 1000)}s before continuing)`
+      );
+      return;
+    }
 
     if (missingRequiredFacts.length) {
-      if (listingAgeMs >= CFG.zillowFactSettleMs) {
-        const reason = `Zillow listing missing ${missingRequiredFacts.join(', ')} (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown listing')})`;
-        reloadZillowPageForJob(job, reason);
-      }
-      return;
+      const prefix = factsClearlyMissing ? 'Zillow shows missing fact placeholders' : 'Zillow listing missing';
+      log(`${prefix} for ${missingRequiredFacts.join(', ')}; continuing with available data`);
     }
 
     job.status = 'result-ready';
     job.updatedAt = nowIso();
     job.resultReadyAt = nowIso();
     job.result = buildFallbackResult(job, {
-      ...scraped,
-      zillowUrl: location.href
+      ...scraped
     });
     saveJob(job);
 
-    try { console.log(`[${SCRIPT_NAME}] Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`); } catch {}
+    log(`Zillow scrape ready for ${job.ticketId}: ${summarizeResult(scraped)}`);
     clearZillowOpenSlot();
     closeCurrentTabSoon();
   }
@@ -3135,10 +3546,45 @@
     return changed;
   }
 
+  function buildTagSelectionClickPlan(selectEl, values) {
+    if (!(selectEl instanceof HTMLSelectElement)) return [];
+    const wanted = Array.from(new Set((values || []).map((value) => norm(value)).filter(Boolean)));
+    const wantedSet = new Set(wanted);
+    return Array.from(selectEl.options || [])
+      .map((option) => {
+        const value = norm(option.value || '');
+        if (!value || option.disabled) return null;
+        const desiredSelected = wantedSet.has(value);
+        const selected = !!option.selected;
+        if (desiredSelected === selected) return null;
+        return {
+          value,
+          label: getTagOptionLabel(option),
+          desiredSelected
+        };
+      })
+      .filter(Boolean);
+  }
+
   function getTagMenuItems(root = null) {
     const scope = root instanceof Element ? root : document;
     return Array.from(scope.querySelectorAll('.dropdown-item, a[id^="bs-select-"], li[role="option"], a[role="option"], [role="option"]'))
       .filter((el) => visible(el) && cleanTagText(el.textContent || ''));
+  }
+
+  function findTagMenuItemByLabel(label, root = null) {
+    const wanted = lowerTagText(label);
+    if (!wanted) return null;
+    const items = getTagMenuItems(root);
+    const getItemText = (item) => lowerTagText(item.querySelector?.('span.text, .text')?.textContent || item.textContent || '');
+    for (const item of items) {
+      if (getItemText(item) === wanted) return item;
+    }
+    for (const item of items) {
+      const text = getItemText(item);
+      if (text && (text.includes(wanted) || wanted.includes(text))) return item;
+    }
+    return null;
   }
 
   function getTagPickerItemFromTarget(target) {
@@ -3291,6 +3737,37 @@
     return false;
   }
 
+  async function applyTagSelectionClickPlan(dropdown, selectEl, clickPlan) {
+    if (!(dropdown instanceof Element) || !(selectEl instanceof HTMLSelectElement) || !Array.isArray(clickPlan) || !clickPlan.length) return 0;
+
+    let clicked = 0;
+    for (const item of clickPlan) {
+      if (!isTagDropdownOpen(dropdown)) {
+        const reopened = await tryOpenTagDropdown(dropdown);
+        if (!reopened) {
+          log(`Tag dropdown closed before clicking ${item.label || item.value}`);
+          break;
+        }
+      }
+
+      const menu = getTagDropdownMenu(dropdown);
+      const menuItem = findTagMenuItemByLabel(item.label, menu) || findTagMenuItemByLabel(item.label);
+      if (!(menuItem instanceof Element)) {
+        log(`Tag menu item not found for ${item.label || item.value}`);
+        continue;
+      }
+
+      try { menuItem.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+      try { menuItem.focus({ preventScroll: true }); } catch {}
+      dispatchMouseBurst(menuItem);
+      clicked += 1;
+      log(`Clicked tag dropdown item: ${item.label || item.value}`);
+      await sleep(250);
+    }
+
+    return clicked;
+  }
+
   async function openTagPanel() {
     const existingForm = findVisibleElements(SEL.tagForm)[0];
     if (existingForm) return existingForm;
@@ -3346,17 +3823,31 @@
     return { value: '', label };
   }
 
-  function findTagApplyButton() {
-    const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(visible);
+  function findTagApplyButton(root = null) {
+    const scope = root instanceof Element ? root : document;
+    const candidates = Array.from(scope.querySelectorAll('button,a,[role="button"],input[type="submit"],input[type="button"]')).filter(visible);
     return candidates.find((el) => {
-      const text = lower(el.textContent || '');
+      const text = lower([
+        el.textContent,
+        el.getAttribute?.('value'),
+        el.getAttribute?.('title'),
+        el.getAttribute?.('aria-label')
+      ].filter(Boolean).join(' '));
       if (!text) return false;
-      return text.includes('apply') || text === 'save' || text === 'done';
+      const cls = String(el.className || '').toLowerCase();
+      const role = lower(el.getAttribute?.('role') || '');
+      if (cls.includes('dropdown-toggle') || role === 'combobox') return false;
+      if (text.includes('save note') || text.includes('cancel')) return false;
+      return text.includes('apply')
+        || text === 'save'
+        || text === 'done'
+        || text.includes('update')
+        || text.includes('submit');
     }) || null;
   }
 
-  async function maybeClickTagApplyButton() {
-    const button = findTagApplyButton();
+  async function maybeClickTagApplyButton(tagForm = null) {
+    const button = findTagApplyButton(tagForm) || findTagApplyButton();
     if (!button) {
       log('No tag apply button detected, continuing');
       return true;
@@ -3392,10 +3883,11 @@
     if (!hasRemoveTag) {
       if (hasAddTag) {
         log(`Tag replacement not needed; ${configuredAddLabel} is already on this ticket`);
+        return true;
       } else {
-        log(`Tag replacement not needed; ${configuredRemoveLabel} is not on this ticket`);
+        log(`Tag replacement failed: ${configuredRemoveLabel} is not on this ticket and ${configuredAddLabel} is missing`);
+        return false;
       }
-      return true;
     }
 
     const tagForm = await openTagPanel();
@@ -3464,8 +3956,25 @@
       ...preserveInfo.values,
       addResolved.value
     ];
+    const clickPlan = buildTagSelectionClickPlan(selectEl, nextValues);
+    await applyTagSelectionClickPlan(dropdown, selectEl, clickPlan);
     setSelectedTagValues(selectEl, nextValues);
-    await maybeClickTagApplyButton();
+    await maybeClickTagApplyButton(tagForm);
+
+    const verifiedLabels = await waitFor(() => {
+      const labels = getOpenTicketTagLabels();
+      const hasAddAfter = labels.some((label) => lowerTagText(label) === lowerTagText(addLabel));
+      const hasRemoveAfter = labels.some((label) => lowerTagText(label) === lowerTagText(removeLabel));
+      return hasAddAfter && !hasRemoveAfter ? labels : null;
+    }, 5000, 250);
+
+    if (!verifiedLabels) {
+      const labels = getOpenTicketTagLabels();
+      const hasAddAfter = labels.some((label) => lowerTagText(label) === lowerTagText(addLabel));
+      const hasRemoveAfter = labels.some((label) => lowerTagText(label) === lowerTagText(removeLabel));
+      log(`Tag replacement verification failed: ${removeLabel}->${addLabel} | add=${hasAddAfter ? 'yes' : 'no'} remove=${hasRemoveAfter ? 'yes' : 'no'}`);
+      return false;
+    }
 
     log(`Applied tag replacement: ${removeLabel}->${addLabel}`);
     return true;
@@ -3479,23 +3988,9 @@
       return false;
     }
 
-    const missingRequiredFacts = getMissingRequiredZillowFactLabels(job?.result);
-    if (missingRequiredFacts.length) {
-      if (!norm(job?.noDataReportedAt || '')) {
-        log(`Zillow result missing ${missingRequiredFacts.join(', ')} for AZ ${norm(job?.ticketId || state.activeTicketId || '?')}; reloading page`);
-      }
-      if (isPlainObject(job)) {
-        job.noDataReportedAt = nowIso();
-        job.updatedAt = nowIso();
-        saveJob(job);
-      }
-      reloadAgencyZoomForFreshZillowAttempt(job, `Missing Zillow facts: ${missingRequiredFacts.join(', ')}`);
-      return false;
-    }
-
     const targets = getFieldTargets();
     const baseFields = {
-      'Zillow URL': firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl),
+      'Zillow URL': stripZillowJobHashFromUrl(firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl)),
       'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
       'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
       'Home Type': getFallbackHomeType(job?.result?.homeType)
@@ -3530,11 +4025,12 @@
         continue;
       }
 
-      const result = await setFieldValue(targetRecord, value);
+      setStatus(`Writing Zillow field: ${label}`);
+      const result = await setFieldValue(targetRecord, value, label);
       if (result.ok) {
         if (result.skipped === 'existing-value') {
           skippedExistingCount += 1;
-          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}`);
+          log(`Skipped filled ticket field: ${label} already has ${result.currentValue}; Zillow value was ${value}`);
         } else {
           changed = true;
           appliedCount += 1;
@@ -3544,23 +4040,18 @@
         failedCount += 1;
         log(`Field failed: ${label} | ${result.reason}`);
       }
-      await sleep(CFG.majorStepDelayMs);
+      await sleep(250);
     }
 
-    if (failedCount || (valueCount && !changed && !skippedExistingCount && missingTargetCount)) {
-      if (changed) {
-        const updated = await clickUpdateButton();
-        if (!updated) {
-          setStatus('Ticket update failed');
-          return false;
-        }
-      }
-      const reason = failedCount
-        ? `${failedCount} Zillow field write(s) failed`
-        : `${missingTargetCount} Zillow field target(s) missing`;
-      log(`${reason}; reloading page`);
-      requestBootstrapReload(reason);
-      return false;
+    if (failedCount || missingTargetCount) {
+      const details = [];
+      if (failedCount) details.push(`${failedCount} Zillow field write(s) failed`);
+      if (missingTargetCount) details.push(`${missingTargetCount} Zillow field target(s) missing`);
+      log(`${details.join('; ')}; continuing to tag replacement`);
+    }
+
+    if (!changed && !skippedExistingCount) {
+      log('No Zillow field values were written or confirmed; continuing to tag replacement');
     }
 
     if (changed) {
@@ -3575,6 +4066,7 @@
       log('No Zillow field values needed to be applied');
     }
 
+    setStatus('Replacing configured ticket tag');
     const tagsOk = await applyConfiguredTagReplacement();
     if (!tagsOk) {
       setStatus('Tag replacement failed');
@@ -3597,11 +4089,12 @@
 
   async function runAzWorkflow() {
     if (!CFG.openTicketOnly) {
+      setStatus('Checking field target setup', { log: false });
       if (!hasAllFieldTargets()) {
-        setStatus('Field target setup required');
-        return;
+        log('Some field targets are missing; available Zillow fields will still be attempted');
       }
 
+      setStatus('Checking tag target setup', { log: false });
       if (!hasAllTagTargets()) {
         setStatus('Tag target setup required');
         return;
@@ -3609,6 +4102,7 @@
     }
 
     if (isPipelinePage()) {
+      setStatus(`Ensuring ${CFG.savedQueryName} filter`, { log: false });
       const filterReady = await ensureIgnoredV2Filter();
       if (!filterReady) {
         setStatus('Ingored v2 filter failed');
@@ -3619,8 +4113,6 @@
         setStatus(`${CFG.savedQueryName} selected`);
         return;
       }
-
-      await sleep(CFG.majorStepDelayMs);
     }
 
     let openTicket = getOpenTicketInfo();
@@ -3632,20 +4124,21 @@
         return;
       }
 
-      const card = getVisibleStageCards()[0] || null;
+      const visibleCards = getVisibleStageCards();
+      const card = getNextUnprocessedStageCard();
       if (!card) {
-        setStatus('No visible tickets in Ingored v2');
+        setStatus(visibleCards.length ? 'No unprocessed visible tickets in Ingored v2' : 'No visible tickets in Ingored v2');
         return;
       }
 
       const ticketId = norm(card.getAttribute('data-id') || '');
+      setStatus(`Opening ticket ${ticketId || 'from pipeline'}`);
       const opened = await openCard(card, ticketId);
       if (!opened) {
         setStatus('Ticket open failed');
         return;
       }
 
-      await sleep(CFG.majorStepDelayMs);
       openTicket = getOpenTicketInfo();
       state.activeTicketId = norm(openTicket.ticketId || ticketId);
     }
@@ -3656,23 +4149,43 @@
       return;
     }
 
+    if (isTicketProcessed(state.activeTicketId)) {
+      const processedStatus = describeProcessedTicketStatus(state.activeTicketId);
+      log(`Skipping already processed open ticket ${state.activeTicketId}: ${processedStatus}`);
+      await closeTicketDrawer();
+      state.activeTicketId = '';
+      state.currentAddress = '';
+      state.zillowSummary = '';
+      state.mainReadyTicketId = '';
+      if (isPipelinePage()) requestBootstrapReload(`skip-processed-${openTicket.ticketId || 'ticket'}`);
+      return;
+    }
+
     if (CFG.openTicketOnly) {
       setStatus(`Ticket open: ${state.activeTicketId}`);
       return;
     }
 
     let job = getJob();
-    if (state.mainReadyTicketId === state.activeTicketId && handleExistingZillowJob(job)) {
+    if (state.mainReadyTicketId === state.activeTicketId && await handleExistingZillowJob(job)) {
       return;
     }
 
+    setStatus(`Opening Main tab for ${state.activeTicketId}`);
     const mainOk = await ensureMainTab();
     if (!mainOk) {
       setStatus('Main tab failed');
       return;
     }
 
-    await sleep(CFG.majorStepDelayMs);
+    const mainContext = getActivePipelineTicketContext(state.activeTicketId);
+    if (!mainContext.ok) {
+      setStatus(mainContext.reason);
+      log(`Blocked address read: ${mainContext.reason}`);
+      return;
+    }
+
+    setStatus(`Reading address for ${state.activeTicketId}`);
     const addressInfo = readAzAddressInfo(state.activeTicketId);
     state.currentAddress = norm(addressInfo.address || '');
     if (!state.currentAddress) {
@@ -3680,20 +4193,41 @@
       log(`Could not read address for AZ ${state.activeTicketId}`);
       return;
     }
+    const addressValidation = validateZillowAddressInfo(addressInfo);
+    if (!addressValidation.ok) {
+      const reason = addressValidation.reason || 'address is not safe for Zillow';
+      setStatus(`Skipped bad address: ${reason}`);
+      log(`Skipped invalid Zillow address for AZ ${state.activeTicketId}: ${reason} | ${state.currentAddress}`);
+      markProcessedTicket(state.activeTicketId, {
+        status: 'skipped-invalid-address',
+        address: state.currentAddress,
+        reason
+      });
+      await closeTicketDrawer();
+      clearJob();
+      state.activeTicketId = '';
+      state.currentAddress = '';
+      state.zillowSummary = '';
+      state.mainReadyTicketId = '';
+      if (isPipelinePage()) requestBootstrapReload(`skipped-invalid-address-${addressInfo.ticketId || 'ticket'}`);
+      return;
+    }
     state.mainReadyTicketId = state.activeTicketId;
 
     job = getJob();
-    if (handleExistingZillowJob(job)) return;
+    if (await handleExistingZillowJob(job)) return;
 
     if (!jobMatchesTicket(job, state.activeTicketId) || ['failed', 'completed'].includes(norm(job?.status || ''))) {
       job = createJob(state.activeTicketId, addressInfo);
+      setStatus(`Opening Zillow for ${state.activeTicketId}`);
       const opened = launchZillowSearch(job);
       if (!opened) {
         if (hasFreshZillowOpenBlock()) {
           setStatus('Waiting for existing Zillow tab');
           return;
         }
-        reloadAgencyZoomForFreshZillowAttempt(job, 'Could not open Zillow tab');
+        continueWithPartialZillowResult(job, 'Could not open Zillow tab');
+        setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
         return;
       }
 
@@ -3704,6 +4238,7 @@
 
     if (norm(job.address) !== state.currentAddress) {
       job = createJob(state.activeTicketId, addressInfo);
+      setStatus(`Address changed; reopening Zillow for ${state.activeTicketId}`);
       const reopened = launchZillowSearch(job);
       if (reopened) {
         setStatus(`Address changed; reopened Zillow for ${state.activeTicketId}`);
@@ -3711,7 +4246,8 @@
       } else if (hasFreshZillowOpenBlock()) {
         setStatus('Waiting for existing Zillow tab');
       } else {
-        reloadAgencyZoomForFreshZillowAttempt(job, 'Could not reopen Zillow tab after address change');
+        continueWithPartialZillowResult(job, 'Could not reopen Zillow tab after address change');
+        setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
       }
       return;
     }
@@ -3719,12 +4255,12 @@
     state.zillowSummary = summarizeResult(job?.result);
 
     if (norm(job.status) === 'result-ready' && isPlainObject(job.result)) {
-      await sleep(CFG.majorStepDelayMs);
+      setStatus(`Applying Zillow data to ${state.activeTicketId}`);
       const applied = await applyZillowResultToTicket(job);
       if (!applied) return;
 
-      await sleep(CFG.majorStepDelayMs);
       try {
+        setStatus(`Sending webhook for ${state.activeTicketId}`);
         const webhookOk = await sendWebhookForJob(job);
         if (!webhookOk) return;
       } catch (error) {
@@ -3739,8 +4275,12 @@
       job.completedAt = nowIso();
       job.updatedAt = nowIso();
       saveJob(job);
+      markProcessedTicket(completedTicketId, {
+        status: 'completed',
+        address: job.address,
+        zillowUrl: firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl)
+      });
 
-      await sleep(CFG.majorStepDelayMs);
       await closeTicketDrawer();
       clearJob();
       state.activeTicketId = '';
@@ -3756,13 +4296,14 @@
     }
 
     if (norm(job.status) === 'failed') {
-      reloadAgencyZoomForFreshZillowAttempt(job, getZillowJobErrorText(job));
+      continueWithPartialZillowResult(job, getZillowJobErrorText(job));
       return;
     }
 
     const ageMs = getJobActiveAgeMs(job);
     if (ageMs > CFG.zillowWaitMs) {
-      reloadAgencyZoomForFreshZillowAttempt(job, 'Zillow scrape timed out');
+      continueWithPartialZillowResult(job, 'Zillow scrape timed out');
+      setStatus(`Continuing with partial Zillow data for ${state.activeTicketId}`);
       return;
     }
 
@@ -3776,7 +4317,7 @@
     const ageMs = getLastZillowOpenAgeMs();
     if (ageMs < CFG.azRefreshIfNoZillowOpenMs) return false;
 
-    const roundedMinutes = Math.max(1, Math.floor(ageMs / 60000));
+    const roundedMinutes = Math.max(5, Math.floor(ageMs / 60000));
     setLastZillowOpenAt();
     setStatus(`Refreshing after ${roundedMinutes}m without Zillow opens`);
     log(`Refreshing AgencyZoom after ${roundedMinutes} minute(s) without opening a Zillow page`);
@@ -3787,7 +4328,6 @@
   async function tick() {
     if (state.destroyed || !isAzOrigin()) return;
     if (isAgencyZoomLoginPage()) return;
-    if (isAgencyZoomMfaHelperPage()) return;
     if (!claimSingletonPageSlot()) return;
     if (state.picker) {
       renderAll();
@@ -3821,9 +4361,13 @@
     }
     state.lastWrongAzUrl = '';
     if (maybeRefreshForIdleZillowOpenGap()) return;
-    if (state.busy) return;
+    if (state.busy) {
+      logProgress('az-busy', `Still working: ${state.lastStatus || 'busy'}`);
+      return;
+    }
 
     state.busy = true;
+    logProgress('az-workflow-tick', `AgencyZoom workflow tick running; current status is ${state.lastStatus || 'starting'}`, 30000);
     renderAll();
 
     try {
@@ -4047,6 +4591,12 @@
       if (!norm(addressInfo.address)) {
         setStatus('Address read failed');
         log(`Could not read address for ${fieldLabel} provider capture`);
+        return;
+      }
+      const addressValidation = validateZillowAddressInfo(addressInfo);
+      if (!addressValidation.ok) {
+        setStatus(`Address unsafe for Zillow: ${addressValidation.reason}`);
+        log(`Could not open Zillow field capture for ${fieldLabel}: ${addressValidation.reason} | ${addressInfo.address}`);
         return;
       }
 
@@ -4367,6 +4917,7 @@
         <div ${UI_ATTR}="1" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-toggle" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#15803d;color:#fff;font-weight:800;cursor:pointer;">START</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-clear-job" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;">CLEAR JOB</button>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-clear-processed" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#9333ea;color:#fff;font-weight:800;cursor:pointer;">CLEAR PROCESSED</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0891b2;color:#fff;font-weight:800;cursor:pointer;">SET FIELD TARGETS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-set-missing-fields" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#0f766e;color:#fff;font-weight:800;cursor:pointer;">SET MISSING FIELDS</button>
           <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-add-field-target" type="button" style="border:0;border-radius:10px;padding:8px 10px;background:#7c3aed;color:#fff;font-weight:800;cursor:pointer;">ADD FIELD TARGET</button>
@@ -4387,7 +4938,11 @@
           <input ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-url" type="text" placeholder="https://..." style="width:100%;border:1px solid #243041;border-radius:10px;background:#020617;color:#e5e7eb;padding:8px 10px;">
           <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;margin-top:5px;">Active: <span ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-webhook-active">(empty)</span></div>
         </div>
-        <textarea ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-logs" readonly style="width:100%;min-height:170px;max-height:240px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
+        <div ${UI_ATTR}="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+          <div ${UI_ATTR}="1" style="opacity:.72;font-size:11px;">Log history (${CFG.maxLogLines} lines)</div>
+          <button ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-copy-logs" type="button" style="border:0;border-radius:8px;padding:6px 9px;background:#334155;color:#fff;font-weight:800;cursor:pointer;font-size:11px;">COPY LOGS</button>
+        </div>
+        <textarea ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-logs" readonly style="width:100%;min-height:220px;max-height:360px;resize:vertical;background:#020617;border:1px solid #243041;border-radius:12px;color:#cbd5e1;padding:10px;white-space:pre;overflow:auto;"></textarea>
       </div>
     `;
 
@@ -4396,6 +4951,7 @@
     state.ui.head = panel.querySelector('#tm-az-zillow-ticket-enricher-head');
     state.ui.toggle = panel.querySelector('#tm-az-zillow-ticket-enricher-toggle');
     state.ui.clearJob = panel.querySelector('#tm-az-zillow-ticket-enricher-clear-job');
+    state.ui.clearProcessed = panel.querySelector('#tm-az-zillow-ticket-enricher-clear-processed');
     state.ui.setFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-fields');
     state.ui.setMissingFields = panel.querySelector('#tm-az-zillow-ticket-enricher-set-missing-fields');
     state.ui.addFieldTarget = panel.querySelector('#tm-az-zillow-ticket-enricher-add-field-target');
@@ -4410,6 +4966,7 @@
     state.ui.tags = panel.querySelector('#tm-az-zillow-ticket-enricher-tags');
     state.ui.webhookUrl = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-url');
     state.ui.activeWebhook = panel.querySelector('#tm-az-zillow-ticket-enricher-webhook-active');
+    state.ui.copyLogs = panel.querySelector('#tm-az-zillow-ticket-enricher-copy-logs');
     state.ui.logs = panel.querySelector('#tm-az-zillow-ticket-enricher-logs');
 
     makeDraggable(panel, state.ui.head);
@@ -4444,6 +5001,7 @@
       log('Stored Zillow job cleared');
       renderAll();
     });
+    state.ui.clearProcessed?.addEventListener('click', clearProcessedTickets);
 
     state.ui.setFields?.addEventListener('click', () => startPicker('fields'));
     state.ui.setMissingFields?.addEventListener('click', startMissingFieldPicker);
@@ -4451,6 +5009,15 @@
     state.ui.resetFields?.addEventListener('click', resetFieldTargets);
     state.ui.setTags?.addEventListener('click', () => startPicker('tags'));
     state.ui.resetTags?.addEventListener('click', resetTagTargets);
+    state.ui.copyLogs?.addEventListener('click', async () => {
+      const copied = await copyLogsToClipboard();
+      if (!state.ui.copyLogs) return;
+      const before = state.ui.copyLogs.textContent;
+      state.ui.copyLogs.textContent = copied ? 'COPIED' : 'COPY FAILED';
+      setTimeout(() => {
+        if (state.ui.copyLogs) state.ui.copyLogs.textContent = before || 'COPY LOGS';
+      }, 1400);
+    });
 
     state.ui.webhookUrl?.addEventListener('input', () => { persistWebhookFromUi(false); });
     state.ui.webhookUrl?.addEventListener('change', () => { persistWebhookFromUi(true); });
@@ -4489,6 +5056,7 @@
     const controlsLocked = state.busy || !!state.picker;
     for (const button of [
       state.ui.clearJob,
+      state.ui.clearProcessed,
       state.ui.setFields,
       state.ui.setMissingFields,
       state.ui.addFieldTarget,
