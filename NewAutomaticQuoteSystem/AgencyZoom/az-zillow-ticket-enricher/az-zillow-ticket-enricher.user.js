@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
-// @name         13 AUTO AgencyZoom Zillow Ticket Enricher
-// @version      1.4.9
+// @namespace    autoflow.az-zillow-ticket-enricher
+// @version      1.4.18
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -277,17 +277,14 @@
     try {
       const saved = localStorage.getItem(LS_KEYS.running);
       if (saved === '1') return true;
-      if (saved === '0') {
-        localStorage.removeItem(LS_KEYS.running);
-      }
+      if (saved === '0') return false;
     } catch {}
     return true;
   }
 
   function saveRunning(on) {
     try {
-      if (on) localStorage.setItem(LS_KEYS.running, '1');
-      else localStorage.removeItem(LS_KEYS.running);
+      localStorage.setItem(LS_KEYS.running, on ? '1' : '0');
     } catch {}
   }
 
@@ -1222,6 +1219,7 @@
 
   function resolveEditableTarget(baseEl) {
     if (!(baseEl instanceof Element)) return null;
+    if (baseEl.matches('input:not([type="hidden"]):not([disabled]):not([readonly]), textarea:not([disabled]):not([readonly]), select:not([disabled]), [contenteditable="true"]')) return baseEl;
     const selectors = [
       'input:not([type="hidden"]):not([disabled])',
       'textarea:not([disabled])',
@@ -1330,7 +1328,7 @@
       return norm(target.selectedOptions?.[0]?.textContent || target.value || '');
     }
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-      return norm(target.value || target.getAttribute('value') || '');
+      return norm(target.value || '');
     }
     if (target.getAttribute('contenteditable') === 'true' || target.getAttribute('role') === 'textbox') {
       return norm(target.innerText || target.textContent || '');
@@ -1491,9 +1489,8 @@
       const committedInlineEditor = await maybeCommitInlineEditor(target);
       await sleep(committedInlineEditor ? 360 : 220);
       if (
-        verifyFieldValue(target, nextValue) ||
-        verifyFieldValue(base, nextValue) ||
-        (committedInlineEditor && (!target.isConnected || !visible(target)))
+        (target.isConnected && visible(target) && verifyFieldValue(target, nextValue)) ||
+        (base.isConnected && visible(base) && verifyFieldValue(base, nextValue))
       ) {
         return { ok: true };
       }
@@ -1506,7 +1503,7 @@
     if (!el) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
     try { el.focus({ preventScroll: true }); } catch {}
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
       try {
         el.dispatchEvent(new MouseEvent(type, {
           bubbles: true,
@@ -4009,6 +4006,7 @@
     let missingTargetCount = 0;
     let failedCount = 0;
     let valueCount = 0;
+    const expectedFields = [];
 
     for (const label of labels) {
       const value = norm(isBaseFieldLabel(label) ? baseFields[label] : customFields[label]);
@@ -4028,6 +4026,7 @@
       setStatus(`Writing Zillow field: ${label}`);
       const result = await setFieldValue(targetRecord, value, label);
       if (result.ok) {
+        expectedFields.push({ label, record: targetRecord, value: result.skipped === 'existing-value' ? result.currentValue : value });
         if (result.skipped === 'existing-value') {
           skippedExistingCount += 1;
           log(`Skipped filled ticket field: ${label} already has ${result.currentValue}; Zillow value was ${value}`);
@@ -4047,11 +4046,13 @@
       const details = [];
       if (failedCount) details.push(`${failedCount} Zillow field write(s) failed`);
       if (missingTargetCount) details.push(`${missingTargetCount} Zillow field target(s) missing`);
-      log(`${details.join('; ')}; continuing to tag replacement`);
+      setStatus(`${details.join('; ')}; completion blocked`);
+      return false;
     }
 
     if (!changed && !skippedExistingCount) {
-      log('No Zillow field values were written or confirmed; continuing to tag replacement');
+      setStatus('No Zillow field values were written or confirmed; completion blocked');
+      return false;
     }
 
     if (changed) {
@@ -4065,6 +4066,31 @@
     } else {
       log('No Zillow field values needed to be applied');
     }
+
+    // Read a fresh drawer: input values and an Update click do not prove persistence.
+    setStatus('Reopening ticket to verify saved Zillow fields');
+    const card = getVisibleStageCards().find((item) => norm(item.getAttribute('data-id')) === norm(job.ticketId));
+    if (!card || !await closeTicketDrawer() || !await openCard(card, job.ticketId) || !await ensureMainTab()) {
+      setStatus('Could not reopen the same ticket to verify saving; completion blocked');
+      return false;
+    }
+    if (!getActivePipelineTicketContext(job.ticketId).ok) {
+      setStatus('Ticket changed during save verification; completion blocked');
+      return false;
+    }
+    const saved = await waitFor(() => expectedFields.every(({ record, value }) => {
+      const target = findSavedElement(record);
+      return target && visible(target) && verifyFieldValue(target, value);
+    }), CFG.mainReadyMs);
+    if (!saved) {
+      const missing = expectedFields.filter(({ record, value }) => {
+        const target = findSavedElement(record);
+        return !target || !visible(target) || !verifyFieldValue(target, value);
+      }).map(({ label }) => label);
+      setStatus(`Saved values did not persist: ${missing.join(', ')}; completion blocked`);
+      return false;
+    }
+    log(`Verified ${expectedFields.length} persisted Zillow field(s) after reopening ticket`);
 
     setStatus('Replacing configured ticket tag');
     const tagsOk = await applyConfiguredTagReplacement();
@@ -4256,8 +4282,21 @@
 
     if (norm(job.status) === 'result-ready' && isPlainObject(job.result)) {
       setStatus(`Applying Zillow data to ${state.activeTicketId}`);
-      const applied = await applyZillowResultToTicket(job);
-      if (!applied) return;
+      let applied = false;
+      try {
+        applied = await applyZillowResultToTicket(job);
+      } catch (error) {
+        setStatus(`Zillow save could not be verified: ${norm(error?.message || error)}`);
+      }
+      if (!applied) {
+        job.status = 'apply-failed';
+        job.lastError = state.lastStatus;
+        saveJob(job);
+        state.running = false;
+        saveRunning(false);
+        log('Stopped for review; ticket was not marked completed and webhook was not sent');
+        return;
+      }
 
       try {
         setStatus(`Sending webhook for ${state.activeTicketId}`);
