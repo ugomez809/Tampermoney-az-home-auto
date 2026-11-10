@@ -114,6 +114,10 @@ test('a failed save stays retryable without webhook or completion', async t => {
     await api.runAzWorkflow();
     return { running: api.state.running, savedRunning: api.loadRunning(), jobStatus: api.getJob().status, webhooks, completions };
   }), { running: true, savedRunning: true, jobStatus: 'result-ready', webhooks: 0, completions: 0 });
+  assert.deepEqual(await p.evaluate(async () => {
+    for (let i = 0; i < 4; i++) await api.tick();
+    return { running: api.state.running, attempts: api.getJob().applyFailureCount, webhooks, completions };
+  }), { running: false, attempts: 3, webhooks: 0, completions: 0 });
 });
 
 test('year and living area survive scraping and fallback without nearby-home contamination', async t => {
@@ -474,4 +478,23 @@ test('late Zillow writes cannot replace the next ticket job', async t => {
     api.saveJob({ jobId: 'OLD', status: 'result-ready', result: { bedrooms: '3' } });
     return api.getJob().jobId;
   }), 'NEW');
+});
+
+
+test('Home Type accepts the same longer dropdown label it selects', async t => {
+  const p = await fixture(t, '<select id="type"><option value="">Choose</option><option value="sf">Single Family Residence</option><option value="condo">Condominium</option></select>');
+  assert.deepEqual(await p.evaluate(async () => {
+    const record = { selector: '#type' };
+    const first = await api.setFieldValue(record, 'Single Family', 'Home Type');
+    const second = await api.setFieldValue(record, 'Single Family', 'Home Type');
+    return [first.ok, second.ok, second.skipped, document.querySelector('#type').value];
+  }), [true, true, 'existing-value', 'sf']);
+});
+
+test('unmatched dropdown values preserve the existing selection', async t => {
+  const p = await fixture(t, '<select id="type"><option value="sf">Single Family Residence</option><option value="condo">Condominium</option></select>');
+  assert.deepEqual(await p.evaluate(async () => {
+    const result = await api.setFieldValue({ selector: '#type' }, 'Manufactured', 'Home Type');
+    return [result.ok, document.querySelector('#type').value];
+  }), [false, 'sf']);
 });

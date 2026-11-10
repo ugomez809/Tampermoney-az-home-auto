@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.29
+// @version      1.4.30
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -1334,13 +1334,22 @@
     else target.value = value;
   }
 
+  function findMatchingSelectOption(target, expected) {
+    const want = lower(expected);
+    const options = Array.from(target.options || []);
+    const exact = options.find(opt => lower(opt.value) === want || lower(opt.textContent) === want);
+    if (exact || !want) return exact || null;
+    const matches = options.filter(opt => norm(opt.value) && norm(opt.textContent)
+      && (lower(opt.textContent).includes(want) || want.includes(lower(opt.textContent))));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   function verifyFieldValue(target, expected) {
     const want = norm(expected);
 
     if (target instanceof HTMLSelectElement) {
-      return lower(target.value) === lower(expected)
-        || lower(target.selectedOptions?.[0]?.textContent || '') === lower(expected)
-        || (!want && !norm(target.value));
+      const match = findMatchingSelectOption(target, expected);
+      return (match && target.selectedOptions?.[0] === match) || (!want && !norm(target.value));
     }
 
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
@@ -1502,13 +1511,10 @@
       }
 
       if (target instanceof HTMLSelectElement) {
-        const options = Array.from(target.options || []);
-        let match = options.find((opt) => lower(opt.textContent || '') === lower(nextValue) || lower(opt.value || '') === lower(nextValue));
-        if (!match && nextValue) {
-          match = options.find((opt) => lower(opt.textContent || '').includes(lower(nextValue)) || lower(nextValue).includes(lower(opt.textContent || '')));
-        }
-        target.value = match ? match.value : '';
-        if (match) match.selected = true;
+        const match = findMatchingSelectOption(target, nextValue);
+        if (!match) return { ok: false, reason: 'no unique dropdown option for ' + nextValue };
+        target.value = match.value;
+        match.selected = true;
         try { target.setAttribute('value', target.value); } catch {}
         dispatchFieldEvents(target);
       } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
@@ -4233,6 +4239,7 @@
     let skippedExistingCount = 0;
     let missingTargetCount = 0;
     let failedCount = 0;
+    const failedLabels = [];
     let valueCount = 0;
     let propertyFieldFailed = false;
     const expectedFields = [];
@@ -4279,6 +4286,7 @@
         }
       } else {
         failedCount += 1;
+        failedLabels.push(label);
         if (label === 'Year Built' || label === 'Square Feet') propertyFieldFailed = true;
         log(`Field failed: ${label} | ${result.reason}`);
       }
@@ -4293,7 +4301,7 @@
 
     if (failedCount || missingTargetCount) {
       const details = [];
-      if (failedCount) details.push(`${failedCount} Zillow field write(s) failed`);
+      if (failedCount) details.push(`Zillow field write(s) failed: ${failedLabels.join(', ')}`);
       if (missingTargetCount) details.push(`${missingTargetCount} Zillow field target(s) missing`);
       setStatus(`${details.join('; ')}; will retry this ticket`);
       return false;
@@ -4509,7 +4517,17 @@
     if (norm(job.status) === 'result-ready' && isPlainObject(job.result)) {
       setStatus(`Applying Zillow data to ${state.activeTicketId}`);
       const applied = await applyZillowResultToTicket(job);
-      if (!applied) return;
+      if (!applied) {
+        if (!state.running) return;
+        job.applyFailureCount = (Number(job.applyFailureCount) || 0) + 1;
+        saveJob(job);
+        if (job.applyFailureCount >= 3) {
+          const reason = state.lastStatus;
+          stopAutomation('Paused after 3 unsuccessful ticket attempts: ' + reason + '. Fix the field target or dropdown option, then click START.');
+        }
+        return;
+      }
+      job.applyFailureCount = 0;
 
       try {
         setStatus(`Sending webhook for ${state.activeTicketId}`);
@@ -5231,6 +5249,8 @@
         return;
       }
 
+      const job = getJob();
+      if (job) { job.applyFailureCount = 0; saveJob(job); }
       setLastZillowOpenAt();
       log('Automation started');
       if (isPipelinePage() && !getOpenTicketInfo().ticketId) {
