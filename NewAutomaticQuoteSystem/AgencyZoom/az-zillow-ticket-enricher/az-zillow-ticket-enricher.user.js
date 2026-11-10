@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.19
+// @version      1.4.20
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -100,12 +100,11 @@
     actionSettleMs: 900,
     updateSettleMs: 1200,
     closeWaitMs: 5000,
-    zillowWaitMs: 30000,
+    zillowWaitMs: 90000,
     zillowCaptchaRefreshMs: 180000,
     zillowFactSettleMs: 9000,
     zillowStaleMs: 15000,
     zillowMaxLaunches: 0,
-    zillowDeadPageMs: 12000,
     zillowSearchFallbackMs: 4000,
     azRefreshIfNoZillowOpenMs: 300000,
     pageSlotTtlMs: 12000,
@@ -2082,12 +2081,15 @@
     const paneReady = !!(pane && (pane.classList.contains('active') || pane.classList.contains('show') || visible(pane)));
     const formReady = !!(form && visible(form));
     const tabReady = !!(tab && tab.classList.contains('active'));
-    return paneReady || formReady || tabReady;
+    return formReady && (paneReady || tabReady);
   }
 
   async function ensureMainTab() {
-    const mainTab = document.querySelector(SEL.mainTab);
-    if (!mainTab || !visible(mainTab)) {
+    const mainTab = await waitFor(() => {
+      const tab = document.querySelector(SEL.mainTab);
+      return tab && visible(tab) ? tab : null;
+    }, CFG.mainReadyMs);
+    if (!mainTab) {
       log('Main tab button not found');
       return false;
     }
@@ -2902,7 +2904,7 @@
       }
 
       const ageMs = getJobActiveAgeMs(job);
-      if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
+      if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowWaitMs) {
         continueWithPartialZillowResult(job, 'Zillow opened but no property data ever loaded');
         setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
         return true;
@@ -3445,7 +3447,7 @@
         return;
       }
 
-      if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowDeadPageMs) {
+      if (!cardResult && !hasZillowJobProgress(job) && getJobActiveAgeMs(job) >= CFG.zillowWaitMs) {
         const reason = `Zillow opened but no usable property page appeared (${firstNonEmpty(norm(document.title || ''), location.pathname || 'unknown page')})`;
         continueWithPartialZillowResult(job, reason, { zillowUrl: stripZillowJobHashFromUrl(location.href) });
         log(`${reason} for ${norm(job.ticketId || '?')}`);
@@ -4101,6 +4103,11 @@
       'Square Feet': normalizeSquareFeet(job?.result?.squareFeet)
     };
     const customFields = getCustomFieldValueMap(job?.result);
+    if (!Object.entries(baseFields).some(([label, value]) => label !== 'Zillow URL' && norm(value))
+        && !Object.values(customFields).some((value) => norm(value))) {
+      setStatus('Zillow returned no property facts; completion blocked. Clear job and retry after Zillow loads');
+      return false;
+    }
     const labels = [
       ...FIELD_ORDER,
       ...getSortedCustomFieldDefs()

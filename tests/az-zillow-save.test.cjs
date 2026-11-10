@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     state.running = true;
     ${extra}
@@ -139,4 +139,39 @@ test('known AgencyZoom fields are available without overwriting saved targets', 
   assert.deepEqual(await p.evaluate(() => {
     const targets = api.getFieldTargets(); return [targets['Year Built'].selector, !!document.querySelector(targets['Square Feet']?.selector)];
   }), ['#my-year', true]);
+});
+
+test('slow Zillow startup remains searching at 40 seconds', async t => {
+  const p = await fixture(t, '<main></main>', `
+    state.activeTicketId = 'TEST';
+    window.job = { ticketId: 'TEST', jobId: 'slow', status: 'searching', searchOpenedAt: new Date(Date.now() - 40000).toISOString(), launchCount: 1 };
+  `);
+  assert.deepEqual(await p.evaluate(async () => {
+    await api.handleExistingZillowJob(job); return { status: job.status, result: job.result || null };
+  }), { status: 'searching', result: null });
+});
+
+test('Main tab waits for the asynchronously inserted drawer form', async t => {
+  const p = await fixture(t, '<main></main>');
+  assert.equal(await p.evaluate(async () => {
+    setTimeout(() => { document.body.innerHTML = '<a href="#tabDetail" data-toggle="tab" class="active">Main</a><div id="tabDetail" class="active"></div>'; }, 100);
+    setTimeout(() => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; }, 350);
+    const ready = await api.ensureMainTab();
+    return ready && !!document.querySelector('#detailDockform');
+  }), true);
+});
+
+test('a URL-only Zillow result cannot update or complete a ticket', async t => {
+  const p = await fixture(t, '<input id="url" value="https://www.zillow.com/homes/example/">', `
+    getActivePipelineTicketContext = () => ({ ok: true });
+    storage[GM_KEYS.fieldTargets] = { 'Zillow URL': { selector: '#url' } };
+    getVisibleStageCards = () => [{ getAttribute: () => 'TEST' }];
+    closeTicketDrawer = async () => true; openCard = async () => true; ensureMainTab = async () => true;
+    window.tags = 0; window.updates = 0;
+    clickUpdateButton = async () => { updates++; return true; };
+    applyConfiguredTagReplacement = async () => { tags++; return true; };
+  `);
+  assert.deepEqual(await p.evaluate(async () => ({
+    ok: await api.applyZillowResultToTicket({ ticketId: 'TEST', result: { zillowUrl: 'https://www.zillow.com/homes/example/' } }), tags, updates,
+  })), { ok: false, tags: 0, updates: 0 });
 });
