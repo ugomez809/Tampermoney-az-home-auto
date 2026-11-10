@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { tick, init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { bindJobNotifications, saveJob, closeCurrentTabSoon, closeFinishedZillowTab, tick, init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     CFG.mainReadyMs = 800;
     state.running = true;
@@ -186,7 +186,7 @@ for (const origin of ['https://app.agencyzoom.com/referral/pipeline', 'https://w
     const p = await fixture(t, '<main></main>', `
       buildUi = bindUi = restorePanelPos = ensureHoverBox = syncWebhookUi = renderAll = tick = zillowTick = () => {};
       state.running = false; saveRunning(false);
-      saveJob({ jobId: 'TEST', ticketId: 'TEST', status: 'result-ready', result: { bedrooms: '3' } });
+      storage[GM_KEYS.job] = { jobId: 'TEST', ticketId: 'TEST', status: 'result-ready', result: { bedrooms: '3' } };
     `, origin);
     const result = await p.evaluate(() => {
       api.init();
@@ -258,7 +258,7 @@ test('an overdue listing result is not replaced with empty data', async t => {
 test('late Zillow startup does not delete the job it needs to answer', async t => {
   const p = await fixture(t, '<main></main>', `
     zillowTick = () => {};
-    saveJob({ jobId: 'LATE', ticketId: 'TEST', status: 'searching', searchOpenedAt: new Date(Date.now() - 120000).toISOString() });
+    storage[GM_KEYS.job] = { jobId: 'LATE', ticketId: 'TEST', status: 'searching', searchOpenedAt: new Date(Date.now() - 120000).toISOString() };
   `, 'https://www.zillow.com/homedetails/example/123_zpid/');
   assert.equal(await p.evaluate(() => { api.init(); const id = api.getJob()?.jobId; api.cleanup(); return id; }), 'LATE');
 });
@@ -283,7 +283,7 @@ test('AgencyZoom closes its finished Zillow tab using the opener handle', async 
   assert.equal(await p.evaluate(async () => {
     const job = { jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' };
     api.launchZillowSearch(job);
-    storage.tm_az_zillow_ticket_enricher_job_v4 = { ...job, status: 'result-ready' };
+    storage.tm_az_zillow_ticket_enricher_job_v4 = { ...job, status: 'result-ready', result: { bedrooms: '3' } };
     await api.tick(); await api.tick();
     return closes;
   }), 1);
@@ -371,4 +371,107 @@ test('field setup can still open Main while automation is already stopped', asyn
     document.querySelector('a').onclick = () => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; };
   `);
   assert.equal(await p.evaluate(() => api.ensureMainTab()), true);
+});
+
+
+for (const mode of ['silent', 'heartbeat', 'progress', 'retried', 'close-failed']) {
+  test('unresponsive Zillow recovery: ' + mode, async t => {
+    const p = await fixture(t, '<main></main>', `
+      state.activeTicketId = 'TEST';
+      window.actions = [];
+      window.GM_openInTab = () => { actions.push('open'); return { close() { actions.push('close'); ${mode === 'close-failed' ? "throw Error('blocked');" : ''} } }; };
+    `);
+    const result = await p.evaluate(async mode => {
+      const job = { jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' };
+      api.launchZillowSearch(job);
+      job.searchOpenedAt = job.lastLaunchAt = new Date(Date.now() - 91000).toISOString();
+      if (mode === 'heartbeat') storage.tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1 = { ts: Date.now() };
+      if (mode === 'progress') job.listingSeenAt = new Date().toISOString();
+      if (mode === 'retried') job.launchCount = 2;
+      storage.tm_az_zillow_ticket_enricher_job_v4 = job;
+      await api.handleExistingZillowJob(job);
+      return { actions, status: api.getJob().status, result: api.getJob().result };
+    }, mode);
+    assert.deepEqual(result.actions, mode === 'silent' ? ['open','close','open'] : mode === 'close-failed' ? ['open','close'] : ['open']);
+    assert.equal(result.status, 'searching');
+    assert.equal(result.result, null);
+  });
+}
+
+
+const notificationMocks = `
+  window.listeners = {}; window.removed = [];
+  window.GM_addValueChangeListener = (key, fn) => { listeners[key] = fn; return key; };
+  window.GM_removeValueChangeListener = key => { removed.push(key); delete listeners[key]; };
+`;
+
+test('remote result is acknowledged and wakes AgencyZoom without waiting for a timer', async t => {
+  const p = await fixture(t, '<main></main>', notificationMocks + `
+    window.runs = 0;
+    runAzWorkflow = async () => { runs++; };
+    bindJobNotifications();
+  `);
+  assert.deepEqual(await p.evaluate(async () => {
+    const key = 'tm_az_zillow_ticket_enricher_job_v4';
+    const job = { jobId: 'TEST', ticketId: 'TEST', status: 'result-ready', result: { bedrooms: '3' } };
+    storage[key] = job;
+    listeners[key](key, null, job, true);
+    await Promise.resolve();
+    return [runs, storage.tm_az_zillow_ticket_enricher_result_receipt_v1];
+  }), [1, 'TEST']);
+  assert.equal(await p.evaluate(() => { api.cleanup(); return Object.keys(listeners).length; }), 0);
+});
+
+test('old job notifications cannot acknowledge or run a different ticket', async t => {
+  const p = await fixture(t, '<main></main>', notificationMocks + `
+    window.runs = 0; runAzWorkflow = async () => { runs++; }; bindJobNotifications();
+  `);
+  assert.deepEqual(await p.evaluate(() => {
+    const key = 'tm_az_zillow_ticket_enricher_job_v4';
+    storage[key] = { jobId: 'NEW', status: 'searching' };
+    listeners[key](key, null, { jobId: 'OLD', status: 'result-ready', result: {} }, true);
+    return [runs, storage.tm_az_zillow_ticket_enricher_result_receipt_v1 || null];
+  }), [0, null]);
+});
+
+for (const complete of [true, false]) {
+  test('stored listing facts only advance when complete: ' + complete, async t => {
+    const p = await fixture(t, '<main></main>');
+    assert.equal(await p.evaluate(complete => {
+      storage.tm_az_zillow_ticket_enricher_job_v4 = {
+        jobId: 'TEST', status: 'searching', listingSeenAt: new Date(Date.now()-10000).toISOString(),
+        result: { zillowUrl: 'https://www.zillow.com/homedetails/example/123_zpid/', bedrooms: '3', bathrooms: '2', homeType: 'Single Family', yearBuilt: '1983', squareFeet: complete ? '1677' : '' }
+      };
+      api.closeFinishedZillowTab();
+      return api.getJob().status;
+    }, complete), complete ? 'result-ready' : 'searching');
+  });
+}
+
+test('Zillow reports startup and waits for receipt before scheduling its close', async t => {
+  const p = await fixture(t, '<main></main>', notificationMocks + `
+    storage[GM_KEYS.job] = { jobId: 'TEST', ticketId: 'TEST', status: 'searching' };
+    bindJobNotifications();
+    window.closeTimers = 0; window.setTimeout = () => { closeTimers++; };
+  `, 'https://www.zillow.com/homedetails/example/123_zpid/');
+  assert.deepEqual(await p.evaluate(() => {
+    const job = api.getJob();
+    const started = !!job.workerStartedAt;
+    api.saveJob({ ...job, status: 'result-ready', result: { bedrooms: '3' } });
+    api.closeCurrentTabSoon();
+    const before = closeTimers;
+    const key = 'tm_az_zillow_ticket_enricher_result_receipt_v1';
+    storage[key] = 'TEST'; listeners[key](key, null, 'TEST', true);
+    api.saveJob({ ...job, status: 'searching' });
+    return [started, before, closeTimers, api.getJob().status];
+  }), [true, 0, 4, 'result-ready']);
+});
+
+test('late Zillow writes cannot replace the next ticket job', async t => {
+  const p = await fixture(t, '<main></main>', '', 'https://www.zillow.com/homedetails/example/123_zpid/');
+  assert.equal(await p.evaluate(() => {
+    storage.tm_az_zillow_ticket_enricher_job_v4 = { jobId: 'NEW', status: 'searching' };
+    api.saveJob({ jobId: 'OLD', status: 'result-ready', result: { bedrooms: '3' } });
+    return api.getJob().jobId;
+  }), 'NEW');
 });

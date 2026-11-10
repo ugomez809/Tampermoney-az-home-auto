@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.28
+// @version      1.4.29
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -12,6 +12,8 @@
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
 // @grant        GM_deleteValue
 // @grant        window.close
 // @grant        GM_openInTab
@@ -35,6 +37,7 @@
 
   const GM_KEYS = {
     job: 'tm_az_zillow_ticket_enricher_job_v4',
+    resultReceipt: 'tm_az_zillow_ticket_enricher_result_receipt_v1',
     fieldTargets: 'tm_az_zillow_ticket_enricher_field_targets_v1',
     tagTargets: 'tm_az_zillow_ticket_enricher_tag_targets_v1',
     customFields: 'tm_az_zillow_ticket_enricher_custom_fields_v1',
@@ -153,6 +156,8 @@
 
   const state = {
     destroyed: false,
+    jobListeners: [],
+    pendingReceiptJobId: '',
     tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
@@ -215,6 +220,7 @@
       renderAll();
     }
 
+    bindJobNotifications();
     log(`Loaded v${VERSION} on ${location.hostname}`);
     if (legacyJobStateCleared) {
       log('Cleared legacy Zillow job state');
@@ -243,6 +249,8 @@
     if (state.destroyed) return;
     state.destroyed = true;
     try { clearInterval(state.tickTimer); } catch {}
+    for (const id of state.jobListeners) { try { GM_removeValueChangeListener(id); } catch {} }
+    state.jobListeners = [];
     stopPicker('', false);
     try { state.hoverBox?.remove(); } catch {}
     try { state.providerBanner?.remove(); } catch {}
@@ -666,7 +674,34 @@
 
   function saveJob(job) {
     if (!isPlainObject(job)) return;
+    if (isZillowOrigin()) {
+      const current = getJob();
+      if (!current || current.jobId !== job.jobId) return;
+      if (['result-ready', 'completed'].includes(current.status)) return;
+      if (job.status === 'result-ready') state.pendingReceiptJobId = job.jobId;
+    }
     writeGM(GM_KEYS.job, deepClone(job));
+  }
+
+  function bindJobNotifications() {
+    if (typeof GM_addValueChangeListener !== 'function') return;
+    state.jobListeners.push(GM_addValueChangeListener(GM_KEYS.job, (_key, _old, job, remote) => {
+      if (!remote || state.destroyed || !isAzOrigin() || !job?.jobId || getJob()?.jobId !== job.jobId) return;
+      if (job.workerStartedAt) logProgress('zillow-started-' + job.jobId, 'Zillow worker started for ' + job.ticketId);
+      if (job.result) logProgress('zillow-facts-' + job.jobId, 'Zillow facts received for ' + job.ticketId);
+      closeFinishedZillowTab();
+      if (state.running && !state.busy) void tick();
+    }));
+    state.jobListeners.push(GM_addValueChangeListener(GM_KEYS.resultReceipt, (_key, _old, jobId) => {
+      if (!state.destroyed && isZillowOrigin() && jobId === state.pendingReceiptJobId) closeCurrentTabSoon();
+    }));
+    if (isZillowOrigin()) {
+      const job = getJob();
+      if (job?.jobId && currentZillowTabMatchesJob(job) && ['pending', 'searching'].includes(job.status)) {
+        job.workerStartedAt = nowIso();
+        saveJob(job);
+      }
+    }
   }
 
   function clearJob() {
@@ -2713,6 +2748,8 @@
   }
 
   function closeCurrentTabSoon() {
+    if (state.pendingReceiptJobId && readGM(GM_KEYS.resultReceipt, '') !== state.pendingReceiptJobId
+      && getJob()?.jobId === state.pendingReceiptJobId) return;
     clearZillowTabHeartbeatForThisTab();
     for (const delay of [250, 1200, 2500, 5000]) {
       setTimeout(() => {
@@ -2843,9 +2880,21 @@
 
   function closeFinishedZillowTab() {
     const job = getJob();
-    if (job?.jobId === state.zillowTabJobId && ['result-ready', 'completed'].includes(job.status)) {
-      closeOwnedZillowTab();
+    if (job?.status === 'searching' && job.listingSeenAt && isPlainObject(job.result)
+      && !job.result.notFound && getIsoAgeMs(job.listingSeenAt) >= CFG.zillowMinListingMs
+      && getMissingRequiredZillowFactLabels(job.result).length === 0) {
+      job.status = 'result-ready';
+      job.resultReadyAt = nowIso();
+      job.updatedAt = nowIso();
+      saveJob(job);
     }
+    if (!job?.jobId || !['result-ready', 'completed'].includes(job.status)) return;
+    if (job.status === 'result-ready' && !isPlainObject(job.result)) return;
+    if (readGM(GM_KEYS.resultReceipt, '') !== job.jobId) {
+      writeGM(GM_KEYS.resultReceipt, job.jobId);
+      log('Confirmed receipt of Zillow result for ' + job.ticketId);
+    }
+    if (job.jobId === state.zillowTabJobId) closeOwnedZillowTab();
   }
 
   function launchZillowSearch(job) {
@@ -2868,6 +2917,7 @@
     job.listingNavigatedAt = '';
     job.listingSeenAt = '';
     job.resultReadyAt = '';
+    job.workerStartedAt = '';
     job.result = null;
     saveJob(job);
 
@@ -2940,6 +2990,19 @@
       }
 
       const ageMs = getJobActiveAgeMs(job);
+      if (!hasZillowJobProgress(job) && ageMs >= 90000 && getJobLaunchCount(job) < 2
+        && !getFreshZillowTabHeartbeat() && state.zillowTab && state.zillowTabJobId === job.jobId) {
+        // Retry one silent launch without leaving another Zillow window behind.
+        const current = getJob();
+        if (current?.jobId !== job.jobId || current.status !== 'searching' || hasZillowJobProgress(current)) return true;
+        closeOwnedZillowTab();
+        if (state.zillowTab) return true;
+        clearZillowOpenSlot();
+        log('Zillow has not responded for 90 seconds; retrying once in the background');
+        launchZillowSearch(current);
+        setStatus('Retrying unresponsive Zillow window; ticket unchanged');
+        return true;
+      }
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
         setStatus(`Still waiting for Zillow response for ${state.activeTicketId}; ticket unchanged`);
         return true;
