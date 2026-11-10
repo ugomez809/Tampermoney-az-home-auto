@@ -160,16 +160,16 @@ test(`Main tab waits for the asynchronously inserted drawer form (${delay}ms)`, 
 
 
 
-test('Zillow opens in the foreground through Tampermonkey', async t => {
+test('Zillow opens in the background through Tampermonkey', async t => {
   const p = await fixture(t, '<main></main>');
   assert.deepEqual(await p.evaluate(() => {
     window.GM_openInTab = (url, options) => { window.openOptions = options; };
     const ok = api.launchZillowSearch({ jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
     return { ok, active: openOptions.active };
-  }), { ok: true, active: true });
+  }), { ok: true, active: false });
 });
 
-test('fallback Zillow window keeps focus instead of returning to AgencyZoom', async t => {
+test('fallback Zillow launch does not force focus', async t => {
   const p = await fixture(t, '<main></main>');
   assert.deepEqual(await p.evaluate(async () => {
     let focused = 0, blurred = 0, parentFocused = 0;
@@ -178,7 +178,7 @@ test('fallback Zillow window keeps focus instead of returning to AgencyZoom', as
     const ok = api.launchZillowSearch({ jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
     await new Promise(resolve => setTimeout(resolve, 300));
     return { ok, focused, blurred, parentFocused };
-  }), { ok: true, focused: 1, blurred: 0, parentFocused: 0 });
+  }), { ok: true, focused: 0, blurred: 0, parentFocused: 0 });
 });
 
 for (const origin of ['https://app.agencyzoom.com/referral/pipeline', 'https://www.zillow.com/homedetails/example/123_zpid/']) {
@@ -230,4 +230,35 @@ test('a delayed saved field is awaited before writing', async t => {
     const result = await api.setFieldValue({ selector: '#late' }, '1986');
     return { ok: result.ok, value: document.querySelector('#late')?.value };
   }), { ok: true, value: '1986' });
+});
+
+for (const age of [61000, 91000, 300000]) {
+  test(`no response after ${age}ms keeps the Zillow job waiting, not NotFound`, async t => {
+    const p = await fixture(t, '<main></main>', `
+      state.activeTicketId = 'TEST';
+      window.job = { ticketId: 'TEST', jobId: 'TEST', status: 'searching', launchCount: 1, searchOpenedAt: new Date(Date.now() - ${age}).toISOString() };
+    `);
+    assert.deepEqual(await p.evaluate(async () => {
+      await api.handleExistingZillowJob(job);
+      return { status: job.status, result: job.result || null };
+    }), { status: 'searching', result: null });
+  });
+}
+
+test('an overdue listing result is not replaced with empty data', async t => {
+  const p = await fixture(t, '<main></main>', `
+    state.activeTicketId = 'TEST';
+    window.job = { ticketId: 'TEST', jobId: 'TEST', status: 'searching', launchCount: 1, listingSeenAt: new Date().toISOString(), searchOpenedAt: new Date(Date.now() - 120000).toISOString() };
+  `);
+  assert.deepEqual(await p.evaluate(async () => {
+    await api.handleExistingZillowJob(job); return [job.status, job.result || null];
+  }), ['searching', null]);
+});
+
+test('late Zillow startup does not delete the job it needs to answer', async t => {
+  const p = await fixture(t, '<main></main>', `
+    zillowTick = () => {};
+    saveJob({ jobId: 'LATE', ticketId: 'TEST', status: 'searching', searchOpenedAt: new Date(Date.now() - 120000).toISOString() });
+  `, 'https://www.zillow.com/homedetails/example/123_zpid/');
+  assert.equal(await p.evaluate(() => { api.init(); const id = api.getJob()?.jobId; api.cleanup(); return id; }), 'LATE');
 });

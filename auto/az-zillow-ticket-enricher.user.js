@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.25
+// @version      1.4.26
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -200,7 +200,7 @@
     const resumedAfterReload = consumeBootstrapReloadToken();
     const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
     if (isAzOrigin()) { state.running = true; saveRunning(true); }
-    const staleJobReset = resetStaleActiveJobOnBoot();
+    const staleJobReset = isAzOrigin() ? resetStaleActiveJobOnBoot() : '';
     if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
     if (isAzOrigin() && !getLastZillowOpenAt()) setLastZillowOpenAt();
 
@@ -2841,7 +2841,7 @@
 
     try {
       if (typeof GM_openInTab === 'function') {
-        GM_openInTab(launchUrl, { active: true, insert: true, setParent: true });
+        GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
         setLastZillowOpenAt(job.searchOpenedAt);
         return true;
       }
@@ -2850,7 +2850,6 @@
     try {
       const opened = window.open(launchUrl, '_blank');
       if (opened) {
-        try { opened.focus(); } catch {}
         setLastZillowOpenAt(job.searchOpenedAt);
       }
       if (opened) return true;
@@ -2907,8 +2906,7 @@
 
       const ageMs = getJobActiveAgeMs(job);
       if (!hasZillowJobProgress(job) && ageMs >= CFG.zillowDeadPageMs) {
-        continueWithZillowNotFoundResult(job, 'Zillow opened but no property data ever loaded');
-        setStatus(`Continuing without Zillow data for ${state.activeTicketId}`);
+        setStatus(`Still waiting for Zillow response for ${state.activeTicketId}; ticket unchanged`);
         return true;
       }
 
@@ -2927,8 +2925,8 @@
       }
 
       if (ageMs > CFG.zillowWaitMs) {
-        continueWithPartialZillowResult(job, 'Zillow scrape timed out');
-        setStatus(`Continuing with partial Zillow data for ${state.activeTicketId}`);
+        // A timeout is not evidence that the property was not found.
+        setStatus(`Still waiting for Zillow result for ${state.activeTicketId}; ticket unchanged`);
         return true;
       }
 
@@ -4453,8 +4451,8 @@
 
     const ageMs = getJobActiveAgeMs(job);
     if (ageMs > CFG.zillowWaitMs) {
-      continueWithPartialZillowResult(job, 'Zillow scrape timed out');
-      setStatus(`Continuing with partial Zillow data for ${state.activeTicketId}`);
+      // A timeout is not evidence that the property was not found.
+      setStatus(`Still waiting for Zillow result for ${state.activeTicketId}; ticket unchanged`);
       return;
     }
 
