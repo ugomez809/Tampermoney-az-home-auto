@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.30
+// @version      1.4.31
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -1247,6 +1247,33 @@
     return visibleNodes[0] || nodes[0] || null;
   }
 
+  function findTicketField(record, label) {
+    const wanted = canonicalFieldLabel(label);
+    const matches = new Set();
+    let hasVisibleLabels = false;
+    const controls = 'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled])';
+    if (wanted) for (const form of document.querySelectorAll(SEL.detailForm)) {
+      for (const fieldLabel of form.querySelectorAll('label')) {
+        if (!visible(fieldLabel)) continue;
+        hasVisibleLabels = true;
+        if (lower(canonicalFieldLabel(fieldLabel.textContent)) !== lower(wanted)) continue;
+        const linked = fieldLabel.control;
+        if (linked && form.contains(linked) && linked.matches(controls) && visible(linked)) {
+          matches.add(linked);
+          continue;
+        }
+        // Some AgencyZoom numeric fields have a label's for attribute but no input id.
+        const group = fieldLabel.closest('.form-group, .az-form-group');
+        const candidates = Array.from(group?.querySelectorAll(controls) || []).filter(visible);
+        if (candidates.length === 1) matches.add(candidates[0]);
+      }
+    }
+    if (matches.size || (hasVisibleLabels && isBaseFieldLabel(wanted))) {
+      return matches.size === 1 ? [...matches][0] : null;
+    }
+    return findSavedElement(record);
+  }
+
   function resolveEditableTarget(baseEl) {
     if (!(baseEl instanceof Element)) return null;
     const selectors = [
@@ -1476,7 +1503,7 @@
 
   async function setFieldValue(record, value, label = '') {
     let base = await waitFor(() => {
-      const el = findSavedElement(record);
+      const el = findTicketField(record, label);
       return el && visible(el) ? el : null;
     }, CFG.mainReadyMs);
     if (!base) return { ok: false, reason: 'saved field target not found' };
@@ -1484,7 +1511,7 @@
     const nextValue = norm(value);
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-      base = findSavedElement(record);
+      base = findTicketField(record, label);
       if (!base || !base.isConnected || !visible(base)) return { ok: false, reason: 'field disappeared during write' };
       try { strongClick(base); } catch {}
       await sleep(180);
@@ -4260,8 +4287,8 @@
       }
       valueCount += 1;
 
-      const targetRecord = targets[label];
-      if (!isPlainObject(targetRecord) || !norm(targetRecord.selector)) {
+      const targetRecord = targets[label] || {};
+      if ((!isPlainObject(targetRecord) || !norm(targetRecord.selector)) && !findTicketField(targetRecord, label)) {
         missingTargetCount += 1;
         if (label === 'Year Built' || label === 'Square Feet') propertyFieldFailed = true;
         log(`Skipped unsaved field target: ${label}`);
@@ -4335,13 +4362,13 @@
       setStatus('Ticket changed during save verification; completion blocked');
       return false;
     }
-    const saved = await waitFor(() => expectedFields.every(({ record, value }) => {
-      const target = findSavedElement(record);
+    const saved = await waitFor(() => expectedFields.every(({ label, record, value }) => {
+      const target = findTicketField(record, label);
       return target && visible(target) && verifyFieldValue(target, value);
     }), CFG.mainReadyMs);
     if (!saved) {
-      const missing = expectedFields.filter(({ record, value }) => {
-        const target = findSavedElement(record);
+      const missing = expectedFields.filter(({ label, record, value }) => {
+        const target = findTicketField(record, label);
         return !target || !visible(target) || !verifyFieldValue(target, value);
       }).map(({ label }) => label);
       setStatus(`Saved values did not persist: ${missing.join(', ')}; completion blocked`);

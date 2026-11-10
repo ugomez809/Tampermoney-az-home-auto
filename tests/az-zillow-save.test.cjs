@@ -498,3 +498,54 @@ test('unmatched dropdown values preserve the existing selection', async t => {
     return [result.ok, document.querySelector('#type').value];
   }), [false, 'sf']);
 });
+
+
+const azMainFields = '<form id="detailDockform"><div class="row"><select id="unrelated"><option value="keep">Keep</option></select><div class="az-form-group field-customfields-cf55246"><label for="customfields-cf55246">Home Type</label><input type="text" id="customfields-cf55246" name="customFields[cf55246]"></div><div class="form-group"><label for="customfields-cf48147">Home Sqft</label><input type="number" name="customFields[cf48147]"></div><div class="form-group"><label for="customfields-cf48146">Year Built</label><input type="number" name="customFields[cf48146]"></div></div></form>';
+
+for (const selector of ['#unrelated', '.row', '#missing-old-target']) {
+  test('AgencyZoom label finds Home Type despite saved target ' + selector, async t => {
+    const p = await fixture(t, azMainFields);
+    assert.deepEqual(await p.evaluate(async selector => {
+      const result = await api.setFieldValue({ selector }, 'Single Family', 'Home Type');
+      return [result.ok, document.querySelector('[name="customFields[cf55246]"]').value, document.querySelector('#unrelated').value];
+    }, selector), [true, 'Single Family', 'keep']);
+  });
+}
+
+test('AgencyZoom labels resolve numeric custom fields even without matching input IDs', async t => {
+  const p = await fixture(t, azMainFields);
+  assert.deepEqual(await p.evaluate(async () => {
+    const year = await api.setFieldValue({ selector: '#unrelated' }, '2005', 'Year Built');
+    const area = await api.setFieldValue({ selector: '#unrelated' }, '2064', 'Square Feet');
+    return [year.ok, area.ok, document.querySelector('[name="customFields[cf48146]"]').value, document.querySelector('[name="customFields[cf48147]"]').value];
+  }), [true, true, '2005', '2064']);
+});
+
+
+test('label-based fields save and verify after reopening with stale saved targets', async t => {
+  const html = azMainFields.replace('</form>', '<div class="form-group"><label for="url">Zillow URL</label><input id="url"></div><div class="form-group"><label for="beds">Bedrooms</label><input id="beds"></div><div class="form-group"><label for="baths">Bathrooms</label><input id="baths"></div></form>');
+  const p = await fixture(t, html, `
+    storage[GM_KEYS.fieldTargets] = Object.fromEntries(FIELD_ORDER.map(label => [label, { selector: '#unrelated' }]));
+    getActivePipelineTicketContext = () => ({ ok: true });
+    getVisibleStageCards = () => [{ getAttribute: () => 'TEST' }];
+    window.tags = 0; window.updates = 0; window.saved = [];
+    const original = document.body.innerHTML;
+    clickUpdateButton = async () => { updates++; saved = [...document.querySelectorAll('input')].map(el => el.value); return true; };
+    closeTicketDrawer = async () => { document.body.innerHTML = ''; return true; };
+    openCard = async () => { document.body.innerHTML = original; [...document.querySelectorAll('input')].forEach((el,i) => { el.value = saved[i]; }); return true; };
+    ensureMainTab = async () => true;
+    applyConfiguredTagReplacement = async () => { tags++; return true; };
+  `);
+  assert.deepEqual(await p.evaluate(async () => {
+    const ok = await api.applyZillowResultToTicket({ ticketId: 'TEST', result: { zillowUrl: 'https://www.zillow.com/homedetails/example/123_zpid/', bedrooms: '4', bathrooms: '2', homeType: 'Single Family', yearBuilt: '2005', squareFeet: '2064' } });
+    return { ok, tags, updates, type: document.querySelector('[name="customFields[cf55246]"]').value, unrelated: document.querySelector('#unrelated').value };
+  }), { ok: true, tags: 1, updates: 1, type: 'Single Family', unrelated: 'keep' });
+});
+
+test('duplicate visible field labels cannot redirect a write to a saved unrelated target', async t => {
+  const p = await fixture(t, azMainFields.replace('</form>', '<div class="form-group"><label for="second-type">Home Type</label><input id="second-type"></div></form>'));
+  assert.deepEqual(await p.evaluate(async () => {
+    const result = await api.setFieldValue({ selector: '#unrelated' }, 'Single Family', 'Home Type');
+    return [result.ok, document.querySelector('#unrelated').value, document.querySelector('#second-type').value];
+  }), [false, 'keep', '']);
+});
