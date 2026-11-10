@@ -328,3 +328,47 @@ test('idle refresh closes its stale Zillow tab before reloading', async t => {
     await api.tick(); return actions;
   }), ['close', 'reload']);
 });
+
+
+test('Main activation invokes the page click handler even when Bootstrap is available', async t => {
+  const p = await fixture(t, '<a href="#tabDetail" data-toggle="tab">Main</a><div id="tabDetail"></div>', `
+    document.querySelector('a').onclick = () => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; };
+    window.jQuery = () => ({ tab() {} });
+  `);
+  assert.equal(await p.evaluate(() => api.ensureMainTab()), true);
+});
+
+test('Main readiness retries the replacement control after a missed first activation', async t => {
+  const p = await fixture(t, '<a href="#tabDetail" data-toggle="tab">Main</a><div id="tabDetail"></div>', `
+    CFG.mainReadyMs = 7000;
+    window.clicks = 0;
+    window.jQuery = () => ({ tab() {} });
+    document.querySelector('a').onclick = () => {
+      clicks++;
+      setTimeout(() => {
+        const old = document.querySelector('a');
+        const fresh = old.cloneNode(true);
+        fresh.onclick = () => { clicks++; document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; };
+        old.replaceWith(fresh);
+      }, 100);
+    };
+  `);
+  assert.deepEqual(await p.evaluate(async () => [await api.ensureMainTab(), clicks]), [true, 2]);
+});
+
+
+test('stopping while Main loads prevents verification from continuing', async t => {
+  const p = await fixture(t, '<a href="#tabDetail" data-toggle="tab">Main</a><div id="tabDetail"></div>', `
+    document.querySelector('a').onclick = () => { setTimeout(() => { state.running = false; }, 100); };
+  `);
+  assert.equal(await p.evaluate(() => api.ensureMainTab()), false);
+});
+
+
+test('field setup can still open Main while automation is already stopped', async t => {
+  const p = await fixture(t, '<a href="#tabDetail" data-toggle="tab">Main</a><div id="tabDetail"></div>', `
+    state.running = false;
+    document.querySelector('a').onclick = () => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; };
+  `);
+  assert.equal(await p.evaluate(() => api.ensureMainTab()), true);
+});

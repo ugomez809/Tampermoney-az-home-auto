@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.27
+// @version      1.4.28
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -1521,6 +1521,8 @@
 
   function showBootstrapTab(anchor) {
     if (!anchor) return false;
+    // AgencyZoom loads the drawer form from its click handler, not just Bootstrap tab.show.
+    strongClick(anchor);
     try {
       const $ = window.jQuery;
       if ($ && typeof $(anchor).tab === 'function') {
@@ -1528,8 +1530,6 @@
         return true;
       }
     } catch {}
-
-    strongClick(anchor);
 
     try {
       const href = anchor.getAttribute('href');
@@ -2077,12 +2077,24 @@
   }
 
   async function ensureMainTab() {
+    const wasRunning = state.running;
     const mainTab = await waitFor(() => findVisibleElements(SEL.mainTab)[0], CFG.mainReadyMs);
     if (!mainTab) { log('Main tab button not found'); return false; }
     if (isMainTabReady()) return true;
     showBootstrapTab(mainTab);
     log('Clicked: Main tab');
-    const ready = await waitFor(isMainTabReady, CFG.mainReadyMs);
+    let lastClickAt = Date.now();
+    const ready = await waitFor(() => {
+      if (wasRunning && !state.running) return 'stopped';
+      if (isMainTabReady()) return true;
+      if (Date.now() - lastClickAt >= 5000) {
+        const currentTab = findVisibleElements(SEL.mainTab)[0];
+        if (currentTab) showBootstrapTab(currentTab);
+        lastClickAt = Date.now();
+      }
+      return false;
+    }, CFG.mainReadyMs);
+    if ((wasRunning && !state.running) || state.destroyed) return false;
     if (!ready) log('Main tab form did not become ready');
     return !!ready;
   }
