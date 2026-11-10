@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.23
+// @version      1.4.24
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
 // @match        https://www.zillow.com/*
 // @match        https://zillow.com/*
 // @exclude      https://app.agencyzoom.com/login*
-// @run-at       document-end
+// @run-at       document-start
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -178,7 +178,15 @@
     progressLogs: {}
   };
 
-  init();
+  start();
+
+  function start() {
+    if (isAzOrigin() && document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init, { once: true });
+    } else {
+      init();
+    }
+  }
 
   function getScriptVersion() {
     try {
@@ -201,7 +209,7 @@
       state.running = true;
       saveRunning(true);
     }
-    const staleJobReset = resetStaleActiveJobOnBoot();
+    const staleJobReset = isAzOrigin() ? resetStaleActiveJobOnBoot() : '';
     if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
     if (isAzOrigin() && !getLastZillowOpenAt()) setLastZillowOpenAt();
 
@@ -3377,6 +3385,7 @@
     if (state.destroyed || !isZillowOrigin()) return;
     if (!claimSingletonPageSlot()) return;
     recordZillowTabHeartbeat();
+    if (!document.body) return;
 
     if (await maybeHandleProviderPickerOnZillow()) return;
 
@@ -3473,6 +3482,8 @@
     }
 
     const scraped = scrapeZillowResult();
+    if (document.readyState === 'loading' && !resultHasRoomFacts(scraped)
+        && !norm(scraped.homeType) && !norm(scraped.yearBuilt) && !norm(scraped.squareFeet)) return;
     const missingRequiredFacts = getMissingRequiredZillowFactLabels(scraped);
     const listingSeenAtMs = Date.parse(norm(job.listingSeenAt || '')) || Date.now();
     const listingAgeMs = Math.max(0, Date.now() - listingSeenAtMs);

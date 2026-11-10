@@ -19,7 +19,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_setValue = (k, v) => { storage[k] = v; };
     window.GM_deleteValue = k => { delete storage[k]; };
   });
-  await page.addScriptTag({ content: source.replace('  init();', `
+  await page.addScriptTag({ content: source.replace('  start();', `
     window.api = { init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     state.running = true;
@@ -216,3 +216,60 @@ for (const origin of ['https://app.agencyzoom.com/referral/pipeline', 'https://w
       : { job: 'TEST', running: false, savedRunning: false });
   });
 }
+
+for (const factsBeforeLoad of [true, false]) {
+  test(`Zillow reports before DOM ready and waits for listing facts (${factsBeforeLoad})`, async t => {
+    const context = await browser.newContext(); t.after(() => context.close());
+    let release; const held = new Promise(resolve => { release = resolve; }); t.after(release);
+    const facts = '<main>2 beds 2 baths Manufactured Home Built in 1986 2,088 sqft</main>';
+    await context.route('**/*', async route => {
+      if (route.request().url().endsWith('/slow.js')) { await held; await route.fulfill({ contentType: 'text/javascript', body: '' }); return; }
+      await route.fulfill({ contentType: 'text/html', body: `<html><body>${factsBeforeLoad ? facts : ''}<script src="/slow.js"></script>${factsBeforeLoad ? '' : facts}</body></html>` });
+    });
+    const prepared = source.replace('zillowFactSettleMs: 9000', 'zillowFactSettleMs: 30');
+    const execute = /@run-at\s+document-start/.test(source) ? prepared : `document.addEventListener('DOMContentLoaded', () => {${prepared}});`;
+    await context.addInitScript({ content: `
+      window.storage = { tm_az_zillow_ticket_enricher_job_v4: { jobId: 'TEST', ticketId: 'TEST', status: 'searching', createdAt: new Date().toISOString(), searchOpenedAt: new Date().toISOString() } };
+      window.GM_getValue = (k,d) => storage[k] ?? d;
+      window.GM_setValue = (k,v) => {storage[k]=v;}; window.GM_deleteValue = k => {delete storage[k];};
+      window.close = () => {}; window.open = () => null;
+      ${execute}
+    ` });
+    const page = await context.newPage();
+    await page.goto('https://www.zillow.com/homedetails/example/123_zpid/', { waitUntil: 'commit' });
+    await page.waitForFunction(() => !!storage.tm_az_zillow_ticket_enricher_zillow_tab_heartbeat_v1, null, { timeout: 3500 });
+    assert.equal(await page.evaluate(() => document.readyState), 'loading');
+    if (!factsBeforeLoad) {
+      await page.waitForTimeout(1200);
+      assert.equal(await page.evaluate(() => storage.tm_az_zillow_ticket_enricher_job_v4.status), 'searching');
+      release();
+    }
+    await page.waitForFunction(() => storage.tm_az_zillow_ticket_enricher_job_v4.status === 'result-ready', null, { timeout: 3500 });
+    assert.deepEqual(await page.evaluate(() => {
+      const r = storage.tm_az_zillow_ticket_enricher_job_v4.result;
+      return [r.bedrooms, r.bathrooms, r.yearBuilt, r.squareFeet];
+    }), ['2','2','1986','2088']);
+    release();
+  });
+}
+
+test('early AgencyZoom startup waits for DOM, then clears job and auto-starts once', async t => {
+  const context = await browser.newContext(); t.after(() => context.close());
+  let release; const held = new Promise(resolve => { release = resolve; }); t.after(release);
+  await context.route('**/*', async route => {
+    if (route.request().url().endsWith('/slow.js')) { await held; await route.fulfill({ contentType: 'text/javascript', body: '' }); return; }
+    await route.fulfill({ contentType: 'text/html', body: '<html><body><main></main><script src="/slow.js"></script></body></html>' });
+  });
+  await context.addInitScript({ content: `
+    window.storage = { tm_az_zillow_ticket_enricher_job_v4: { jobId: 'OLD', status: 'apply-failed' } };
+    window.GM_getValue = (k,d) => storage[k] ?? d; window.GM_setValue = (k,v) => {storage[k]=v;}; window.GM_deleteValue = k => {delete storage[k];};
+    localStorage.setItem('tm_az_zillow_ticket_enricher_running_v1', '0');
+    ${source.replace('  start();', '  tick = () => { window.tickCount = (window.tickCount || 0) + 1; }; start();')}
+  ` });
+  const page = await context.newPage();
+  await page.goto('https://app.agencyzoom.com/referral/pipeline', { waitUntil: 'commit' });
+  assert.deepEqual(await page.evaluate(() => [document.readyState, storage.tm_az_zillow_ticket_enricher_job_v4.jobId, window.tickCount || 0]), ['loading','OLD',0]);
+  release();
+  await page.waitForFunction(() => window.tickCount === 1, null, { timeout: 3500 });
+  assert.deepEqual(await page.evaluate(() => [storage.tm_az_zillow_ticket_enricher_job_v4 || null, localStorage.getItem('tm_az_zillow_ticket_enricher_running_v1'), !!document.querySelector('#tm-az-zillow-ticket-enricher-toggle')]), [null,'1',true]);
+});
