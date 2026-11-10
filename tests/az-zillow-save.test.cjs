@@ -151,15 +151,17 @@ test('slow Zillow startup remains searching at 40 seconds', async t => {
   }), { status: 'searching', result: null });
 });
 
-test('Main tab waits for the asynchronously inserted drawer form', async t => {
+for (const delay of [350, 12000]) {
+test(`Main tab waits for the asynchronously inserted drawer form (${delay}ms)`, async t => {
   const p = await fixture(t, '<main></main>');
-  assert.equal(await p.evaluate(async () => {
+  assert.equal(await p.evaluate(async delay => {
     setTimeout(() => { document.body.innerHTML = '<a href="#tabDetail" data-toggle="tab" class="active">Main</a><div id="tabDetail" class="active"></div>'; }, 100);
-    setTimeout(() => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; }, 350);
+    setTimeout(() => { document.querySelector('#tabDetail').innerHTML = '<form id="detailDockform"><input></form>'; }, delay);
     const ready = await api.ensureMainTab();
     return ready && !!document.querySelector('#detailDockform');
-  }), true);
+  }, delay), true);
 });
+}
 
 test('a URL-only Zillow result cannot update or complete a ticket', async t => {
   const p = await fixture(t, '<input id="url" value="https://www.zillow.com/homes/example/">', `

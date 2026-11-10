@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.20
+// @version      1.4.21
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -95,7 +95,7 @@
     openCheckAfterClickMs: 2000,
     frontStableMs: 1200,
     gapMs: 220,
-    mainReadyMs: 10000,
+    mainReadyMs: 60000,
     filterSettleMs: 1500,
     actionSettleMs: 900,
     updateSettleMs: 1200,
