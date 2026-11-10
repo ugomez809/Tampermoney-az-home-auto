@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     state.running = true;
     ${extra}
@@ -176,4 +176,25 @@ test('a URL-only Zillow result cannot update or complete a ticket', async t => {
   assert.deepEqual(await p.evaluate(async () => ({
     ok: await api.applyZillowResultToTicket({ ticketId: 'TEST', result: { zillowUrl: 'https://www.zillow.com/homes/example/' } }), tags, updates,
   })), { ok: false, tags: 0, updates: 0 });
+});
+
+test('Zillow opens in the foreground through Tampermonkey', async t => {
+  const p = await fixture(t, '<main></main>');
+  assert.deepEqual(await p.evaluate(() => {
+    window.GM_openInTab = (url, options) => { window.openOptions = options; };
+    const ok = api.launchZillowSearch({ jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
+    return { ok, active: openOptions.active };
+  }), { ok: true, active: true });
+});
+
+test('fallback Zillow window keeps focus instead of returning to AgencyZoom', async t => {
+  const p = await fixture(t, '<main></main>');
+  assert.deepEqual(await p.evaluate(async () => {
+    let focused = 0, blurred = 0, parentFocused = 0;
+    window.open = () => ({ focus: () => focused++, blur: () => blurred++ });
+    window.focus = () => parentFocused++;
+    const ok = api.launchZillowSearch({ jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return { ok, focused, blurred, parentFocused };
+  }), { ok: true, focused: 1, blurred: 0, parentFocused: 0 });
 });
