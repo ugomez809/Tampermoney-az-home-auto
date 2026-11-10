@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     state.running = true;
     ${extra}
@@ -198,3 +198,21 @@ test('fallback Zillow window keeps focus instead of returning to AgencyZoom', as
     return { ok, focused, blurred, parentFocused };
   }), { ok: true, focused: 1, blurred: 0, parentFocused: 0 });
 });
+
+for (const origin of ['https://app.agencyzoom.com/referral/pipeline', 'https://www.zillow.com/homedetails/example/123_zpid/']) {
+  test(`startup clears the job and starts only on AgencyZoom: ${new URL(origin).hostname}`, async t => {
+    const p = await fixture(t, '<main></main>', `
+      buildUi = bindUi = restorePanelPos = ensureHoverBox = syncWebhookUi = renderAll = tick = zillowTick = () => {};
+      state.running = false; saveRunning(false);
+      saveJob({ jobId: 'TEST', ticketId: 'TEST', status: 'result-ready', result: { bedrooms: '3' } });
+    `, origin);
+    const result = await p.evaluate(() => {
+      api.init();
+      const r = { job: api.getJob()?.jobId || null, running: api.state.running, savedRunning: api.loadRunning() };
+      api.cleanup(); return r;
+    });
+    assert.deepEqual(result, origin.includes('agencyzoom')
+      ? { job: null, running: true, savedRunning: true }
+      : { job: 'TEST', running: false, savedRunning: false });
+  });
+}

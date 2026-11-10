@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.22
+// @version      1.4.23
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -196,7 +196,11 @@
 
     const legacyJobStateCleared = clearLegacyJobState();
     const resumedAfterReload = consumeBootstrapReloadToken();
-    const azJobReset = '';
+    const azJobReset = isAzOrigin() ? clearStoredJobOnAzLoad() : '';
+    if (isAzOrigin()) {
+      state.running = true;
+      saveRunning(true);
+    }
     const staleJobReset = resetStaleActiveJobOnBoot();
     if (isZillowOrigin()) syncZillowTabJobIdFromLocation();
     if (isAzOrigin() && !getLastZillowOpenAt()) setLastZillowOpenAt();
