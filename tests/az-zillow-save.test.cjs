@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/re
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { tick, init, cleanup, launchZillowSearch, ensureMainTab, handleExistingZillowJob, scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     CFG.mainReadyMs = 800;
     state.running = true;
@@ -261,4 +261,70 @@ test('late Zillow startup does not delete the job it needs to answer', async t =
     saveJob({ jobId: 'LATE', ticketId: 'TEST', status: 'searching', searchOpenedAt: new Date(Date.now() - 120000).toISOString() });
   `, 'https://www.zillow.com/homedetails/example/123_zpid/');
   assert.equal(await p.evaluate(() => { api.init(); const id = api.getJob()?.jobId; api.cleanup(); return id; }), 'LATE');
+});
+
+test('an unanswered job still triggers the five-minute AgencyZoom refresh', async t => {
+  const p = await fixture(t, '<main></main>', `
+    saveJob({ jobId: 'TEST', ticketId: 'TEST', status: 'searching' });
+    setLastZillowOpenAt(new Date(Date.now() - 301000).toISOString());
+    window.refreshes = 0; window.runs = 0;
+    requestBootstrapReload = () => { refreshes++; };
+    runAzWorkflow = async () => { runs++; };
+  `);
+  assert.deepEqual(await p.evaluate(async () => { await api.tick(); return [refreshes, runs]; }), [1,0]);
+});
+
+test('AgencyZoom closes its finished Zillow tab using the opener handle', async t => {
+  const p = await fixture(t, '<main></main>', `
+    runAzWorkflow = async () => {};
+    window.closes = 0;
+    window.GM_openInTab = () => ({ close() { closes++; } });
+  `);
+  assert.equal(await p.evaluate(async () => {
+    const job = { jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' };
+    api.launchZillowSearch(job);
+    storage.tm_az_zillow_ticket_enricher_job_v4 = { ...job, status: 'result-ready' };
+    await api.tick(); await api.tick();
+    return closes;
+  }), 1);
+});
+
+test('AgencyZoom does not close a Zillow tab still searching', async t => {
+  const p = await fixture(t, '<main></main>', `
+    runAzWorkflow = async () => {};
+    window.closes = 0;
+    window.GM_openInTab = () => ({ close() { closes++; } });
+  `);
+  assert.equal(await p.evaluate(async () => {
+    api.launchZillowSearch({ jobId: 'TEST', ticketId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
+    await api.tick(); return closes;
+  }), 0);
+});
+
+for (const mode of ['busy', 'captcha', 'result-ready']) {
+  test('idle refresh preserves ' + mode, async t => {
+    const p = await fixture(t, '<main></main>', `
+      saveJob({ jobId: 'TEST', status: '${mode === 'busy' ? 'searching' : mode}' });
+      state.busy = ${mode === 'busy'};
+      setLastZillowOpenAt(new Date(Date.now() - 301000).toISOString());
+      window.refreshes = 0;
+      requestBootstrapReload = () => { refreshes++; };
+      runAzWorkflow = async () => {};
+    `);
+    assert.equal(await p.evaluate(async () => { await api.tick(); return refreshes; }), 0);
+  });
+}
+
+test('idle refresh closes its stale Zillow tab before reloading', async t => {
+  const p = await fixture(t, '<main></main>', `
+    window.actions = [];
+    window.GM_openInTab = () => ({ close() { actions.push('close'); } });
+    requestBootstrapReload = () => { actions.push('reload'); };
+    runAzWorkflow = async () => {};
+  `);
+  assert.deepEqual(await p.evaluate(async () => {
+    api.launchZillowSearch({ jobId: 'TEST', searchUrl: 'https://www.zillow.com/homes/example/' });
+    localStorage.setItem('tm_az_zillow_ticket_enricher_last_zillow_open_at_v1', new Date(Date.now() - 301000).toISOString());
+    await api.tick(); return actions;
+  }), ['close', 'reload']);
 });

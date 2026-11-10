@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.26
+// @version      1.4.27
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -156,6 +156,8 @@
     tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
+    zillowTab: null,
+    zillowTabJobId: '',
     logs: loadPersistedLogs(),
     panel: null,
     ui: {},
@@ -2816,6 +2818,24 @@
     return job;
   }
 
+  function closeOwnedZillowTab() {
+    if (!state.zillowTab) return;
+    try {
+      state.zillowTab.close();
+      state.zillowTab = null;
+      state.zillowTabJobId = '';
+    } catch (error) {
+      logProgress('zillow-close', 'Could not close Zillow tab: ' + String(error));
+    }
+  }
+
+  function closeFinishedZillowTab() {
+    const job = getJob();
+    if (job?.jobId === state.zillowTabJobId && ['result-ready', 'completed'].includes(job.status)) {
+      closeOwnedZillowTab();
+    }
+  }
+
   function launchZillowSearch(job) {
     if (!isPlainObject(job) || !norm(job.searchUrl || '')) return false;
     const launchUrl = buildScopedZillowUrl(job.searchUrl, job.jobId);
@@ -2841,7 +2861,8 @@
 
     try {
       if (typeof GM_openInTab === 'function') {
-        GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
+        state.zillowTab = GM_openInTab(launchUrl, { active: false, insert: true, setParent: true });
+        state.zillowTabJobId = job.jobId;
         setLastZillowOpenAt(job.searchOpenedAt);
         return true;
       }
@@ -2850,6 +2871,8 @@
     try {
       const opened = window.open(launchUrl, '_blank');
       if (opened) {
+        state.zillowTab = opened;
+        state.zillowTabJobId = job.jobId;
         setLastZillowOpenAt(job.searchOpenedAt);
       }
       if (opened) return true;
@@ -4429,6 +4452,7 @@
       job.completedAt = nowIso();
       job.updatedAt = nowIso();
       saveJob(job);
+      closeFinishedZillowTab();
 
       await closeTicketDrawer();
       clearJob();
@@ -4462,11 +4486,12 @@
 
   function maybeRefreshForIdleZillowOpenGap() {
     if (!isAzOrigin() || !state.running || state.destroyed) return false;
-    if (getJob()?.status === 'captcha') return false;
+    if (['captcha', 'result-ready', 'completed'].includes(getJob()?.status)) return false;
 
     const ageMs = getLastZillowOpenAgeMs();
     if (ageMs < CFG.azRefreshIfNoZillowOpenMs) return false;
 
+    closeOwnedZillowTab();
     const roundedMinutes = Math.max(5, Math.floor(ageMs / 60000));
     setLastZillowOpenAt();
     setStatus(`Refreshing after ${roundedMinutes}m without Zillow opens`);
@@ -4479,6 +4504,7 @@
     if (state.destroyed || !isAzOrigin()) return;
     if (isAgencyZoomLoginPage()) return;
     if (!claimSingletonPageSlot()) return;
+    closeFinishedZillowTab();
     if (state.picker) {
       renderAll();
       return;
@@ -4515,7 +4541,7 @@
       return;
     }
 
-    if (!getJob() && maybeRefreshForIdleZillowOpenGap()) return;
+    if (maybeRefreshForIdleZillowOpenGap()) return;
     state.busy = true;
     logProgress('az-workflow-tick', `AgencyZoom workflow tick running; current status is ${state.lastStatus || 'starting'}`, 30000);
     renderAll();
