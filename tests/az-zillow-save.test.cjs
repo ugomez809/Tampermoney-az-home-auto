@@ -5,14 +5,14 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const source = fs.readFileSync(path.join(__dirname, '../auto/az-zillow-ticket-enricher.user.js'), 'utf8');
 let browser;
-before(async () => { browser = await chromium.launch({ headless: true }); });
+before(async () => { browser = await chromium.launch({ headless: false }); });
 after(async () => { await browser.close(); });
-async function fixture(t, html, extra = '') {
+async function fixture(t, html, extra = '', url = 'https://app.agencyzoom.com/referral/pipeline') {
   const context = await browser.newContext();
   t.after(() => context.close());
   await context.route('**/*', r => r.fulfill({ contentType: 'text/html', body: html }));
   const page = await context.newPage();
-  await page.goto('https://app.agencyzoom.com/referral/pipeline');
+  await page.goto(url);
   await page.evaluate(() => {
     window.storage = {};
     window.GM_getValue = (k, d) => storage[k] ?? d;
@@ -20,7 +20,7 @@ async function fixture(t, html, extra = '') {
     window.GM_deleteValue = k => { delete storage[k]; };
   });
   await page.addScriptTag({ content: source.replace('  init();', `
-    window.api = { strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
+    window.api = { scrapeZillowResult, buildFallbackResult, getFieldTargets, canonicalFieldLabel, strongClick, resolveEditableTarget, setFieldValue, readCurrentFieldValue, applyZillowResultToTicket, saveRunning, loadRunning, runAzWorkflow, state, getJob };
     sleep = async () => {};
     state.running = true;
     ${extra}
@@ -56,21 +56,21 @@ test('an existing value is preserved', async t => {
 });
 for (const accepted of [false, true, 'partial']) {
   test(`completion requires persisted values after reopening (accepted=${accepted})`, async t => {
-    const p = await fixture(t, '<form><input id="url"><input id="beds"><input id="baths"><input id="type"></form>', `
-      const fields = { 'Zillow URL': '#url', Bedrooms: '#beds', Bathrooms: '#baths', 'Home Type': '#type' };
+    const p = await fixture(t, '<form><input id="url"><input id="beds"><input id="baths"><input id="type"><input id="year"><input id="area"></form>', `
+      const fields = { 'Zillow URL': '#url', Bedrooms: '#beds', Bathrooms: '#baths', 'Home Type': '#type', 'Year Built': '#year', 'Home Sqft': '#area' };
       storage[GM_KEYS.fieldTargets] = Object.fromEntries(Object.entries(fields).map(([k, selector]) => [k, { selector }]));
       getActivePipelineTicketContext = () => ({ ok: true });
       getVisibleStageCards = () => [{ getAttribute: () => 'TEST' }];
       window.tags = 0; window.reopens = 0; window.saved = {};
       clickUpdateButton = async () => {
         if (${JSON.stringify(accepted)}) document.querySelectorAll('input').forEach(el => { saved[el.id] = el.value; });
-        if (${JSON.stringify(accepted)} === 'partial') delete saved.baths;
+        if (${JSON.stringify(accepted)} === 'partial') { delete saved.year; delete saved.area; }
         return true;
       };
       closeTicketDrawer = async () => { document.querySelector('form').remove(); return true; };
       openCard = async () => {
         reopens++;
-        document.body.innerHTML = '<form><input id="url"><input id="beds"><input id="baths"><input id="type"></form>';
+        document.body.innerHTML = '<form><input id="url"><input id="beds"><input id="baths"><input id="type"><input id="year"><input id="area"></form>';
         document.querySelectorAll('input').forEach(el => { el.value = saved[el.id] || ''; });
         return true;
       };
@@ -78,10 +78,11 @@ for (const accepted of [false, true, 'partial']) {
       applyConfiguredTagReplacement = async () => { tags++; return true; };
     `);
     const result = await p.evaluate(async () => ({
-      ok: await api.applyZillowResultToTicket({ ticketId: 'TEST', result: { zillowUrl: 'https://www.zillow.com/homedetails/example/', bedrooms: '4', bathrooms: '2', homeType: 'SingleFamily' } }),
+      ok: await api.applyZillowResultToTicket({ ticketId: 'TEST', result: { zillowUrl: 'https://www.zillow.com/homedetails/example/', bedrooms: '4', bathrooms: '2', homeType: 'SingleFamily', yearBuilt: '1987', squareFeet: '1,850' } }),
       tags, reopens,
     }));
     assert.deepEqual(result, { ok: accepted === true, tags: accepted === true ? 1 : 0, reopens: 1 });
+    if (accepted === true) assert.deepEqual(await p.evaluate(() => [saved.year, saved.area]), ['1987', '1850']);
   });
 }
 test('missing targets cannot complete or replace tags', async t => {
@@ -113,4 +114,29 @@ test('workflow stops a failed save without webhook or completion', async t => {
     await api.runAzWorkflow();
     return { running: api.state.running, savedRunning: api.loadRunning(), jobStatus: api.getJob().status, webhooks, completions };
   }), { running: false, savedRunning: false, jobStatus: 'apply-failed', webhooks: 0, completions: 0 });
+});
+
+test('year and living area survive scraping and fallback without nearby-home contamination', async t => {
+  const property = { zpid: 123, yearBuilt: 1987, livingArea: 1850, bedrooms: 4, bathrooms: 2, homeType: 'SingleFamily' };
+  const nearby = { ...property, zpid: 999, yearBuilt: 2020, livingArea: 9999 };
+  const data = { props: { pageProps: { gdpClientCache: JSON.stringify({ nearby: { property: nearby }, selected: { property } }) } } };
+  const p = await fixture(t, `<main>Built in 2020 9,999 sqft</main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script>`, '', 'https://www.zillow.com/homedetails/example/123_zpid/');
+  assert.deepEqual(await p.evaluate(() => {
+    const result = api.buildFallbackResult({}, api.scrapeZillowResult());
+    return [result.yearBuilt, result.squareFeet];
+  }), ['1987', '1850']);
+});
+
+test('visible Zillow facts provide year and interior area, not lot size', async t => {
+  const p = await fixture(t, '<main>8,000 sqft lot Built in 1985 Total interior livable area: 1,950 sqft</main>');
+  assert.deepEqual(await p.evaluate(() => {
+    const r = api.scrapeZillowResult(); return [r.yearBuilt, r.squareFeet];
+  }), ['1985', '1950']);
+});
+
+test('known AgencyZoom fields are available without overwriting saved targets', async t => {
+  const p = await fixture(t, `<form id="detailDockform"><input name="customFields[cf48146]"><input name="customFields[cf48147]"></form>`, `storage[GM_KEYS.fieldTargets] = { 'Year Built': { selector: '#my-year' } };`);
+  assert.deepEqual(await p.evaluate(() => {
+    const targets = api.getFieldTargets(); return [targets['Year Built'].selector, !!document.querySelector(targets['Square Feet']?.selector)];
+  }), ['#my-year', true]);
 });

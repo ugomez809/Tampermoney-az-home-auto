@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.18
+// @version      1.4.19
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -71,7 +71,9 @@
     'Zillow URL',
     'Bedrooms',
     'Bathrooms',
-    'Home Type'
+    'Home Type',
+    'Year Built',
+    'Square Feet'
   ];
 
   const TAG_ORDER = [
@@ -570,7 +572,19 @@
   }
 
   function getFieldTargets() {
-    return readTargets(GM_KEYS.fieldTargets);
+    const saved = readTargets(GM_KEYS.fieldTargets);
+    const targets = { ...saved };
+    for (const [label, record] of Object.entries(saved)) {
+      const canonical = canonicalFieldLabel(label);
+      if (!norm(targets[canonical]?.selector) && norm(record?.selector)) targets[canonical] = record;
+    }
+    // shortcut: GWPC field IDs; other accounts use the existing field picker.
+    const defaults = { 'Year Built': 'cf48146', 'Square Feet': 'cf48147' };
+    for (const [label, id] of Object.entries(defaults)) {
+      const selector = `#detailDockform input[name="customFields[${id}]"]`;
+      if (!norm(targets[label]?.selector) && document.querySelector(selector)) targets[label] = { selector };
+    }
+    return targets;
   }
 
   function getCustomFields() {
@@ -851,6 +865,9 @@
   function canonicalFieldLabel(label) {
     const clean = norm(label);
     if (!clean) return '';
+    const compact = lower(clean).replace(/[^a-z0-9]/g, '');
+    if (['yearbuilt', 'builtyear', 'homeyearbuilt'].includes(compact)) return 'Year Built';
+    if (['sqft', 'homesqft', 'squarefeet', 'squarefoot', 'squarefootage', 'homesquarefeet', 'homesquarefootage'].includes(compact)) return 'Square Feet';
     const builtIn = FIELD_ORDER.find((item) => lower(item) === lower(clean));
     return builtIn || clean;
   }
@@ -2331,12 +2348,47 @@
     return match ? norm(match[1]) : '';
   }
 
+  function normalizeYearBuilt(value) {
+    return norm(value).match(/\b(1\d{3}|20\d{2})\b/)?.[1] || '';
+  }
+
+  function normalizeSquareFeet(value) {
+    const text = norm(value);
+    if (/\b(?:lot|acres?)\b/i.test(text)) return '';
+    const match = text.match(/([\d,]+(?:\.\d+)?)\s*(k)?\b/i);
+    if (!match) return '';
+    const number = Number(match[1].replace(/,/g, '')) * (match[2] ? 1000 : 1);
+    return Number.isFinite(number) && number > 0 ? String(Math.round(number)) : '';
+  }
+
+  function extractYearBuiltAndArea(text) {
+    const source = norm(text);
+    const year = source.match(/\b(?:Year built|Built in|Built)\s*:?\s*(\d{4})\b/i)?.[1];
+    const area = source.match(/\b(?:Total interior livable area|Living area|Square feet)\s*:?\s*([\d,.]+\s*k?)\b/i)?.[1]
+      || source.match(/\b(?:Sq\.?\s*ft\.?|sqft)\s*:\s*([\d,.]+\s*k?)\b/i)?.[1]
+      || source.match(/\b([\d,.]+\s*k?)\s*(?:sq\.?\s*ft\.?|sqft|square feet|square foot)\b(?!\s*lot)/i)?.[1];
+    return { yearBuilt: normalizeYearBuilt(year), squareFeet: normalizeSquareFeet(area) };
+  }
+
+  function findZillowListingProperty(value, zpid, depth = 0) {
+    if (depth > 20 || !value || typeof value !== 'object') return null;
+    if (String(value.zpid) === zpid && ['yearBuilt', 'livingArea', 'livingAreaValue', 'bedrooms', 'resoFacts'].some(key => key in value)) return value;
+    for (const [key, child] of Object.entries(value)) {
+      const parsed = key === 'gdpClientCache' && typeof child === 'string' ? parseZillowJsonText(child) : child;
+      const property = findZillowListingProperty(parsed, zpid, depth + 1);
+      if (property) return property;
+    }
+    return null;
+  }
+
   function summarizeResult(result) {
     if (!isPlainObject(result)) return '-';
     const parts = [
       norm(result.bedrooms),
       norm(result.bathrooms),
-      norm(result.homeType)
+      norm(result.homeType),
+      norm(result.yearBuilt) ? `Year Built: ${result.yearBuilt}` : '',
+      norm(result.squareFeet) ? `Sq Ft: ${result.squareFeet}` : ''
     ].filter(Boolean);
     const customParts = Object.entries(getCustomFieldValueMap(result))
       .filter(([, value]) => !!norm(value))
@@ -2475,6 +2527,8 @@
       bedrooms: getFallbackRoomValue(extra.bedrooms),
       bathrooms: getFallbackRoomValue(extra.bathrooms),
       homeType: getFallbackHomeType(extra.homeType),
+      yearBuilt: normalizeYearBuilt(extra.yearBuilt),
+      squareFeet: normalizeSquareFeet(extra.squareFeet),
       customFields
     };
   }
@@ -2502,6 +2556,8 @@
     if (!norm(result?.bedrooms)) missing.push('Bedrooms');
     if (!norm(result?.bathrooms)) missing.push('Bathrooms');
     if (!norm(result?.homeType)) missing.push('Home Type');
+    if (!norm(result?.yearBuilt)) missing.push('Year Built');
+    if (!norm(result?.squareFeet)) missing.push('Square Feet');
     return missing;
   }
 
@@ -2532,6 +2588,8 @@
       bedrooms: norm(result?.bedrooms || ''),
       bathrooms: norm(result?.bathrooms || ''),
       homeType: norm(result?.homeType || ''),
+      yearBuilt: norm(result?.yearBuilt || ''),
+      squareFeet: norm(result?.squareFeet || ''),
       customFields: getCustomFieldValueMap(result)
     };
   }
@@ -2988,10 +3046,20 @@
   }
 
   function maybeSetZillowFactHint(hints, key, value) {
-    if (!isScalarZillowFactValue(value)) return;
+    const scalar = isPlainObject(value) ? firstNonEmpty(value.value, value['@value'], value.displayValue) : value;
+    if (!isScalarZillowFactValue(scalar)) return;
     const cleanKey = String(key || '');
-    const cleanValue = norm(value);
+    const cleanValue = norm(scalar);
     if (!cleanValue) return;
+
+    if (!hints.yearBuilt && /^(yearBuilt|year_built|year built|built in)$/i.test(cleanKey)) {
+      hints.yearBuilt = normalizeYearBuilt(cleanValue);
+      return;
+    }
+    if (!hints.squareFeet && /^(livingArea|livingAreaValue|livingSize|floorArea|floorSize|square feet|sq\.?\s*ft|sqft|living area|total interior livable area)$/i.test(cleanKey)) {
+      hints.squareFeet = normalizeSquareFeet(cleanValue);
+      return;
+    }
 
     if (!hints.bedrooms && /^(bedrooms?|beds?|numBedrooms|numberOfBedrooms|bedroomsTotal)$/i.test(cleanKey)) {
       hints.bedrooms = cleanValue;
@@ -3010,20 +3078,21 @@
 
   function collectZillowFactHints(value, hints, depth = 0) {
     if (depth > 14 || !value || typeof value !== 'object') return hints;
-    if (hints.bedrooms && hints.bathrooms && hints.homeType) return hints;
+    const zpid = location.pathname.match(/\/(\d+)_zpid(?:\/|$)/)?.[1];
+    if (zpid && value.zpid != null && String(value.zpid) !== zpid) return hints;
 
     if (Array.isArray(value)) {
       for (const item of value) {
         collectZillowFactHints(item, hints, depth + 1);
-        if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
       }
       return hints;
     }
 
+    maybeSetZillowFactHint(hints, value.factLabel || value.label || value.name, value.factValue ?? value.value ?? value.displayValue);
     for (const [key, entry] of Object.entries(value)) {
+      if (/^(nearbyHomes|similarHomes|recommendations|comps)$/i.test(key)) continue;
       maybeSetZillowFactHint(hints, key, entry);
       if (entry && typeof entry === 'object') collectZillowFactHints(entry, hints, depth + 1);
-      if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
     }
 
     return hints;
@@ -3044,7 +3113,8 @@
   }
 
   function readZillowJsonHints() {
-    const hints = { bedrooms: '', bathrooms: '', homeType: '' };
+    const hints = { bedrooms: '', bathrooms: '', homeType: '', yearBuilt: '', squareFeet: '' };
+    const parsedScripts = [];
     const scripts = Array.from(document.scripts || []);
     for (const script of scripts) {
       const text = script.textContent || '';
@@ -3055,9 +3125,20 @@
 
       const parsed = parseZillowJsonText(text);
       if (!parsed) continue;
-      collectZillowFactHints(parsed, hints);
-      if (hints.bedrooms && hints.bathrooms && hints.homeType) break;
+      parsedScripts.push(parsed);
     }
+    const zpid = location.pathname.match(/\/(\d+)_zpid(?:\/|$)/)?.[1];
+    if (zpid) {
+      for (const parsed of parsedScripts) {
+        const property = findZillowListingProperty(parsed, zpid);
+        if (!property) continue;
+        const keys = ['bedrooms', 'bathrooms', 'bathroomsFloat', 'homeType', 'yearBuilt', 'livingArea', 'livingAreaValue', 'floorSize', 'resoFacts'];
+        collectZillowFactHints(Object.fromEntries(keys.map(key => [key, property[key]])), hints);
+        hints.matchedListing = true;
+        return hints;
+      }
+    }
+    for (const parsed of parsedScripts) collectZillowFactHints(parsed, hints);
     return hints;
   }
 
@@ -3066,6 +3147,7 @@
       .map((script) => script.textContent || '')
       .join('\n');
     const jsonHints = readZillowJsonHints();
+    if (jsonHints.matchedListing) return jsonHints;
 
     return {
       bedrooms: firstNonEmpty(jsonHints.bedrooms, extractRegexValue(joined, [
@@ -3088,6 +3170,14 @@
         /["']?bathroomsFull["']?\s*:\s*"?([0-9.]+)"?/i,
         /["']?bathroomsFloat["']?\s*:\s*"?([0-9.]+)"?/i
       ])),
+      yearBuilt: firstNonEmpty(jsonHints.yearBuilt, normalizeYearBuilt(extractRegexValue(joined, [
+        /["']?(?:yearBuilt|year_built)["']?\s*:\s*["']?(\d{4})/i,
+        /["']?(?:yearBuilt|year_built)["']?\s*:\s*\{[^}]*["']?(?:value|@value|displayValue)["']?\s*:\s*["']?(\d{4})/i
+      ]))),
+      squareFeet: firstNonEmpty(jsonHints.squareFeet, normalizeSquareFeet(extractRegexValue(joined, [
+        /["']?(?:livingArea|livingAreaValue|livingSize|floorArea|floorSize)["']?\s*:\s*["']?([\d,.]+\s*k?)\b/i,
+        /["']?(?:livingArea|livingAreaValue|livingSize|floorArea|floorSize)["']?\s*:\s*\{[^}]*["']?(?:value|@value|displayValue)["']?\s*:\s*["']?([\d,.]+\s*k?)\b/i
+      ]))),
       homeType: firstNonEmpty(jsonHints.homeType, extractRegexValue(joined, [
         /["']?homeType["']?\s*:\s*"([^"]+)"/i,
         /"homeType"\s*:\s*"([^"]+)"/i,
@@ -3160,14 +3250,16 @@
     const bedrooms = normalizeRoomValue(extractBedroomTextValue(text));
     const bathrooms = normalizeRoomValue(extractBathroomTextValue(text));
     const homeType = normalizeHomeType(extractHomeTypeFromText(text));
+    const areaFacts = extractYearBuiltAndArea(text);
 
-    if (!norm(bedrooms) && !norm(bathrooms) && !norm(homeType)) return null;
+    if (!norm(bedrooms) && !norm(bathrooms) && !norm(homeType) && !areaFacts.yearBuilt && !areaFacts.squareFeet) return null;
 
     return {
       zillowUrl: stripZillowJobHashFromUrl(anchor.href),
       bedrooms,
       bathrooms,
       homeType,
+      ...areaFacts,
       customFields: {}
     };
   }
@@ -3237,6 +3329,18 @@
   function scrapeZillowResult() {
     const bodyText = document.body?.innerText || '';
     const hints = readZillowScriptHints();
+    if (hints.matchedListing) {
+      return {
+        zillowUrl: stripZillowJobHashFromUrl(location.href),
+        bedrooms: normalizeRoomValue(hints.bedrooms),
+        bathrooms: normalizeRoomValue(hints.bathrooms),
+        homeType: normalizeHomeType(hints.homeType),
+        yearBuilt: normalizeYearBuilt(hints.yearBuilt),
+        squareFeet: normalizeSquareFeet(hints.squareFeet),
+        customFields: buildScrapedCustomFieldValues()
+      };
+    }
+    const areaFacts = extractYearBuiltAndArea(bodyText);
     const bedrooms = normalizeRoomValue(firstNonEmpty(
       extractFirstLabeledValue(['Bedrooms', 'Bedroom', 'Beds', 'Bed']),
       extractBedroomTextValue(bodyText),
@@ -3259,6 +3363,8 @@
       bedrooms,
       bathrooms,
       homeType,
+      yearBuilt: firstNonEmpty(hints.yearBuilt, areaFacts.yearBuilt),
+      squareFeet: firstNonEmpty(hints.squareFeet, areaFacts.squareFeet),
       customFields
     };
   }
@@ -3990,7 +4096,9 @@
       'Zillow URL': stripZillowJobHashFromUrl(firstNonEmpty(job?.result?.zillowUrl, job?.searchUrl)),
       'Bedrooms': getFallbackRoomValue(job?.result?.bedrooms),
       'Bathrooms': getFallbackRoomValue(job?.result?.bathrooms),
-      'Home Type': getFallbackHomeType(job?.result?.homeType)
+      'Home Type': getFallbackHomeType(job?.result?.homeType),
+      'Year Built': normalizeYearBuilt(job?.result?.yearBuilt),
+      'Square Feet': normalizeSquareFeet(job?.result?.squareFeet)
     };
     const customFields = getCustomFieldValueMap(job?.result);
     const labels = [
@@ -4969,7 +5077,7 @@
           <div ${UI_ATTR}="1" style="opacity:.72;">AZ ID</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-ticket">-</div>
           <div ${UI_ATTR}="1" style="opacity:.72;">Address</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-address">-</div>
           <div ${UI_ATTR}="1" style="opacity:.72;">Zillow</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-zillow">-</div>
-          <div ${UI_ATTR}="1" style="opacity:.72;">Fields</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-fields">0/4 saved</div>
+          <div ${UI_ATTR}="1" style="opacity:.72;">Fields</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-fields">0/6 saved</div>
           <div ${UI_ATTR}="1" style="opacity:.72;">Tags</div><div ${UI_ATTR}="1" id="tm-az-zillow-ticket-enricher-tags">0/2 saved</div>
         </div>
         <div ${UI_ATTR}="1" style="margin-bottom:10px;">
