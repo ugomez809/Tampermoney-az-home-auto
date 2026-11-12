@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.31
+// @version      1.4.32
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -2296,6 +2296,7 @@
 
   function normalizeHomeType(value) {
     const text = lower(value).replace(/[_-]/g, ' ');
+    if (text === 'home type unknown') return 'Unknown';
     if (/single\s?family/.test(text)) return 'Single Family';
     if (/multi\s?family/.test(text)) return 'Multi Family';
     return norm(value);

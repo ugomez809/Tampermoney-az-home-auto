@@ -502,6 +502,16 @@ test('unmatched dropdown values preserve the existing selection', async t => {
 
 const azMainFields = '<form id="detailDockform"><div class="row"><select id="unrelated"><option value="keep">Keep</option></select><div class="az-form-group field-customfields-cf55246"><label for="customfields-cf55246">Home Type</label><input type="text" id="customfields-cf55246" name="customFields[cf55246]"></div><div class="form-group"><label for="customfields-cf48147">Home Sqft</label><input type="number" name="customFields[cf48147]"></div><div class="form-group"><label for="customfields-cf48146">Year Built</label><input type="number" name="customFields[cf48146]"></div></div></form>';
 
+test('Zillow unknown home type uses its displayed label and preserves published zero bathrooms', async t => {
+  const data = { property: { zpid: 123, bedrooms: 4, bathrooms: 0, homeType: 'HOME_TYPE_UNKNOWN', yearBuilt: 1989, livingArea: 2000 } };
+  const p = await fixture(t, `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script>`, '', 'https://www.zillow.com/homedetails/example/123_zpid/');
+  assert.deepEqual(await p.evaluate(() => {
+    const result = api.scrapeZillowResult();
+    const pending = api.buildFallbackResult({ result: { homeType: 'HOME_TYPE_UNKNOWN' } });
+    return [result.homeType, result.bathrooms, pending.homeType];
+  }), ['Unknown', '0', 'Unknown']);
+});
+
 for (const selector of ['#unrelated', '.row', '#missing-old-target']) {
   test('AgencyZoom label finds Home Type despite saved target ' + selector, async t => {
     const p = await fixture(t, azMainFields);
