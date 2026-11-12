@@ -106,7 +106,7 @@ test('a failed save stays retryable without webhook or completion', async t => {
     validateZillowAddressInfo = () => ({ ok: true });
     jobMatchesTicket = () => true;
     saveJob({ ticketId: 'TEST', address: 'fixture address', status: 'result-ready', result: { bedrooms: '4' } });
-    window.webhooks = 0; window.completions = 0;
+    window.webhooks = 0; window.completions = 0; window.recoveries = 0; requestBootstrapReload = () => { recoveries++; };
     sendWebhookForJob = async () => { webhooks++; return true; };
     clearJob = () => { completions++; };
   `);
@@ -116,8 +116,19 @@ test('a failed save stays retryable without webhook or completion', async t => {
   }), { running: true, savedRunning: true, jobStatus: 'result-ready', webhooks: 0, completions: 0 });
   assert.deepEqual(await p.evaluate(async () => {
     for (let i = 0; i < 4; i++) await api.tick();
-    return { running: api.state.running, attempts: api.getJob().applyFailureCount, webhooks, completions };
-  }), { running: false, attempts: 3, webhooks: 0, completions: 0 });
+    return { running: api.state.running, attempts: api.getJob().applyFailureCount, recoveries, webhooks, completions };
+  }), { running: true, attempts: 3, recoveries: 1, webhooks: 0, completions: 0 });
+  assert.equal(await p.evaluate(async () => {
+    api.state.recoveryReloadAt = Date.now() - 16000;
+    await api.tick();
+    return recoveries;
+  }), 2);
+  assert.equal(await p.evaluate(async () => {
+    api.state.running = false;
+    api.state.recoveryReloadAt = Date.now() - 16000;
+    await api.tick();
+    return recoveries;
+  }), 2);
 });
 
 test('year and living area survive scraping and fallback without nearby-home contamination', async t => {

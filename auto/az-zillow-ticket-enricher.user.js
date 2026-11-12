@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         13 AUTO AgencyZoom Zillow Ticket Enricher
 // @namespace    autoflow.az-zillow-ticket-enricher
-// @version      1.4.32
+// @version      1.4.33
 // @description  AUTO-only Zillow enricher. It stays on by default, switches AgencyZoom to Ingored v2, opens the next visible ticket, then continues through the Zillow enrichment flow.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -161,6 +161,7 @@
     tabId: getSharedTabId(),
     running: loadRunning(),
     busy: false,
+    recoveryReloadAt: 0,
     zillowTab: null,
     zillowTabJobId: '',
     logs: loadPersistedLogs(),
@@ -4551,7 +4552,11 @@
         saveJob(job);
         if (job.applyFailureCount >= 3) {
           const reason = state.lastStatus;
-          stopAutomation('Paused after 3 unsuccessful ticket attempts: ' + reason + '. Fix the field target or dropdown option, then click START.');
+          log('Recovering after 3 unsuccessful ticket attempts: ' + reason);
+          closeOwnedZillowTab();
+          state.recoveryReloadAt = Date.now();
+          setStatus('Reloading AgencyZoom to retry failed ticket automatically');
+          requestBootstrapReload('ticket-save-recovery');
         }
         return;
       }
@@ -4634,6 +4639,13 @@
       setStatus('Stopped');
       state.lastWrongAzUrl = '';
       renderAll();
+      return;
+    }
+    if (state.recoveryReloadAt) {
+      if (Date.now() - state.recoveryReloadAt >= 15000) {
+        state.recoveryReloadAt = Date.now();
+        requestBootstrapReload('ticket-save-recovery');
+      }
       return;
     }
     if (!isPipelinePage()) {
