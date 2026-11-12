@@ -50,7 +50,8 @@ try {
         exit 0
     }
     if(!$chrome) { throw 'Google Chrome is not installed.' }
-    $node=(Get-Command node.exe -ErrorAction SilentlyContinue).Source
+    $node=Join-Path $runtime 'Node\node.exe'
+    if(!(Test-Path -LiteralPath $node)) { $node=(Get-Command node.exe -ErrorAction SilentlyContinue).Source }
     if(!$node) { throw 'Install Node.js 24 LTS from https://nodejs.org/ then rerun setup.' }
     $major=[int]((& $node --version).TrimStart('v').Split('.')[0])
     if($major -lt 22) { throw 'Node.js 22 or newer is required; install Node.js 24 LTS.' }

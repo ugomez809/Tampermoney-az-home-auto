@@ -2,7 +2,15 @@
 
 Use this package on the other PC. It does not install a task on the PC where the package was prepared.
 
-## One-time setup
+## One-file installer (recommended)
+
+Download [install-agencyzoom-watchdog.cmd](https://raw.githubusercontent.com/ugomez809/Tampermoney-az-home-auto/main/bundles/install-agencyzoom-watchdog.cmd) and double-click it under your normal Windows account. Chrome must already be installed.
+
+The installer downloads a checksum-verified watchdog release, installs a private Node.js 24 runtime from nodejs.org, and stores everything under `%LOCALAPPDATA%\AgencyZoomWatchdog`. No system PATH changes or administrator account are needed. It opens the dedicated Chrome and a setup guide. Sign in, install Tampermonkey and the userscript using that guide, then press ENTER in the installer to create the scheduled task. Browser permissions, sign-in, and the script's field/tag configuration cannot be silently transferred from your other profile.
+
+It pauses any existing watchdog during setup. Rerunning finishes an interrupted installation without deleting your Chrome profile. Start menu shortcuts open the automation browser or remove the task. `setup.log` records installation results. Downloads use SHA-256 verification; the watchdog release is pinned to an immutable Git commit.
+
+## Manual setup (alternative)
 
 1. Install Google Chrome and [Node.js 24 LTS](https://nodejs.org/). Node 22+ works; no npm packages are needed.
 2. Extract this entire folder to a permanent location such as `Documents\AgencyZoomWatchdog`. Do not run it from inside the ZIP or move it after installing the task.
