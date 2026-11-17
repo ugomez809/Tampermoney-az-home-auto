@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AgencyZoom Ticket Finisher + Tagger
 // @namespace    homebot.az-ticket-finisher-tagger
-// @version      1.0.61
+// @version      1.0.64
 // @description  Reads the mirrored GWPC final payload in AgencyZoom, clicks Main, fills ticket fields, clicks Update, adds a pinned note, applies the correct tag, and marks the ticket complete.
 // @match        https://app.agencyzoom.com/*
 // @match        https://app.agencyzoom.com/referral/pipeline*
@@ -28,7 +28,7 @@
   try { window.__AZ_TICKET_FINISHER_TAGGER_CLEANUP__?.(); } catch {}
 
   const SCRIPT_NAME = 'AgencyZoom Ticket Finisher + Tagger';
-  const VERSION = '1.0.59';
+  const VERSION = '1.0.64';
   const UI_ATTR = 'data-tm-az-finisher-ui';
   const CLEANUP_REQUEST_KEY = 'tm_az_workflow_cleanup_request_v1';
   const FINISHER_CLOSE_SIGNAL_KEY = 'tm_az_finisher_ticket_closed_signal_v1';
@@ -790,7 +790,7 @@
     if (!since) return { active: false, ready: false };
 
     const elapsedMs = Math.max(0, Date.now() - since);
-    const ready = elapsedMs >= CFG.payloadMismatchFailMs;
+    const ready = state.rejectedFinalPayloadReason !== 'payload predates current run' && elapsedMs >= CFG.payloadMismatchFailMs;
     if (ready && state.rejectedFinalPayloadTriggeredKey !== state.rejectedFinalPayloadKey) {
       state.rejectedFinalPayloadTriggeredKey = state.rejectedFinalPayloadKey;
       log(`Rejected final payload held for ${Math.round(elapsedMs / 1000)}s; running failed path for open ticket ${openId} | ${state.rejectedFinalPayloadReason}`);
@@ -885,7 +885,7 @@
   function getNormalizedWorkflowFields(fields) {
     const normalized = {};
     for (const label of FIELD_ORDER) {
-      const value = formatFieldValue(label, fields?.[label] || '');
+      const value = formatFieldValue(label, fields?.[label] ?? '');
       if (value) normalized[label] = value;
     }
     return normalized;
@@ -1363,6 +1363,7 @@
     const payloadSavedMs = getPayloadSavedMs(payload);
     const currentJob = getBestCurrentJobForAz(cleanAzId);
     const currentJobMs = getCurrentJobUpdatedMs(currentJob);
+    const runStartedMs = Math.max(currentJobMs, state.openTicketId === cleanAzId ? Number(state.openTicketOpenedAt || 0) : 0);
 
     if (!readyLike || readyLike.ready !== true) {
       return { ok: false, reason: 'final ready flag missing', payloadSavedMs, readySavedMs, currentJobMs };
@@ -1372,13 +1373,17 @@
       return { ok: false, reason: `final ready flag belongs to AZ ${readyAzId}`, payloadSavedMs, readySavedMs, currentJobMs };
     }
 
+    if (runStartedMs && (!payloadSavedMs || payloadSavedMs + CFG.stalePayloadSlackMs < runStartedMs)) {
+      return { ok:false, reason:'payload predates current run', payloadSavedMs, readySavedMs, currentJobMs };
+    }
+
     return {
       ok: true,
       currentJob,
       currentJobMs,
       payloadSavedMs,
       readySavedMs,
-      minSavedMs: 0
+      minSavedMs: runStartedMs
     };
   }
 
@@ -1583,6 +1588,7 @@
     if (!azId) return null;
 
     const payload = isPlainObject(options.payload) ? options.payload : {};
+    const matchingJob = norm(payload.currentJob?.['AZ ID'] || '') === azId ? payload.currentJob : {};
     const homeChoice = options.homeChoice || {};
     const homeRaw = isPlainObject(homeChoice.raw) ? homeChoice.raw : {};
     const home = unwrapProductPayload(homeRaw);
@@ -1603,12 +1609,13 @@
       homeRaw.submissionNumber,
       home.submissionNumber,
       home.currentJob?.SubmissionNumber,
-      payload.bundle?.home?.submissionNumber
+      payload.bundle?.home?.submissionNumber,
+      matchingJob.SubmissionNumber
     );
 
     const accountNumber = pickFirst(
-      payload.currentJob?.['Account Number'],
-      payload.currentJob?.AccountNumber,
+      matchingJob['Account Number'],
+      matchingJob.AccountNumber,
       payload.bundle?.['Account Number'],
       payload.bundle?.AccountNumber,
       homeRaw['Account Number'],
@@ -1918,59 +1925,18 @@
 
   function resolveEditableTarget(baseEl) {
     if (!(baseEl instanceof Element)) return null;
-    const selectors = [
-      'input:not([type="hidden"]):not([disabled])',
-      'textarea:not([disabled])',
-      'select:not([disabled])',
-      '[contenteditable="true"]',
-      '[role="textbox"]',
-      '.editable-container input:not([type="hidden"]):not([disabled])',
-      '.editable-container textarea:not([disabled])',
-      '.editable-container select:not([disabled])',
-      '.editableform input:not([type="hidden"]):not([disabled])',
-      '.editableform textarea:not([disabled])',
-      '.editableform select:not([disabled])',
-      '.popover input:not([type="hidden"]):not([disabled])',
-      '.popover textarea:not([disabled])',
-      '.popover select:not([disabled])'
-    ].join(', ');
+    const selectors = 'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled]), [contenteditable="true"], [role="textbox"]';
+    if (baseEl.matches(selectors)) return baseEl;
+    if (baseEl.tagName === 'LABEL' && baseEl.control?.matches(selectors)) return baseEl.control;
 
-    const candidates = [];
-    const add = (el) => {
-      if (el && el instanceof Element && !candidates.includes(el)) candidates.push(el);
-    };
-    const group = baseEl.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control');
-    const bootstrapSelect = baseEl.closest('.bootstrap-select') || group?.querySelector?.('.bootstrap-select');
-
-    try { baseEl.matches(selectors) && add(baseEl); } catch {}
-    try { baseEl.querySelectorAll(selectors).forEach(add); } catch {}
-    try { group?.querySelectorAll(selectors).forEach(add); } catch {}
-    try { baseEl.parentElement?.querySelectorAll(selectors).forEach(add); } catch {}
-    try { bootstrapSelect?.parentElement?.querySelectorAll('select:not([disabled])').forEach(add); } catch {}
-    try { document.querySelectorAll('.editable-container input:not([type="hidden"]):not([disabled]), .editable-container textarea:not([disabled]), .editable-container select:not([disabled]), .editableform input:not([type="hidden"]):not([disabled]), .editableform textarea:not([disabled]), .editableform select:not([disabled]), .popover input:not([type="hidden"]):not([disabled]), .popover textarea:not([disabled]), .popover select:not([disabled])').forEach(add); } catch {}
-    try {
-      const active = document.activeElement;
-      if (active instanceof Element && (active === baseEl || baseEl.contains(active) || active.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select, .form-control') === group)) {
-        add(active);
-      }
-    } catch {}
-
-    const score = (el) => {
-      if (!(el instanceof Element)) return -1;
-      let points = 0;
-      if (el instanceof HTMLSelectElement) points += 8;
-      else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) points += 7;
-      else if (el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') points += 6;
-      else points += 1;
-      if (visible(el)) points += 3;
-      if (el === document.activeElement) points += 5;
-      if (el !== baseEl) points += 2;
-      if (bootstrapSelect && (bootstrapSelect.contains(el) || el.closest('.bootstrap-select') === bootstrapSelect)) points += 2;
-      if (el.closest('.editable-container, .editableform, .popover')) points += 4;
-      return points;
-    };
-
-    return candidates.sort((a, b) => score(b) - score(a))[0] || baseEl;
+    const group = baseEl.closest('.form-group, .form-row, .row, .col, td, tr, label, .input-group, .bootstrap-select');
+    for (const scope of [baseEl, group]) {
+      const candidates = Array.from(scope?.querySelectorAll(selectors) || []);
+      if (candidates.length === 1) return candidates[0];
+      // Never guess between neighboring fields or unrelated open editors.
+      if (candidates.length > 1) return null;
+    }
+    return null;
   }
 
   function dispatchFieldEvents(target) {
@@ -2027,6 +1993,7 @@
     if (!base) return { ok: false, reason: 'saved field target not found' };
 
     const nextValue = norm(value);
+    if (!nextValue) return { ok: false, reason: 'blank replacement skipped' };
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try { strongClick(base); } catch {}
@@ -2044,20 +2011,23 @@
       }
 
       if (target instanceof HTMLSelectElement) {
-        const options = Array.from(target.options || []);
+        const options = Array.from(target.options || []).filter(opt => !opt.disabled && norm(opt.value));
         let match = options.find((opt) => lower(opt.textContent || '') === lower(nextValue) || lower(opt.value || '') === lower(nextValue));
         if (!match && nextValue) {
-          match = options.find((opt) => lower(opt.textContent || '').includes(lower(nextValue)) || lower(nextValue).includes(lower(opt.textContent || '')));
+          match = options.find((opt) => lower(opt.textContent || '').includes(lower(nextValue)) || (norm(opt.textContent) && lower(nextValue).includes(lower(opt.textContent))));
         }
-        target.value = match ? match.value : '';
-        if (match) match.selected = true;
+        if (!match) return { ok: false, reason: 'no matching option; existing value preserved' };
+        if (target.value === match.value) return { ok: true, changed: false };
+        target.value = match.value;
+        match.selected = true;
         try { target.setAttribute('value', target.value); } catch {}
         dispatchFieldEvents(target);
       } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        const probe = target.cloneNode(false);
+        probe.value = nextValue;
+        if (!norm(probe.value)) return { ok: false, reason: 'invalid replacement; existing value preserved' };
         try { target.focus({ preventScroll: true }); } catch {}
-        setNativeValue(target, '');
-        try { target.setAttribute('value', ''); } catch {}
-        dispatchFieldEvents(target);
+        if (verifyFieldValue(target, nextValue)) return { ok: true, changed: false };
         setNativeValue(target, nextValue);
         try { target.setAttribute('value', nextValue); } catch {}
         dispatchFieldEvents(target);
@@ -3049,7 +3019,7 @@
     let changed = false;
 
     for (const label of FIELD_ORDER) {
-      const rawValue = norm(data.fields[label] || '');
+      const rawValue = norm(data.fields[label] ?? '');
       const value = formatFieldValue(label, rawValue);
       if (!value) {
         log(`Skipped blank field: ${label}`);
@@ -3059,15 +3029,15 @@
       const result = await setFieldValue(targets[label], value);
       if (result.ok) {
         log(`Filled field: ${label} = ${value || '(blank)'}${rawValue && rawValue !== value ? ` (from ${rawValue})` : ''}`);
-        changed = true;
+        changed = changed || result.changed !== false;
       } else {
         log(`Field failed: ${label} | ${result.reason} | wanted ${value || '(blank)'}`);
       }
       await sleep(CFG.bigActionDelayMs);
     }
 
-    const updateOk = await clickUpdateButton();
-    if (!updateOk) {
+    const updateOk = changed ? await clickUpdateButton() : false;
+    if (changed && !updateOk) {
       log('Update step failed, continuing');
     }
 
